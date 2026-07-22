@@ -1,0 +1,24 @@
+# Compiled binaries
+/bin/
+*.exe
+*.out
+
+# Test & coverage artifacts
+*.test
+coverage.out
+coverage.html
+
+# Runtime data directory (per-workflow history files)
+/data/
+
+# Local environment
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code local state (never commit)
+.claude/

@@ -1,0 +1,589 @@
+# Session Log
+
+Append-only log of working sessions. Newest first. Each entry: date, what changed,
+what's next, gotchas. Keep it terse — this is the breadcrumb trail across sessions/machines.
+
+---
+
+## 2026-07-12 — Session 11: Observability — /metrics + visibility API (Phase 3, Week 9)
+
+The engine can now be *watched* and *operated*: Prometheus metrics on an HTTP
+endpoint, and a visibility API (List / Get / Terminate) over gRPC. Both stay
+true to the zero-dependency stance — the metrics registry and text-format
+renderer are hand-rolled stdlib (`internal/metrics`), no client_golang.
+
+**Done:**
+- **`internal/metrics`** — dependency-free Prometheus text-format (v0.0.4)
+  registry: `Counter`, `CounterVec` (labelled children, sorted + escaped
+  output), `Gauge`, `GaugeFunc` (read at scrape, e.g. queue depth),
+  `Histogram` (cumulative buckets, `DefBuckets` extended to 60s). `Handler()`
+  serves it over HTTP. Exact-render + `-race` concurrency tests.
+- **Engine instrumentation** (`internal/server/metrics.go` + call sites):
+  `workflowd_workflows_started_total`, `_finished_total{status=completed|failed|terminated}`,
+  `_workflows_active` (gauge; re-seeded by `Recover`), `_tasks_dispatched_total`,
+  `_task_results_total{result}`, `_leases_expired_total`, `_retries_scheduled_total`,
+  `_signals_received_total`, `_timers_fired_total`, `_task_queue_depth` (GaugeFunc
+  over `len(chan)`), `_step_duration_seconds` histogram (lease grant → worker
+  result; `lease.claimedAt` added). Counters increment at the exact point the
+  matching event is durably appended, so /metrics agrees with a replay.
+- **Visibility API** (`internal/server/visibility.go`, 3 new RPCs):
+  - `ListWorkflows(status_filter)` → summaries (id, type, status, started/updated
+    timestamps, error, history length), sorted by id. Full scan of the data dir —
+    honest O(n) debt, noted below. A workflow whose log is unreadable/invalid is
+    returned with `UNSPECIFIED` + the error, never silently hidden.
+  - `GetWorkflow(id)` → summary + per-step detail (name/seq/kind/status/attempts/
+    error/output/fire_at/signal) straight from `Reconstruct`. Unknown id → NotFound.
+  - `TerminateWorkflow(id, reason)` → appends `WorkflowFailed{terminated:true,
+    error:"terminated by operator: …"}` under `e.mu`, drops the lease (zombie
+    fencing: an in-flight worker's late CompleteTask is rejected — teeth-verified
+    in a test), leftover timers no-op via existing stale-fire guards. Terminal →
+    FailedPrecondition; unknown → NotFound.
+- **Proto:** `WorkflowFailedEvent` +`terminated` flag (state machine surfaces it
+  as `State.Terminated`; API presents it as status `TERMINATED`, on-disk it is
+  still a FAILED terminal event — no new state-machine states). New
+  `WorkflowStatus` enum + `WorkflowSummary`/`StepInfo` messages. Regenerated.
+- **`workflowd --serve`**: new `--metrics-addr` flag (default `:9090`, empty
+  disables); /metrics on its own `net/http` server, shut down alongside gRPC.
+  Smoke-tested live: booted the daemon, scraped all 11 families via curl.
+- **Tests:** 4 new end-to-end (list+get+filter, terminate semantics, terminate
+  fences an in-flight worker, metrics scrape after real traffic) + 7 metrics
+  unit tests. Harness now exposes the Engine for registry access.
+
+**State:** `make ci` ✅ (fmtcheck · vet · build · `go test ./... -race` all green).
+
+**Next:** Week 10 — embedded web dashboard (`go:embed`), which consumes exactly
+what this session built (visibility RPCs + metrics). Backlog unchanged:
+O(n²) global-lock ceiling, `CronSchedule`, buf adoption. First git commit still
+pending — repo has full history in docs only.
+
+**Gotchas:**
+- `vet` rejects any method named `WriteTo(io.Writer)` that doesn't match the
+  `io.WriterTo` signature — hence `Registry.WriteText`.
+- `ListWorkflows`/`GetWorkflow` deliberately do NOT take `e.mu` — the history
+  store has its own lock and reads see only fsync'd records, so visibility can
+  never stall the decision loop. `TerminateWorkflow` DOES take `e.mu` (it
+  mutates history + leases).
+- Metric increments live inside the same `e.mu` critical section as the append
+  they describe, but a test polling the store can observe the event a hair
+  before the counter — scrape assertions poll with a deadline (see
+  `TestMetricsEndToEnd`), don't assert one instant snapshot.
+- A terminated workflow leaves its in-flight step SCHEDULED in history forever
+  (same shape as timeout-failure); `Reconstruct` allows `WorkflowFailed` with a
+  step open — that asymmetry (vs `WorkflowCompleted`) is load-bearing here.
+
+---
+
+## 2026-07-12 — Session 10: Leases & heartbeats (Phase 3, Week 8)
+
+Phase 3 begins. Every dispatched task now carries a **lease** — a time-boxed,
+token-proven claim — and a dead worker's task is **reassigned** instead of
+stranding the workflow. This closes the worker-crash-stranding debt that has been
+logged since Session 5: the engine is now worker-crash-safe, not just
+engine-crash-safe.
+
+**The model:** `PollTask` grants a lease at dispatch — a random 128-bit token
+(stamped on the `Task` the worker receives, with `lease_duration_ms`) and a
+deadline (`now + leaseDuration`, default 30s, `WithLeaseDuration` to tune).
+`CompleteTask` must present the current token; a new `Heartbeat` RPC extends the
+deadline for long-running activities. If the lease expires unheartbeated, the
+reaper records `StepFailed("lease expired: worker …")` and hands the failure to
+the **existing Week-7 retry machinery** — attempts remaining ⇒ backoff +
+re-dispatch to the next poller; exhausted ⇒ the workflow sees the error (and can
+compensate). No new `Reconstruct`/state logic at all: a dead worker is just a
+failed attempt.
+
+**Done:**
+- **Proto:** `Task` +`lease_token` +`lease_duration_ms`; `CompleteTaskRequest`
+  +`lease_token`; new `Heartbeat` RPC (`HeartbeatRequest{workflow_id,
+  lease_token, worker_id}`). Regenerated.
+- **`internal/server/lease.go`** (new): `lease` struct (workflow/step/seq/worker/
+  token/deadline), `claimLocked` (mint token, arm expiry timer), `Heartbeat`
+  (extend deadline; reject unknown/stale token — the worker's cue to abandon the
+  work), `checkLeaseLocked`, and `onLeaseExpired` — the reaper. Leases are
+  **ephemeral** like the queue (map keyed by workflow id; one in-flight step ⇒
+  one lease per workflow); the durable fact is the scheduled step, and an engine
+  restart drops all leases and re-enqueues for fresh claims (Wk4 recovery,
+  unchanged).
+- **Reaper self-correction:** expiry fires act on *current* lease state under
+  the engine mutex — lease gone ⇒ no-op; deadline moved (heartbeat, or a newer
+  lease on the same step's retry) ⇒ re-arm at the new deadline; actually expired
+  ⇒ reclaim. A heartbeat that lands after the deadline but before the reaper
+  still rescues the lease. Third `timer.Service` (`leaseTimers`), stopped by
+  `Close()`.
+- **Zombie fencing:** `CompleteTask` validates the token before touching
+  history, and releases the lease when a result is recorded. A worker whose
+  lease expired (task reassigned) is rejected cleanly — two workers can never
+  both record a result for the same attempt.
+- **Engine options:** `NewEngine(store, logger, opts...)` — functional-options
+  pattern; `WithLeaseDuration(d)`. All existing call sites unchanged.
+- **Tests** (`lease_test.go` + gRPC `TestHeartbeatRPC`): expiry → reassignment
+  to a healthy worker → COMPLETED with `Attempts==2` + zombie CompleteTask
+  rejected + `StepFailed("lease expired")` audit trail in history; expiry with
+  no retry policy → workflow FAILED naming the worker (explicit, not stranded);
+  heartbeats keep a task alive across 3× the lease window (no-retry def gives it
+  teeth); stale-token heartbeat rejected; Heartbeat RPC round-trip.
+  **Teeth-verified:** disabling the reaper makes all three expiry tests fail —
+  the healthy worker never gets the task (the old stranding behaviour).
+
+**Scoped out (deliberately):** sticky queues / worker affinity from the Wk8
+line. Sticky queues optimize *worker-side replay caches* (Temporal keeps
+workflow state warm on one worker); our workers are stateless activity
+executors — all replay happens on the engine — so there is nothing to stick to.
+Revisit if workers ever cache workflow state (Phase 5 SDK).
+
+**State:** `make ci` ✅ (fmtcheck · vet · build · test -race) · serve smoke ✅ ·
+reaper teeth-verified.
+
+**Next:** Phase 3 / Week 9 — observability: Prometheus `/metrics`, visibility
+API (List/Get/Terminate). slog structured logging is already in place. Still
+open: O(n²) global-lock/full-ReadAll ceiling (per-workflow locks + state
+cache), `CronSchedule` (deferred from Wk5).
+
+**Gotchas:**
+- A lease-expiry failure **consumes an attempt** (records `StepFailed` with the
+  current attempt count). Steps whose workers might die mid-run need
+  `MaxAttempts > 1` — with the default no-retry policy, one dead worker fails
+  the workflow (explicitly, with a "lease expired" error naming the worker).
+  This is deliberate: durable, auditable, and a task that crashes its workers
+  can't loop forever.
+- The lease map is keyed by **workflow id** (valid while the engine is
+  one-step-in-flight-per-workflow). Parallel steps within a workflow (Phase 5)
+  will need `workflow_id/sequence` keys.
+- Heartbeat does **not** arm a new timer — the pending expiry fire notices the
+  extended deadline and re-arms (lazy re-arm). Stale fires from superseded
+  leases are harmless no-ops.
+- There are now **three** timer services (Sleep steps, retry backoffs, lease
+  expiries); all stopped by `Engine.Close()`.
+
+---
+
+## 2026-07-02 — Session 9: Retries & Saga/compensation (Phase 2, Week 7 — PHASE 2 COMPLETE)
+
+Failed activities now retry automatically with backoff, and workflows can compensate
+(Saga) on failure. This completes Phase 2 — the engine has the full durable-execution
+feature set: crash recovery, timers, signals, replay, retries, and compensation.
+
+**Done:**
+- **Retries (engine-level, transparent).** `RetryPolicy{MaxAttempts, Backoff,
+  MaxBackoff}` (`internal/server/retry.go`), registered per activity via
+  `SetRetryPolicy(stepName, policy)` (default: no retry). On an activity failure,
+  `CompleteTask` records `StepFailed` (with `retry_count`) and, if attempts remain,
+  arms a **backoff timer on a second `timer.Service`** (`retryTimers`) instead of
+  advancing; the workflow never sees the transient error. `onRetryDue` re-schedules
+  the **same sequence** (another attempt) and re-dispatches. Backoff is exponential,
+  capped at `MaxBackoff`. Exhausted → advance (workflow sees the error / fails).
+- **Multi-attempt steps in `Reconstruct`.** A `StepScheduled` at the *same* sequence
+  as a failed activity re-opens that step (another attempt) rather than appending a
+  new one; `state.Step` gained `Attempts`. So a retried activity stays one logical
+  step — which keeps the replay engine's one-call-one-step mapping intact.
+- **Retries survive restart.** Recovery's RUNNING branch: a failed activity with
+  attempts left (engine died during the backoff window) re-arms the retry promptly
+  (the in-memory backoff timer is gone; the failure + attempt count are in history).
+- **Saga/compensation** — no new machinery: a failed `ExecuteActivity` returns a Go
+  `error` the workflow catches and responds to by running compensating activities.
+  `orderSaga` demo in `cmd/workflowd` (reserve → sleep → charge[retry×3] → ship; on
+  charge failure, release + fail with a wrapped error), registered in `--serve`.
+- **Tests:** retry-then-succeed (fails 2×, 3rd wins; `Attempts==3`); retry-exhausted
+  → workflow FAILED after exactly `MaxAttempts` runs; Saga compensation (charge fails
+  → release runs → FAILED with wrapped error, history = reserve✓/charge✗/release✓);
+  retry-survives-restart; plus a `Reconstruct` retry unit test.
+
+**State:** `make ci` ✅ (fmtcheck · vet · build · test -race) · `gofmt` clean · `--demo`
+smoke ✅. **Phase 2 complete.**
+
+**Next:** Phase 3 / Week 8 — multi-worker & failure handling: worker identity,
+heartbeats, **lease tokens / visibility timeout** (this finally closes the
+worker-crash-stranding debt — a dead worker's task gets reassigned), sticky queues.
+Then Wk9 observability (metrics, visibility API) and Wk10 the embedded dashboard.
+Also still open: the O(n²) global-lock/full-ReadAll ceiling (per-workflow locks +
+state cache) and `CronSchedule` (deferred from Wk5).
+
+**Gotchas:**
+- Retries re-use the **same sequence** (multi-attempt), *not* a new one — that's what
+  keeps the replay counter aligned (one `ExecuteActivity` call ↔ one step, regardless
+  of attempts). A new-sequence retry would desync replay.
+- There are now **two** timer services (Sleep steps vs. retry backoffs); both are
+  stopped by `Engine.Close()`. Backoff timers are ephemeral — the durable fact is
+  "failed activity with attempts remaining," which recovery re-derives.
+- Retry policy is keyed by **step name** (Phase-2 simplification; ambiguous across
+  workflows sharing a step name). Per-call activity options are Phase 5.
+
+---
+
+## 2026-07-02 — Session 8: Deterministic replay engine (Phase 2, Week 6)
+
+The headline Phase-2 feature: a workflow can now be written as an **ordinary Go
+function** whose execution is deterministically replayed against history to drive it
+durably. "Write normal-looking Go, get durability."
+
+**The replay model:** a workflow func calls `ctx.ExecuteActivity/Sleep/WaitForSignal`.
+To decide the next action, the engine *re-runs the function from the top* against the
+current history. Each call is a fast lookup: if the step's result is recorded, return
+it (replay); if the step is in flight, block; if the step isn't in history yet, this
+is the next action — emit the decision and unwind. Yield is a `panic(yield{decision})`
+recovered by the driver; a normal function return means complete (or fail, if it
+returns an error).
+
+**Done:**
+- **`sdk` package** (was a placeholder): `Context` (`ExecuteActivity`, `Sleep`,
+  `WaitForSignal`, `Input`), `WorkflowFunc`, and `Workflow{Type, Fn}` whose
+  `Decide(events) (state.Decision, error)` *is* the replay engine. A `replayContext`
+  walks steps by a call counter; **determinism is enforced** — if the code issues a
+  different step (kind or name) than history recorded at that position, Decide returns
+  a `non-determinism` error instead of corrupting state. Data flow between steps is
+  expressed in the Go code itself (no engine auto-chaining).
+- **`Planner` seam** (`internal/server`): new interface `Decide(events) →
+  state.Decision`. Both `state.WorkflowDefinition` (added a `Decide` method wrapping
+  package `Decide`) and `sdk.Workflow` satisfy it. Engine now holds
+  `map[string]Planner`; `Register(def)` keeps working, new `RegisterWorkflow(type,
+  Planner)` accepts code-based workflows. `advanceLocked` takes a `Planner` and calls
+  `planner.Decide` — **unchanged decision-application code** drives either model.
+- **Step kind moved into history** so runtime needs no definition: `StepScheduledEvent`
+  gained `awaits_signal`/`signal_name`; `state.Step` gained `Kind` and `Signal`,
+  reconstructed from the opening event (`TimerStarted`→timer, `StepScheduled`+flag
+  →signal, else activity). Recovery's WAITING branch and `deliverableSignal` now read
+  `tail.Kind`/`tail.Signal` — **no `def` lookups** — so recovery, timers, and signal
+  delivery work identically for code-based workflows.
+- **Tests:** sdk unit (in-order decisions, in-flight NOOP, activity-error →
+  FAIL, **non-determinism detected**, replay is pure). Engine e2e: a code workflow
+  (activity → Sleep → WaitForSignal → activity) runs to completion, with the ship
+  step's input *composed by the workflow code* and step kinds read from history; and
+  the same workflow **survives a restart** (recovered mid-timer, finishes).
+
+**State:** `make ci` ✅ (fmtcheck · vet · build · test -race) · `gofmt` clean.
+
+**Next:** Phase 2 / Week 7 — retry policies (backoff) + Saga/compensation + an
+order-flow demo. The replay model already supports compensation naturally: a failed
+`ExecuteActivity` returns an error the workflow can catch and respond to by running
+compensating activities. Retries need a policy + a `retry_count` on scheduling and a
+backoff timer between attempts.
+
+**Gotchas:**
+- Replay re-runs the workflow function on **every** decision, so workflow code must be
+  deterministic and side-effect-free except via `ctx` (no `time.Now`/`rand`/IO, and
+  avoid `defer` with side effects — it runs each replay). This is the determinism
+  contract; the enforcement catches step-level divergence, not arbitrary impurity.
+- Yield uses `panic`/`recover` with a private `yield` type; a *real* panic in workflow
+  code is re-raised, not swallowed.
+- The `Planner` interface is satisfied structurally, so `sdk` does **not** import
+  `server` (no cycle): `server` defines `Planner`, `sdk.Workflow` just has a matching
+  `Decide` method. Callers wire them together.
+
+---
+
+## 2026-07-02 — Session 7: Durable timers & signals (Phase 2, Week 5)
+
+Phase 2 begins. Workflows can now **sleep** and **wait for external events**, both
+durably: a timer armed before a crash still fires after restart, and a signal that
+arrives before its wait is buffered and delivered when the wait is reached.
+
+**Model change (the enabler):** `WorkflowDefinition.Steps` went from `[]string` to
+`[]state.StepDef`, a typed step that is an activity, a timer, or a signal wait.
+Constructors: `state.Activity(name)`, `state.Sleep(name, dur)`,
+`state.AwaitSignal(name, signal)`, and `state.Activities(names...)` for the common
+all-activities pipeline. All existing call sites migrated to `Activities(...)`; the
+zero value is an activity, so nothing else changed semantically.
+
+**Done:**
+- **Proto** (`event.proto`): three new events — `TimerStartedEvent` (step, sequence,
+  `fire_at` unix-nanos, `input` carried through), `TimerFiredEvent`,
+  `SignalReceivedEvent` (name, payload). `service.proto`: new `SignalWorkflow` RPC +
+  messages. Regenerated (`make proto`, reproducible).
+- **`internal/state`**: `StepKind` (Activity/Timer/Signal) + `StepDef` + constructors.
+  `Reconstruct` folds the new events — timer steps open via `TimerStarted` (carrying
+  `FireAt` for recovery) and close via `TimerFired` (output = input, a sleep makes no
+  new data); signals accumulate into `State.Signals` (buffered, in arrival order).
+  `Decide` gained `DecideStartTimer` (returns a `Delay`; the absolute deadline is
+  computed by the impure caller, keeping Decide clock-free) and `DecideAwaitSignal`.
+- **`internal/timer`** (new): min-heap (`container/heap`) `Service` with one
+  goroutine that sleeps until the earliest deadline via `time.After`, then fires all
+  due timers. Ephemeral like the queue; durability is the log. Tests: fires in
+  deadline order, an already-expired timer (the recovery case) fires promptly, and
+  adding an earlier deadline wakes the loop.
+- **`internal/server`**: engine owns a `timer.Service` (started in `NewEngine`,
+  stopped by new `Engine.Close()`). `advanceLocked` handles `DecideStartTimer`
+  (record `TimerStarted` with `now+Delay`, arm the timer — no worker task) and
+  `DecideAwaitSignal` (record a task-less `StepScheduled`, then try to deliver a
+  buffered signal). `onTimerFired` records `TimerFired` + advances (with a
+  still-waiting guard, so a stale fire is a no-op). `SignalWorkflow` records
+  `SignalReceived` then delivers; `deliverableSignal` matches the k-th wait for a
+  name to the k-th received signal (correct buffering). **Recovery re-arms timers**
+  from the durable `FireAt` and re-tries buffered signal delivery, alongside the
+  activity re-enqueue from Week 4. gRPC `SignalWorkflow` handler added.
+- **Tests:** durable sleep runs to completion; **timer survives restart**
+  (teeth-verified — remove the recovery re-arm and the workflow never resumes);
+  signal delivered to a waiting workflow (gRPC); signal buffered before the wait;
+  signalling a terminal workflow is `FailedPrecondition`. Plus state + timer units.
+
+**State:** `make ci` ✅ (fmtcheck · vet · build · test -race) · `gofmt` clean ·
+timer-restart teeth-verified.
+
+**Scoped out (deliberately):** `CronSchedule` from the Week-5 line is deferred — it's
+a thin layer on the timer service (fire → start a fresh run on a schedule) and is
+cleaner to add after the Phase-2 replay engine lands. Logged, not forgotten.
+
+**Next:** Phase 2 / Week 6 — the deterministic replay engine: replace the
+`[]StepDef` data plan with a real Go workflow function whose execution *is* replayed
+against history, and enforce determinism constraints (no wall clock / rand / bare
+goroutines inside workflow code). The events, `Reconstruct`, and `Decide` built so
+far stay; only the "where do the steps come from" layer changes.
+
+**Gotchas:**
+- `Decide` stays **pure / clock-free**: a timer decision carries a `Delay`, and the
+  engine (not Decide) turns it into an absolute `fire_at` at record time. Recording
+  the absolute deadline (not the duration) is what lets recovery re-arm correctly.
+- Signal waits are steps with **no worker task**: they record a `StepScheduled` (so
+  status is WAITING) but enqueue nothing; they complete via `SignalWorkflow`/buffer,
+  recorded as a normal `StepCompleted`. So `Reconstruct` needs no signal-specific
+  step logic — only the engine distinguishes them, via the definition's `StepKind`.
+- Every `NewEngine` starts a timer goroutine — tests must `Engine.Close()` (added to
+  the harness/`newTestEngine` cleanups) or leak it.
+
+---
+
+## 2026-07-01 — Session 6: Crash recovery & The Kill Test (Phase 1, Week 4)
+
+The Phase-1 finale: the engine now rebuilds its runtime state from disk on startup
+and survives an uncatchable `SIGKILL`. This completes Phase 1 — a single-node,
+crash-safe durable engine.
+
+**Done:**
+- **`HistoryStore.ListWorkflows()`** (`internal/history/store.go`) — enumerates every
+  `*.history` file in the data dir and returns the workflow ids. The data dir is the
+  durable index recovery scans; non-`.history` files (sentinels, temp) are ignored.
+  Extracted the `.history` suffix into a `historyExt` const so listing and pathing
+  agree. Test `TestListWorkflows` (finds exactly the logged workflows, ignores a
+  stray file, empty on a fresh dir).
+- **`Engine.Recover()`** (`internal/server/engine.go`) — startup replay. Scans all
+  workflows, `Reconstruct`s each, and puts non-terminal ones back:
+  - **WAITING** (a step was in flight when we died): re-enqueue the in-flight step so
+    a worker picks it up. At-least-once — if the worker had actually finished but the
+    result never got recorded, the step re-runs. Phase 1 is engine-crash-safe, not
+    exactly-once.
+  - **RUNNING** (crashed mid-decision: result recorded, next step not yet scheduled,
+    or first step never scheduled): `advanceLocked` makes the next decision.
+  - Terminal / not-started / **unregistered type**: skipped (an unregistered type is
+    logged and left on disk, not a startup failure). Completed steps never re-run —
+    `Decide` derives the next action from history, which already records them done.
+  Wired into `cmd/workflowd` `runServe`: `Recover()` runs after `Register`, before
+  the listener accepts traffic.
+- **The Kill Test** (`internal/server/kill_test.go`) — the Week-4 deliverable, using
+  the Go **re-exec pattern**. A child process (`TestKillHelperVictim`, guarded by an
+  env var, skipped in normal runs) starts a 5-step workflow, drives it to WAITING at
+  step 3, writes a ready sentinel, and blocks. The parent `SIGKILL`s it (no defer, no
+  graceful shutdown), reopens a fresh engine over the same data dir, asserts the kill
+  left WAITING/step3 on disk, `Recover()`s, and drives steps 3–5 home. Asserts:
+  final COMPLETED, output `done:step5`, exactly 12 events (started + 5×(sched+done) +
+  completed — **no duplicate steps**), every step completed once in order.
+  **Verified it has teeth:** disabling the WAITING re-enqueue makes the workflow stall
+  at step 3 and the test fail (`did not terminate within 8s`).
+- Recovery unit tests (`internal/server/recover_test.go`, no gRPC — engine directly):
+  re-enqueues a WAITING step, advances a RUNNING one (and appends the next
+  StepScheduled), skips a terminal workflow, skips an unregistered type without error.
+
+**State:** `make ci` ✅ (fmtcheck · vet · build · test -race) · `gofmt` clean · Kill
+Test teeth-verified.
+
+**Next:** Phase 2 / Week 5 — timers & signals. Durable `Sleep`/`WaitForEvent`, a
+min-heap timer service (fires → records `TimerFired` → re-drives), `SignalWorkflow`
+RPC + `SignalReceived` event, and recovery re-arming pending timers from history
+(extends this session's `Recover`).
+
+**Gotchas:**
+- The Kill Test re-execs `os.Args[0]` (the test binary) filtered to
+  `-test.run=^TestKillHelperVictim$`; the victim is skipped in a normal `go test` run
+  and only runs its body when `WORKFLOW_KILL_HELPER=1` is set. The ready sentinel
+  lives **outside** the data dir so `ListWorkflows` never mistakes it for a log.
+- `Recover` does exactly **one** decision per workflow at startup (Phase 1 is
+  one-step-at-a-time); subsequent steps schedule as workers complete tasks, same as
+  steady state. Don't loop it — that would double-schedule.
+- `SIGKILL` durability rests entirely on the Session-5 fsync/torn-tail work: the child
+  gets no chance to flush, so only already-`fsync`'d events survive — which is exactly
+  the guarantee `Append` provides.
+
+---
+
+## 2026-06-29 — Session 5: Code review + durability hardening
+
+Reviewed everything built so far (history store, state machine, gRPC server) for bugs and
+"haunt us later" architectural mistakes, then fixed the ones worth fixing now. Two real
+durability holes, plus several smaller guardrails. No new feature work.
+
+**Fixed (durability — the important ones):**
+- **Torn-tail truncation on open** (`internal/history/store.go`). The store tolerated a torn
+  trailing record on *read* but never truncated it, and the append handle is `O_APPEND`
+  (always writes at physical EOF). So the first append after a crash landed *after* the torn
+  bytes and mis-framed every subsequent read — a 3-byte torn tail became a 3.7 GB "length".
+  Added `recoverTornTail` (scan → `Truncate` to the last clean record boundary → fsync), run
+  on the first open of an existing file, before any new append. A mid-log CRC error is still
+  a hard error — only a torn *tail* is truncated. This is the property Week 4 crash recovery
+  is built on, so it had to land first.
+- **Parent-directory fsync on file creation** (`store.go`). `Append` fsync'd the file but
+  never its directory, so a new workflow's first event (`WorkflowStarted`) could be lost on
+  power loss despite a "successful" append. Added `syncDir`, called once when a new history
+  file is created.
+- New regression test `TestAppendAfterTornTailRecovers` — proven to fail without the fix
+  (mis-frames to a 3.7 GB length) and pass with it.
+
+**Fixed (smaller guardrails):**
+- **Shutdown hang** (`cmd/workflowd/main.go`). `GracefulStop` waits for in-flight RPCs, but
+  an idle worker parked on long-poll `PollTask` never returns → SIGTERM hangs forever. Now
+  bounded by `shutdownGracePeriod` (10s) with a fallback to `gs.Stop()`.
+- **Definition drift** (`internal/state/decision.go`). `Decide` now refuses to run when the
+  recorded history's step names don't match the registered definition (a deploy that
+  reorders/renames steps would otherwise silently execute a different workflow). Cheap
+  stand-in until `workflow.Version` in Phase 5.
+- **Workflow-ID collisions** (`internal/server/engine.go`). Auto-generated ids were
+  `type-<unixnano>`, which can collide at coarse clock resolution; added an `%08x` random
+  suffix (`math/rand/v2`).
+- Documented the deliberate asymmetry in `Reconstruct` (a `WorkflowFailed` is allowed while
+  a step is in flight; a `WorkflowCompleted` is not).
+
+**Deferred on purpose (logged, not fixed):**
+- **Global engine mutex + full `ReadAll` per operation → O(n²) I/O and a throughput
+  ceiling.** Architectural; the fix is per-workflow locking + an in-memory state cache.
+  Decide the locking model before implementing — don't bolt it on now.
+- **Worker-crash stranding.** No lease/visibility-timeout: a worker that dies mid-task
+  strands its workflow in WAITING until an engine restart re-enqueues it (Week 4). Leases
+  are Phase 3. The thing to fix now is the *claim*: Phase-1 durability covers engine crashes,
+  not worker crashes — not "exactly-once."
+
+**State:** `go build` ✅ · `go vet` ✅ · `go test -race` ✅ · `gofmt` clean.
+
+**Next:** Phase 1 / Week 4 — crash recovery & WAL: startup scan + replay of all history
+files, re-enqueue incomplete steps, the Kill Test. The torn-tail recovery added this session
+is the foundation for it.
+
+**Gotchas:**
+- `recoverTornTail` runs on the first append to an *existing* workflow file, so that append
+  pays one extra full scan (the engine also `ReadAll`s it — two scans on first touch). Fine
+  per workflow per process; revisit with the state cache.
+- Directory fsync (`syncDir`) is Unix-correct (Linux/macOS); it would error on Windows. The
+  project targets Unix and CI is Linux.
+
+---
+
+## 2026-06-29 — Session 4: gRPC task queue (Phase 1, Week 3)
+
+**Done:**
+- `proto/service.proto` — `WorkflowService` with `StartWorkflow` / `PollTask` /
+  `CompleteTask`, plus a `Task` message and a `CompleteTaskRequest.result` oneof
+  (output = success, error = failure). Generates into `internal/server` as package
+  `server`. Makefile now installs `protoc-gen-go-grpc` (`make tools`) and runs
+  `--go-grpc_out` (`make proto`). Added `google.golang.org/grpc v1.81.1`.
+- `internal/server/engine.go` — `Engine`: owns the history store + task queue + a
+  workflow-type registry. `StartWorkflow` records WorkflowStarted then schedules
+  step 1; `CompleteTask` validates the result against the in-flight step, records
+  StepCompleted/StepFailed, then advances. `advanceLocked` is the extracted
+  `runDemo` loop: ReadAll → `state.Decide` → append event → enqueue task (or reach
+  terminal). All mutation under one mutex so event ids stay contiguous.
+- `internal/server/queue.go` — `taskQueue`: a buffered channel. Channel receive =
+  exactly-one-delivery, which *is* the "no duplicate dispatch" guarantee.
+  Context-aware `poll` for long-polling workers. Ephemeral by design.
+- `internal/server/grpc.go` — `GRPCServer`: thin adapter from the generated
+  `WorkflowServiceServer` to the Engine; maps engine errors to gRPC status codes.
+- `cmd/workflowd --serve [--addr :7233]` — real TCP gRPC server with SIGINT/SIGTERM
+  GracefulStop. `--demo` (inline loop) still works.
+- Tests (all green under `-race`): `queue_test.go` — no-duplicate-dispatch across
+  16 pollers / 1000 tasks + poll-blocks-until-cancel. `engine_test.go` (bufconn,
+  real client + worker) — 2-step run to completion (the Week-3 deliverable),
+  step-failure → FAILED, unknown-type rejection, duplicate-CompleteTask rejection.
+
+**State:** `make ci` ✅ (fmtcheck · vet · build · test -race) · serve-mode smoke test
+(listen + graceful shutdown) ✅ · `go mod tidy` clean.
+
+**Next:** Phase 1 / Week 4 — crash recovery & WAL. Startup scan replays every
+history file and re-enqueues scheduled-but-incomplete steps (the task queue is
+ephemeral, so recovery re-derives it). Then **The Kill Test**: 5-step workflow,
+`os.Kill` at step 3, restart, verify steps 4–5 run with no duplicates.
+
+**Gotchas:**
+- The proto-generated `Task` lives in package `server`, so the queue reuses
+  `*server.Task` directly — don't define a second `Task` struct (name clash).
+- `protoc-gen-go` was installed but not on `PATH`; the Makefile prepends
+  `$(go env GOPATH)/bin`, so `make proto` works even when the shell `which` can't
+  find it. New machines also need `make tools` for `protoc-gen-go-grpc`.
+- gRPC status mapping is intentionally coarse (StartWorkflow→InvalidArgument,
+  CompleteTask→FailedPrecondition); separating client errors from internal IO
+  errors is a later polish item.
+- bufconn client target must be `passthrough:///bufnet` with a `WithContextDialer`
+  — the default `dns` resolver would try to resolve the fake name.
+
+---
+
+## 2026-06-22 — Session 3: Workflow state machine (Phase 1, Week 2)
+
+**Done:**
+- `internal/state/state.go` — `Reconstruct(events) (*State, error)`: pure fold of a
+  workflow's history into status + per-step progress. Status enum (`NOT_STARTED`,
+  `RUNNING`, `WAITING`, `COMPLETED`, `FAILED`, `TIMED_OUT`); `StepStatus`
+  (`SCHEDULED`/`COMPLETED`/`FAILED`). Validates the log: WorkflowStarted must be first,
+  no events after a terminal one, step results must match the in-flight step (seq+name),
+  sequences contiguous from 1, no schedule while a step is open.
+- `internal/state/decision.go` — `Decide(def, events) (Decision, error)`: pure next-action
+  function. `WorkflowDefinition{Type, Steps}` is the Phase-1 stand-in for workflow code.
+  Decisions: `NOOP` / `SCHEDULE_STEP` / `COMPLETE_WORKFLOW` / `FAIL_WORKFLOW`. Sequential,
+  one step at a time; step input chains the previous step's output; a step failure fails
+  the workflow (no retry policy until Wk7).
+- Tests: `state_test.go` (status transitions, multi-step fold, 8 bad-history rejections) +
+  `decision_test.go` (table of hand-built history → asserted decision — the Week-2
+  deliverable — plus full drive-to-completion and drive-to-failure loops + an Example).
+  8 top-level tests, all green under `-race`.
+- `cmd/workflowd --demo` now drives a 3-step OrderWorkflow (reserve→charge→ship) end to end
+  through the decision loop, persisting every event. Simulated inline worker (no gRPC yet).
+- Updated `internal/state/doc.go` to "implemented".
+
+**State:** `go build ./...` ✅ · `go vet` ✅ · `go test -race` ✅ · `gofmt` clean.
+
+**Next:** Phase 1 / Week 3 — gRPC task queue in `internal/server` (`StartWorkflow`,
+`PollTask`, `CompleteTask`). The server becomes the thing that records WorkflowStarted,
+calls `state.Decide`, persists the event, and hands tasks to *real* external workers — the
+inline `runDemo` loop is the blueprint for it.
+
+**Gotchas:**
+- The proto oneof wrapper interface (`isHistoryEvent_Attributes`) is **unexported**, so code
+  outside package `history` can't name it. Build events as `&history.HistoryEvent{Attributes: ...}`
+  and pass the whole event; don't try to accept the oneof interface as a parameter type.
+- `Decide` assumes the caller already recorded `WorkflowStarted`; on empty history it returns
+  `NOOP` by design (it does not invent the start event).
+- A failed-then-retried step (new sequence) is *parseable* by `Reconstruct` but `Decide`
+  never *produces* one in Phase 1 — retry lands in Week 7.
+
+---
+
+## 2026-06-21 — Session 2: Foundation & architecture
+
+**Done:**
+- Architected the full repo: Go project layout for all 5 phases, docs, ADRs, CI, license.
+- `CLAUDE.md` (cross-session AI guide), `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`,
+  `docs/REFERENCES.md`, ADRs 0001–0003, `README.md`, `CONTRIBUTING.md`, Apache-2.0 `LICENSE`,
+  `.editorconfig`, GitHub Actions CI.
+- `cmd/workflowd` minimal daemon (opens the history store, `--demo` smoke test, `--version`).
+- Package-doc placeholders for `internal/state`, `internal/server`, `sdk`.
+- Decisions locked: module `github.com/olayanju-1234/durable-workflow-engine`,
+  Apache-2.0 license, protoc now / buf later. Name to be branded at Phase 5.
+- Added `docs/walkthroughs/session-02-foundation.md` — user is new to Go; every session now
+  ends with a plain-English walkthrough (Node/TS analogies). Baked into CLAUDE.md.
+
+**State:** `go build ./...` ✅ · `go vet` ✅ · `go test -race` ✅ · `gofmt` clean.
+
+**Next:** Phase 1 / Week 2 — workflow state machine in `internal/state` (decision loop over
+history → schedule/complete/fail; states RUNNING/WAITING/COMPLETED/FAILED/TIMED_OUT).
+
+**Gotchas:** `make proto` needs `$(go env GOPATH)/bin` on PATH so `protoc` finds `protoc-gen-go`.
+Generated `event.pb.go` is committed, so CI doesn't run protoc.
+
+---
+
+## 2026-06-21 — Session 1: Setup & history store
+
+**Done:**
+- Installed toolchain (Go 1.26.4, protoc 35.1 via Homebrew). git user.email set.
+- `proto/event.proto` — 6 event types as a `HistoryEvent` oneof wrapper.
+- `internal/history/store.go` — `HistoryStore.Append/ReadAll/Close`; disk framing
+  `[4B len][4B CRC32C][protobuf]`, fsync per append, torn-tail tolerance, CRC detection.
+- `internal/history/store_test.go` — restart-survival test (the Phase 1 Wk1 deliverable),
+  plus missing-workflow and corrupt-record tests. All pass.
+- `Makefile`, `.gitignore`.
+
+**Next:** Architect the project properly (became Session 2).

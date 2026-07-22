@@ -1,0 +1,267 @@
+// Command workflowd is the durable workflow engine daemon.
+//
+// Today it bootstraps and validates the on-disk history store. The gRPC server
+// and task scheduler land in Phase 1, Weeks 3–4 (see docs/ROADMAP.md).
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"google.golang.org/grpc"
+
+	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
+	"github.com/olayanju-1234/durable-workflow-engine/sdk"
+)
+
+func main() {
+	var (
+		dataDir     = flag.String("data-dir", "data", "directory for workflow history files")
+		showVersion = flag.Bool("version", false, "print version and exit")
+		demo        = flag.Bool("demo", false, "append and read back a sample event, then exit (smoke test)")
+		serve       = flag.Bool("serve", false, "run the gRPC workflow server")
+		addr        = flag.String("addr", ":7233", "gRPC listen address (serve mode)")
+		metricsAddr = flag.String("metrics-addr", ":9090", "HTTP listen address for /metrics (serve mode; empty disables)")
+	)
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("workflowd %s\n", version.Version)
+		return
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	store, err := history.NewHistoryStore(*dataDir)
+	if err != nil {
+		logger.Error("open history store", "err", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+	logger.Info("history store ready", "data_dir", *dataDir, "version", version.Version)
+
+	if *demo {
+		if err := runDemo(logger, store); err != nil {
+			logger.Error("demo failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *serve {
+		if err := runServe(logger, store, *addr, *metricsAddr); err != nil {
+			logger.Error("server stopped", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	logger.Info("engine bootstrapped; pass --serve to run the gRPC server or --demo for a smoke test")
+}
+
+// shutdownGracePeriod bounds how long GracefulStop waits for in-flight RPCs to
+// drain before a forced Stop, so an idle worker parked on a long-poll PollTask
+// can't hang shutdown indefinitely.
+const shutdownGracePeriod = 10 * time.Second
+
+// runServe starts the gRPC workflow server (plus the /metrics HTTP endpoint)
+// and blocks until SIGINT/SIGTERM, then drains in-flight RPCs with
+// GracefulStop. The engine is wired to the same store the daemon opened, and
+// the Phase-1 workflow types are registered up front.
+func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAddr string) error {
+	engine := server.NewEngine(store, logger)
+	defer engine.Close()
+	engine.Register(demoDef)
+
+	// A code-based Saga workflow (Phase 2): charge is retried up to 3× with backoff,
+	// and if it still fails the workflow releases the reservation (compensation).
+	engine.RegisterWorkflow("OrderSaga", sdk.Workflow{Type: "OrderSaga", Fn: orderSaga})
+	engine.SetRetryPolicy("charge", server.RetryPolicy{
+		MaxAttempts: 3, Backoff: 200 * time.Millisecond, MaxBackoff: 5 * time.Second,
+	})
+
+	// Rebuild runtime state from disk before accepting traffic: re-enqueue steps
+	// that were in flight when we last died, and advance any workflow caught
+	// mid-decision. The task queue is ephemeral; the history is the source of truth.
+	if err := engine.Recover(); err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
+
+	// /metrics gets its own HTTP listener so Prometheus scrapes never share a
+	// port (or a failure mode) with workflow gRPC traffic. Empty addr disables.
+	var metricsSrv *http.Server
+	if metricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", engine.Metrics().Handler())
+		metricsSrv = &http.Server{Addr: metricsAddr, Handler: mux}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("metrics server stopped", "err", err)
+			}
+		}()
+		logger.Info("metrics endpoint listening", "addr", metricsAddr, "path", "/metrics")
+	}
+
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+
+	gs := grpc.NewServer()
+	server.RegisterWorkflowServiceServer(gs, server.NewGRPCServer(engine, logger))
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		logger.Info("shutdown signal received; draining gRPC server", "grace", shutdownGracePeriod)
+		if metricsSrv != nil {
+			sctx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
+			defer cancel()
+			_ = metricsSrv.Shutdown(sctx)
+		}
+		// GracefulStop waits for in-flight RPCs, but an idle worker parked on a
+		// long-poll PollTask never returns on its own. Bound the drain and force a
+		// stop so shutdown can't hang on idle pollers.
+		drained := make(chan struct{})
+		go func() { gs.GracefulStop(); close(drained) }()
+		select {
+		case <-drained:
+		case <-time.After(shutdownGracePeriod):
+			logger.Warn("graceful drain timed out; forcing stop")
+			gs.Stop()
+		}
+	}()
+
+	logger.Info("gRPC server listening", "addr", addr, "version", version.Version)
+	if err := gs.Serve(lis); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	return nil
+}
+
+// demoDef is the Phase-1 stand-in for "workflow code": a fixed, ordered pipeline.
+// In Phase 2 the deterministic replay engine derives these steps from a real Go
+// function instead.
+var demoDef = state.WorkflowDefinition{
+	Type:  "OrderWorkflow",
+	Steps: state.Activities("reserve", "charge", "ship"),
+}
+
+// orderSaga is the Phase-2 code-based workflow: ordinary Go whose execution the
+// replay engine drives durably. reserve → sleep → charge (auto-retried) → ship; if
+// charge ultimately fails, release the reservation and fail with a wrapped error.
+func orderSaga(ctx sdk.Context, input []byte) ([]byte, error) {
+	reserved, err := ctx.ExecuteActivity("reserve", input)
+	if err != nil {
+		return nil, err
+	}
+	ctx.Sleep("settle", 2*time.Second) // durable wait — survives restarts
+	if _, err := ctx.ExecuteActivity("charge", reserved); err != nil {
+		ctx.ExecuteActivity("release", reserved) // compensation
+		return nil, fmt.Errorf("charge failed, reservation released: %w", err)
+	}
+	return ctx.ExecuteActivity("ship", reserved)
+}
+
+// runDemo drives a whole workflow to completion through the Week-2 state machine,
+// persisting every event to the store. There is no gRPC worker yet (Week 3), so a
+// worker that always succeeds is simulated inline. The loop is the entire engine:
+// replay history → Decide → record the resulting event → repeat until terminal.
+func runDemo(logger *slog.Logger, store *history.HistoryStore) error {
+	wfID := fmt.Sprintf("demo-%d", time.Now().UnixNano())
+	log := logger.With("workflow_id", wfID)
+
+	// record stamps the next monotonic event id and a wall-clock timestamp, then
+	// durably appends the event. Reading the current length to assign sequential
+	// ids is how the engine numbers events today; Week 3's server owns this.
+	record := func(ev *history.HistoryEvent) error {
+		existing, err := store.ReadAll(wfID)
+		if err != nil {
+			return err
+		}
+		ev.EventId = int64(len(existing) + 1)
+		ev.Timestamp = time.Now().UnixNano()
+		return store.Append(wfID, ev)
+	}
+
+	// The engine records WorkflowStarted before the first decision.
+	if err := record(&history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
+		WorkflowStarted: &history.WorkflowStartedEvent{
+			WorkflowId: wfID, WorkflowType: demoDef.Type, Input: []byte("order-7"),
+		},
+	}}); err != nil {
+		return err
+	}
+	log.Info("workflow started", "type", demoDef.Type)
+
+	for step := 0; step < 100; step++ { // bound guards against a decision-loop bug
+		events, err := store.ReadAll(wfID)
+		if err != nil {
+			return err
+		}
+		decision, err := state.Decide(demoDef, events)
+		if err != nil {
+			return fmt.Errorf("decide: %w", err)
+		}
+		log.Info("engine decided", "decision", decision.Type.String(), "step", decision.StepName)
+
+		switch decision.Type {
+		case state.DecideScheduleStep:
+			if err := record(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
+				StepScheduled: &history.StepScheduledEvent{
+					StepName: decision.StepName, Sequence: decision.Sequence, Input: decision.Input,
+				},
+			}}); err != nil {
+				return err
+			}
+			// Simulated worker: succeed immediately, echoing the step name.
+			if err := record(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
+				StepCompleted: &history.StepCompletedEvent{
+					StepName: decision.StepName, Sequence: decision.Sequence, Output: []byte("done:" + decision.StepName),
+				},
+			}}); err != nil {
+				return err
+			}
+			log.Info("worker completed step", "step", decision.StepName, "sequence", decision.Sequence)
+
+		case state.DecideCompleteWorkflow:
+			if err := record(&history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowCompleted{
+				WorkflowCompleted: &history.WorkflowCompletedEvent{Output: decision.Output},
+			}}); err != nil {
+				return err
+			}
+			final, err := store.ReadAll(wfID)
+			if err != nil {
+				return err
+			}
+			log.Info("workflow completed", "output", string(decision.Output), "events_on_disk", len(final))
+			return nil
+
+		case state.DecideFailWorkflow:
+			if err := record(&history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowFailed{
+				WorkflowFailed: &history.WorkflowFailedEvent{Error: decision.Error},
+			}}); err != nil {
+				return err
+			}
+			log.Warn("workflow failed", "error", decision.Error)
+			return nil
+
+		default: // DecideNoop with no terminal event means the loop is stuck.
+			return fmt.Errorf("unexpected no-op decision; workflow neither progressed nor finished")
+		}
+	}
+	return fmt.Errorf("decision loop did not terminate within bound")
+}

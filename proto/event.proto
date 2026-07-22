@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package history.v1;
+
+// Generated Go lands in internal/history as package `history`, alongside the
+// hand-written HistoryStore that reads and writes these events.
+option go_package = "github.com/olayanju-1234/durable-workflow-engine/internal/history;history";
+
+// HistoryEvent is one entry in a workflow's append-only history log. The log is
+// the single source of truth: replaying it reconstructs all workflow state.
+message HistoryEvent {
+  // Monotonic sequence within a single workflow, starting at 1.
+  int64 event_id = 1;
+  // Wall-clock time the event was recorded, unix nanoseconds.
+  int64 timestamp = 2;
+
+  // Exactly one attributes message is set per event; the field that is present
+  // determines the event type. New event types get new oneof fields, which is
+  // how the schema evolves without breaking old logs.
+  oneof attributes {
+    WorkflowStartedEvent workflow_started = 10;
+    StepScheduledEvent step_scheduled = 11;
+    StepCompletedEvent step_completed = 12;
+    StepFailedEvent step_failed = 13;
+    WorkflowCompletedEvent workflow_completed = 14;
+    WorkflowFailedEvent workflow_failed = 15;
+    TimerStartedEvent timer_started = 16;
+    TimerFiredEvent timer_fired = 17;
+    SignalReceivedEvent signal_received = 18;
+  }
+}
+
+message WorkflowStartedEvent {
+  string workflow_id = 1;
+  string workflow_type = 2;
+  bytes input = 3;
+}
+
+message StepScheduledEvent {
+  string step_name = 1;
+  bytes input = 2;
+  int64 sequence = 3;
+  // A signal wait is a step with no worker task: it records a StepScheduled with
+  // awaits_signal set and the awaited signal_name, so recovery and signal delivery
+  // are driven by history alone (no need to consult the workflow definition/code).
+  bool awaits_signal = 4;
+  string signal_name = 5;
+}
+
+message StepCompletedEvent {
+  string step_name = 1;
+  bytes output = 2;
+  int64 sequence = 3;
+}
+
+message StepFailedEvent {
+  string step_name = 1;
+  string error = 2;
+  int64 sequence = 3;
+  int32 retry_count = 4;
+}
+
+message WorkflowCompletedEvent {
+  bytes output = 1;
+}
+
+message WorkflowFailedEvent {
+  string error = 1;
+  // Set when the failure was an operator termination (the visibility API's
+  // TerminateWorkflow), not workflow code failing. Same terminal state machine
+  // path either way; this flag keeps the two distinguishable after the fact.
+  bool terminated = 2;
+}
+
+// TimerStartedEvent opens a durable timer step: the workflow is paused until
+// fire_at. fire_at is recorded (not just a duration) so crash recovery can re-arm
+// the timer against the same absolute deadline after a restart.
+message TimerStartedEvent {
+  string step_name = 1;
+  int64 sequence = 2;
+  int64 fire_at = 3; // unix nanoseconds when the timer should fire
+  bytes input = 4;   // carried through so the pipeline chains across the sleep
+}
+
+// TimerFiredEvent closes a timer step once its deadline has passed, resuming the
+// workflow. It is recorded by the engine's timer service, not by a worker.
+message TimerFiredEvent {
+  string step_name = 1;
+  int64 sequence = 2;
+}
+
+// SignalReceivedEvent records an external signal delivered to a running workflow.
+// Signals are buffered in the log: one that arrives before the workflow waits for
+// it is matched to the matching wait later, in arrival order.
+message SignalReceivedEvent {
+  string signal_name = 1;
+  bytes payload = 2;
+}

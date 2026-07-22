@@ -1,0 +1,190 @@
+syntax = "proto3";
+
+package workflow.v1;
+
+// Generated Go (messages + gRPC stubs) lands in internal/server as package
+// `server`, alongside the hand-written Engine that implements the service.
+option go_package = "github.com/olayanju-1234/durable-workflow-engine/internal/server;server";
+
+// WorkflowService is the bridge between the engine and external workers.
+//
+//   StartWorkflow — a client kicks off a new workflow execution.
+//   PollTask      — a worker long-polls for the next step to run.
+//   CompleteTask  — a worker reports a step's result, driving the workflow on.
+//   Heartbeat     — a worker extends its lease on a long-running task.
+//
+// The engine owns all state (the append-only history); workers are stateless
+// executors that only ever see one task at a time. Every dispatched task carries
+// a lease: the worker must complete or heartbeat before the lease expires, or
+// the engine treats the worker as dead and reassigns the task.
+service WorkflowService {
+  rpc StartWorkflow(StartWorkflowRequest) returns (StartWorkflowResponse);
+  rpc PollTask(PollTaskRequest) returns (PollTaskResponse);
+  rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
+  // SignalWorkflow delivers an external event to a running workflow, satisfying a
+  // step that is waiting for that signal (or buffering it until one waits).
+  rpc SignalWorkflow(SignalWorkflowRequest) returns (SignalWorkflowResponse);
+  // Heartbeat proves the worker holding a lease is still alive, extending the
+  // lease deadline. A rejected heartbeat means the lease was lost (the task was
+  // reassigned) and the worker should abandon the work.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Visibility API — read-only inspection plus the one operator write
+  // (terminate). These answer "what is running and where is it stuck" without
+  // grepping history files.
+  //
+  //   ListWorkflows      — every workflow the engine knows, as summaries.
+  //   GetWorkflow        — one workflow in detail: status, steps, attempts, errors.
+  //   TerminateWorkflow  — operator kill switch: durably ends a running workflow.
+  rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
+  rpc GetWorkflow(GetWorkflowRequest) returns (GetWorkflowResponse);
+  rpc TerminateWorkflow(TerminateWorkflowRequest) returns (TerminateWorkflowResponse);
+}
+
+// WorkflowStatus mirrors the engine's reconstructed lifecycle states.
+// TERMINATED is a presentation of FAILED-by-operator: on disk it is a
+// WorkflowFailed event with the terminated flag set.
+enum WorkflowStatus {
+  WORKFLOW_STATUS_UNSPECIFIED = 0;
+  WORKFLOW_STATUS_RUNNING = 1;
+  WORKFLOW_STATUS_WAITING = 2;
+  WORKFLOW_STATUS_COMPLETED = 3;
+  WORKFLOW_STATUS_FAILED = 4;
+  WORKFLOW_STATUS_TIMED_OUT = 5;
+  WORKFLOW_STATUS_TERMINATED = 6;
+}
+
+message StartWorkflowRequest {
+  // The registered workflow type to run (e.g. "OrderWorkflow").
+  string workflow_type = 1;
+  // Opaque input handed to the first step.
+  bytes input = 2;
+  // Optional caller-chosen id; the server generates one when empty.
+  string workflow_id = 3;
+}
+
+message StartWorkflowResponse {
+  string workflow_id = 1;
+}
+
+message PollTaskRequest {
+  // Identifies the worker; recorded on the lease and in engine logs, so a lease
+  // expiry names the worker that went dark.
+  string worker_id = 1;
+}
+
+// Task is one unit of work dispatched to exactly one worker, under a lease.
+message Task {
+  string workflow_id = 1;
+  string step_name = 2;
+  int64 sequence = 3;
+  bytes input = 4;
+  // Proof of ownership: CompleteTask and Heartbeat must present this token.
+  // A stale token (the lease expired and the task was reassigned) is rejected.
+  string lease_token = 5;
+  // How long the lease lives without a heartbeat. Workers running longer than
+  // this must Heartbeat periodically (a third of this is a sane interval).
+  int64 lease_duration_ms = 6;
+}
+
+message PollTaskResponse {
+  Task task = 1;
+}
+
+message CompleteTaskRequest {
+  string workflow_id = 1;
+  string step_name = 2;
+  int64 sequence = 3;
+  // Exactly one of output/error is set: output (even if empty) means success,
+  // error means the step failed.
+  oneof result {
+    bytes output = 4;
+    string error = 5;
+  }
+  // The lease token from the dispatched Task. Results without the current
+  // lease are rejected — a worker that lost its lease must not record anything.
+  string lease_token = 6;
+}
+
+message CompleteTaskResponse {}
+
+message HeartbeatRequest {
+  string workflow_id = 1;
+  // The lease token from the dispatched Task.
+  string lease_token = 2;
+  // For logging only; the token is the proof of ownership.
+  string worker_id = 3;
+}
+
+message HeartbeatResponse {}
+
+message SignalWorkflowRequest {
+  string workflow_id = 1;
+  string signal_name = 2;
+  bytes payload = 3;
+}
+
+message SignalWorkflowResponse {}
+
+message ListWorkflowsRequest {
+  // When set (not UNSPECIFIED), only workflows in this status are returned.
+  WorkflowStatus status_filter = 1;
+}
+
+// WorkflowSummary is the list-view row: enough to see what exists and whether
+// it needs attention, without the per-step detail of GetWorkflow.
+message WorkflowSummary {
+  string workflow_id = 1;
+  string workflow_type = 2;
+  WorkflowStatus status = 3;
+  // Unix nanoseconds of the first and latest history events. closed_at is only
+  // meaningful once the status is terminal; until then it is "last activity".
+  int64 started_at = 4;
+  int64 updated_at = 5;
+  // Workflow error when FAILED/TERMINATED. For a workflow whose history could
+  // not be read or replayed, status is UNSPECIFIED and this carries the reason
+  // — a broken log must be visible to operators, never silently skipped.
+  string error = 6;
+  int64 history_length = 7;
+}
+
+message ListWorkflowsResponse {
+  repeated WorkflowSummary workflows = 1;
+}
+
+message GetWorkflowRequest {
+  string workflow_id = 1;
+}
+
+// StepInfo is the reconstructed view of one step, as replayed from history.
+message StepInfo {
+  string step_name = 1;
+  int64 sequence = 2;
+  // "ACTIVITY", "TIMER", or "SIGNAL".
+  string kind = 3;
+  // "SCHEDULED", "COMPLETED", or "FAILED".
+  string status = 4;
+  // How many times this step has been scheduled (>1 means it was retried).
+  int32 attempts = 5;
+  string error = 6;
+  bytes output = 7;
+  // Timer steps: unix-nanoseconds deadline. Signal steps: the awaited signal.
+  int64 fire_at = 8;
+  string signal_name = 9;
+}
+
+message GetWorkflowResponse {
+  WorkflowSummary summary = 1;
+  repeated StepInfo steps = 2;
+  bytes input = 3;
+  // Workflow output once COMPLETED.
+  bytes output = 4;
+}
+
+message TerminateWorkflowRequest {
+  string workflow_id = 1;
+  // Recorded in the workflow's terminal event, so history says who/why.
+  string reason = 2;
+}
+
+message TerminateWorkflowResponse {}
