@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,7 +47,15 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/workflows/{id}", a.getWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/terminate", a.terminateWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
+	// Polyglot SDK transport (see httpapi_polyglot.go).
+	a.registerPolyglotRoutes(mux)
 	return mux
+}
+
+// contextWithPollTimeout bounds a long-poll so it returns before proxies or
+// clients give up on it. Cancelled when the caller disconnects, too.
+func contextWithPollTimeout(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), pollTimeout)
 }
 
 // summaryDTO is one workflow as the API presents it.

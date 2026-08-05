@@ -15,6 +15,12 @@ coverage.html
 .env
 .env.*
 
+# SDK build artifacts (sdks/ is source-only; nothing here is compiled in CI)
+__pycache__/
+*.pyc
+node_modules/
+*.class
+
 # Editor / OS
 .DS_Store
 .idea/

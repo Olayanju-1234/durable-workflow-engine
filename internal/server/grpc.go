@@ -84,6 +84,38 @@ func (s *GRPCServer) SignalWorkflow(ctx context.Context, req *SignalWorkflowRequ
 	return &SignalWorkflowResponse{}, nil
 }
 
+func (s *GRPCServer) RegisterWorkflowType(ctx context.Context, req *RegisterWorkflowTypeRequest) (*RegisterWorkflowTypeResponse, error) {
+	if err := s.engine.RegisterWorkflowTypes(req.GetWorkflowTypes(), req.GetWorkerId(), req.GetSdk()); err != nil {
+		// Empty type name, or a clash with a compiled-in Go workflow.
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	return &RegisterWorkflowTypeResponse{}, nil
+}
+
+func (s *GRPCServer) PollWorkflowTask(ctx context.Context, req *PollWorkflowTaskRequest) (*PollWorkflowTaskResponse, error) {
+	task, err := s.engine.PollWorkflowTask(ctx, req.GetWorkerId(), req.GetWorkflowTypes())
+	if err != nil {
+		// Long-poll timed out or the worker disconnected.
+		return nil, status.FromContextError(err).Err()
+	}
+	return &PollWorkflowTaskResponse{Task: task}, nil
+}
+
+func (s *GRPCServer) CompleteWorkflowTask(ctx context.Context, req *CompleteWorkflowTaskRequest) (*CompleteWorkflowTaskResponse, error) {
+	err := s.engine.CompleteWorkflowTask(req.GetWorkflowId(), req.GetTaskToken(), req.GetCommand(), req.GetReplayError())
+	switch {
+	case errors.Is(err, ErrStaleDecision):
+		// Routine under re-dispatch: the SDK should just poll again. Aborted is
+		// the conventional "you lost a race, retry the whole operation" code.
+		return nil, status.Errorf(codes.Aborted, "%v", err)
+	case errors.Is(err, ErrInvalidCommand):
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	case err != nil:
+		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
+	return &CompleteWorkflowTaskResponse{}, nil
+}
+
 func (s *GRPCServer) ListWorkflows(ctx context.Context, req *ListWorkflowsRequest) (*ListWorkflowsResponse, error) {
 	summaries, err := s.engine.ListWorkflows(req.GetStatusFilter())
 	if err != nil {

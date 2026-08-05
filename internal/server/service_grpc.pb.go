@@ -19,14 +19,17 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	WorkflowService_StartWorkflow_FullMethodName     = "/workflow.v1.WorkflowService/StartWorkflow"
-	WorkflowService_PollTask_FullMethodName          = "/workflow.v1.WorkflowService/PollTask"
-	WorkflowService_CompleteTask_FullMethodName      = "/workflow.v1.WorkflowService/CompleteTask"
-	WorkflowService_SignalWorkflow_FullMethodName    = "/workflow.v1.WorkflowService/SignalWorkflow"
-	WorkflowService_Heartbeat_FullMethodName         = "/workflow.v1.WorkflowService/Heartbeat"
-	WorkflowService_ListWorkflows_FullMethodName     = "/workflow.v1.WorkflowService/ListWorkflows"
-	WorkflowService_GetWorkflow_FullMethodName       = "/workflow.v1.WorkflowService/GetWorkflow"
-	WorkflowService_TerminateWorkflow_FullMethodName = "/workflow.v1.WorkflowService/TerminateWorkflow"
+	WorkflowService_StartWorkflow_FullMethodName        = "/workflow.v1.WorkflowService/StartWorkflow"
+	WorkflowService_PollTask_FullMethodName             = "/workflow.v1.WorkflowService/PollTask"
+	WorkflowService_CompleteTask_FullMethodName         = "/workflow.v1.WorkflowService/CompleteTask"
+	WorkflowService_SignalWorkflow_FullMethodName       = "/workflow.v1.WorkflowService/SignalWorkflow"
+	WorkflowService_Heartbeat_FullMethodName            = "/workflow.v1.WorkflowService/Heartbeat"
+	WorkflowService_ListWorkflows_FullMethodName        = "/workflow.v1.WorkflowService/ListWorkflows"
+	WorkflowService_GetWorkflow_FullMethodName          = "/workflow.v1.WorkflowService/GetWorkflow"
+	WorkflowService_TerminateWorkflow_FullMethodName    = "/workflow.v1.WorkflowService/TerminateWorkflow"
+	WorkflowService_RegisterWorkflowType_FullMethodName = "/workflow.v1.WorkflowService/RegisterWorkflowType"
+	WorkflowService_PollWorkflowTask_FullMethodName     = "/workflow.v1.WorkflowService/PollWorkflowTask"
+	WorkflowService_CompleteWorkflowTask_FullMethodName = "/workflow.v1.WorkflowService/CompleteWorkflowTask"
 )
 
 // WorkflowServiceClient is the client API for WorkflowService service.
@@ -65,6 +68,26 @@ type WorkflowServiceClient interface {
 	ListWorkflows(ctx context.Context, in *ListWorkflowsRequest, opts ...grpc.CallOption) (*ListWorkflowsResponse, error)
 	GetWorkflow(ctx context.Context, in *GetWorkflowRequest, opts ...grpc.CallOption) (*GetWorkflowResponse, error)
 	TerminateWorkflow(ctx context.Context, in *TerminateWorkflowRequest, opts ...grpc.CallOption) (*TerminateWorkflowResponse, error)
+	// ---- Polyglot workflow execution -------------------------------------
+	//
+	// Workflow code does not have to run inside the engine. These three RPCs let
+	// an SDK in ANY language own the orchestration logic:
+	//
+	//	RegisterWorkflowType — "I can run workflows of this type."
+	//	PollWorkflowTask     — receive a workflow's history to replay.
+	//	CompleteWorkflowTask — return the single next command.
+	//
+	// The engine stays the durable authority: it owns the history, applies the
+	// returned command, and records the resulting event. The SDK is a pure
+	// function from history to the next command — no state of its own, which is
+	// why a crashed SDK worker costs nothing but a re-dispatch.
+	//
+	// This is the same split as activities (PollTask/CompleteTask), applied one
+	// level up: activities are *what the work is*, workflow tasks are *what to
+	// do next*.
+	RegisterWorkflowType(ctx context.Context, in *RegisterWorkflowTypeRequest, opts ...grpc.CallOption) (*RegisterWorkflowTypeResponse, error)
+	PollWorkflowTask(ctx context.Context, in *PollWorkflowTaskRequest, opts ...grpc.CallOption) (*PollWorkflowTaskResponse, error)
+	CompleteWorkflowTask(ctx context.Context, in *CompleteWorkflowTaskRequest, opts ...grpc.CallOption) (*CompleteWorkflowTaskResponse, error)
 }
 
 type workflowServiceClient struct {
@@ -155,6 +178,36 @@ func (c *workflowServiceClient) TerminateWorkflow(ctx context.Context, in *Termi
 	return out, nil
 }
 
+func (c *workflowServiceClient) RegisterWorkflowType(ctx context.Context, in *RegisterWorkflowTypeRequest, opts ...grpc.CallOption) (*RegisterWorkflowTypeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterWorkflowTypeResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_RegisterWorkflowType_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowServiceClient) PollWorkflowTask(ctx context.Context, in *PollWorkflowTaskRequest, opts ...grpc.CallOption) (*PollWorkflowTaskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PollWorkflowTaskResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_PollWorkflowTask_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowServiceClient) CompleteWorkflowTask(ctx context.Context, in *CompleteWorkflowTaskRequest, opts ...grpc.CallOption) (*CompleteWorkflowTaskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CompleteWorkflowTaskResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_CompleteWorkflowTask_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkflowServiceServer is the server API for WorkflowService service.
 // All implementations must embed UnimplementedWorkflowServiceServer
 // for forward compatibility.
@@ -191,6 +244,26 @@ type WorkflowServiceServer interface {
 	ListWorkflows(context.Context, *ListWorkflowsRequest) (*ListWorkflowsResponse, error)
 	GetWorkflow(context.Context, *GetWorkflowRequest) (*GetWorkflowResponse, error)
 	TerminateWorkflow(context.Context, *TerminateWorkflowRequest) (*TerminateWorkflowResponse, error)
+	// ---- Polyglot workflow execution -------------------------------------
+	//
+	// Workflow code does not have to run inside the engine. These three RPCs let
+	// an SDK in ANY language own the orchestration logic:
+	//
+	//	RegisterWorkflowType — "I can run workflows of this type."
+	//	PollWorkflowTask     — receive a workflow's history to replay.
+	//	CompleteWorkflowTask — return the single next command.
+	//
+	// The engine stays the durable authority: it owns the history, applies the
+	// returned command, and records the resulting event. The SDK is a pure
+	// function from history to the next command — no state of its own, which is
+	// why a crashed SDK worker costs nothing but a re-dispatch.
+	//
+	// This is the same split as activities (PollTask/CompleteTask), applied one
+	// level up: activities are *what the work is*, workflow tasks are *what to
+	// do next*.
+	RegisterWorkflowType(context.Context, *RegisterWorkflowTypeRequest) (*RegisterWorkflowTypeResponse, error)
+	PollWorkflowTask(context.Context, *PollWorkflowTaskRequest) (*PollWorkflowTaskResponse, error)
+	CompleteWorkflowTask(context.Context, *CompleteWorkflowTaskRequest) (*CompleteWorkflowTaskResponse, error)
 	mustEmbedUnimplementedWorkflowServiceServer()
 }
 
@@ -224,6 +297,15 @@ func (UnimplementedWorkflowServiceServer) GetWorkflow(context.Context, *GetWorkf
 }
 func (UnimplementedWorkflowServiceServer) TerminateWorkflow(context.Context, *TerminateWorkflowRequest) (*TerminateWorkflowResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TerminateWorkflow not implemented")
+}
+func (UnimplementedWorkflowServiceServer) RegisterWorkflowType(context.Context, *RegisterWorkflowTypeRequest) (*RegisterWorkflowTypeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterWorkflowType not implemented")
+}
+func (UnimplementedWorkflowServiceServer) PollWorkflowTask(context.Context, *PollWorkflowTaskRequest) (*PollWorkflowTaskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PollWorkflowTask not implemented")
+}
+func (UnimplementedWorkflowServiceServer) CompleteWorkflowTask(context.Context, *CompleteWorkflowTaskRequest) (*CompleteWorkflowTaskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CompleteWorkflowTask not implemented")
 }
 func (UnimplementedWorkflowServiceServer) mustEmbedUnimplementedWorkflowServiceServer() {}
 func (UnimplementedWorkflowServiceServer) testEmbeddedByValue()                         {}
@@ -390,6 +472,60 @@ func _WorkflowService_TerminateWorkflow_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkflowService_RegisterWorkflowType_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterWorkflowTypeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).RegisterWorkflowType(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_RegisterWorkflowType_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).RegisterWorkflowType(ctx, req.(*RegisterWorkflowTypeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowService_PollWorkflowTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PollWorkflowTaskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).PollWorkflowTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_PollWorkflowTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).PollWorkflowTask(ctx, req.(*PollWorkflowTaskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowService_CompleteWorkflowTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompleteWorkflowTaskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).CompleteWorkflowTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_CompleteWorkflowTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).CompleteWorkflowTask(ctx, req.(*CompleteWorkflowTaskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkflowService_ServiceDesc is the grpc.ServiceDesc for WorkflowService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -428,6 +564,18 @@ var WorkflowService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TerminateWorkflow",
 			Handler:    _WorkflowService_TerminateWorkflow_Handler,
+		},
+		{
+			MethodName: "RegisterWorkflowType",
+			Handler:    _WorkflowService_RegisterWorkflowType_Handler,
+		},
+		{
+			MethodName: "PollWorkflowTask",
+			Handler:    _WorkflowService_PollWorkflowTask_Handler,
+		},
+		{
+			MethodName: "CompleteWorkflowTask",
+			Handler:    _WorkflowService_CompleteWorkflowTask_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

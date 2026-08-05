@@ -3,7 +3,7 @@
 17 weeks, 5 phases, distilled from the blueprint. Check items off as they land. The
 **Status** line below is the single source of truth for "where are we."
 
-> **Status:** Phase 3 COMPLETE (Weeks 1–10). Week 10: embedded `go:embed` dashboard + a hand-rolled JSON HTTP API (browsers can't speak gRPC), plus the public site (landing page + developer docs) under `web/`. Week 9 delivered observability (zero-dep Prometheus `/metrics`; visibility API with lease-fenced terminate). Next: **Phase 4 / Week 11 — Raft** (read the paper, leader election, 3-node localhost cluster). Open backlog: no auth/TLS on any port, O(n) visibility full-scan, O(n²) global-lock ceiling, `CronSchedule` (deferred from Wk5).
+> **Status:** Phase 3 COMPLETE (Weeks 1–10), plus an **unplanned polyglot milestone** (Session 13): workflows can now be written in TypeScript and Python as well as Go, via a `PollWorkflowTask`/`CompleteWorkflowTask` protocol built on the existing `Planner` seam. Week 10 delivered the `go:embed` dashboard + JSON HTTP API; Week 9 delivered observability. Next: **Phase 4 / Week 11 — Raft** (started then parked for polyglot; `proto/raft.proto` exists as groundwork). Open backlog: no auth/TLS on any port, Java SDK unverified, O(n) visibility full-scan, O(n²) global-lock ceiling, `CronSchedule` (deferred from Wk5).
 
 Legend: ✅ done · 🚧 in progress · ⬜ not started
 
@@ -70,8 +70,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Tests: HTTP API lifecycle (start→inspect→terminate), error-code table, signal round-trip, embedded-assets-served + API-wins-over-catch-all; live smoke-tested end to end
 - ⬜ Auth/TLS on the HTTP + gRPC ports — none today; documented as a deployment constraint (bind to localhost / front with a proxy)
 
+## Polyglot workflows — unplanned, Session 13 ✅
+Not in the original 17-week plan; prioritized over Raft because adoption matters more than HA
+for a pre-alpha project, and the wire protocol is cheaper to settle *before* replicating it.
+- ✅ Workflow-task protocol: `RegisterWorkflowType` / `PollWorkflowTask` / `CompleteWorkflowTask`, `WorkflowCommand` oneof; built on the existing `Planner` seam so history, recovery, timers, retries and leases were untouched
+- ✅ Stale-decision fencing (history-length optimistic check) — makes re-dispatch of a dead SDK worker's task safe
+- ✅ Command validation before anything reaches the log; a rejected command leaves the task pending so a fixed deployment self-heals (teeth-verified against a stranding bug)
+- ✅ HTTP transport shipping the pre-reconstructed view → SDKs need no protobuf toolchain and no dependencies
+- ✅ TypeScript + Python SDKs, verified end-to-end (activity → durable timer → signal → Saga → completion)
+- ⚠️ Java SDK written but never compiled (no JDK available) — reference implementation
+- ⬜ SDK polish: retries/backoff config from the SDK side, richer payload types (bytes/JSON), published packages (npm/PyPI/Maven)
+
 ## Phase 4 — Replication with Raft (Weeks 11–14)
-- ⬜ Wk11: read the Raft paper; leader election; 3-node localhost cluster
+- 🚧 Wk11: read the Raft paper; leader election; 3-node localhost cluster — *started, parked for polyglot; `proto/raft.proto` (RequestVote/AppendEntries/PersistentState) landed as groundwork*
 - ⬜ Wk12: log replication (AppendEntries), commit on majority, follower catch-up, conflicts
 - ⬜ Wk13: five safety properties; snapshotting + log truncation
 - ⬜ Wk14: wire Raft into the engine; chaos tests (kill leader, partition, 100 concurrent)

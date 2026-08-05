@@ -1,8 +1,8 @@
 # durable-workflow-engine
 
-> A single-binary, zero-dependency durable workflow engine for Go. Write ordinary
-> functions; the engine makes them crash-proof, resumable, and observable — no Kubernetes,
-> no external database, no DevOps team.
+> A single-binary, zero-dependency durable workflow engine. Write ordinary functions — in
+> Go, TypeScript or Python — and the engine makes them crash-proof, resumable, and
+> observable. No Kubernetes, no external database, no DevOps team.
 
 **Status:** 🚧 Pre-alpha — weeks 1–10 of 17 complete. Phases 1–3 are done: durable history,
 deterministic replay of real Go workflows, timers, signals, retries, Saga compensation, worker
@@ -77,6 +77,37 @@ curl -X POST http://localhost:8233/api/workflows \
 
 Then open <http://localhost:8233> to watch it. Full guide: [`web/site/docs.html`](web/site/docs.html).
 
+## Workflows in other languages
+
+Workflow code doesn't have to be Go. The engine owns durability; an SDK in your language owns
+the orchestration logic. The non-Go SDKs are **dependency-free** — no npm install, no pip
+install, no protobuf toolchain.
+
+```js
+// sdks/typescript — run with `node example.mjs`
+worker.workflow('OrderWorkflow', async (ctx) => {
+  const reserved = await ctx.activity('reserve', ctx.input);
+  await ctx.sleep('settle', 2000);                  // durable
+  try {
+    await ctx.activity('charge', reserved);
+  } catch (err) {
+    await ctx.activity('release', reserved);        // compensate
+    throw new WorkflowFailure(`charge failed: ${err.message}`);
+  }
+  return await ctx.activity('ship', reserved);
+});
+```
+
+| SDK | Status |
+|-----|--------|
+| Go (`sdk/`) | in-process, compiled into the engine |
+| TypeScript (`sdks/typescript/`) | verified end-to-end |
+| Python (`sdks/python/`) | verified end-to-end |
+| Java (`sdks/java/`) | written, not yet compiled — reference implementation |
+
+See [`sdks/README.md`](sdks/README.md) for the protocol (three HTTP endpoints) if you want to
+add a language.
+
 ## Project layout
 
 ```
@@ -87,6 +118,7 @@ internal/server/    gRPC API, task queue, leases, visibility, HTTP   ✅
 internal/timer/     durable timers (min-heap)                        ✅
 internal/metrics/   zero-dependency Prometheus registry              ✅
 sdk/                workflows as Go functions (replay engine)        ✅ core
+sdks/               TypeScript · Python · Java SDKs (dependency-free) ✅
 web/dashboard/      embedded operational UI (go:embed)               ✅
 web/site/           landing page + developer documentation           ✅
 internal/raft/      consensus / replication                          ⬜ Phase 4

@@ -34,23 +34,28 @@ type Planner interface {
 // recorded one at a time and their ids stay contiguous. The task queue is
 // separately concurrent (a channel), so polling never contends with recording.
 type Engine struct {
-	store       *history.HistoryStore
-	queue       *taskQueue
-	timers      *timer.Service // durable Sleep steps
-	retryTimers *timer.Service // activity retry backoffs (not history steps)
-	leaseTimers *timer.Service // lease expiry checks (dead-worker detection)
-	log         *slog.Logger
-	registry    *metrics.Registry
-	metrics     *engineMetrics
+	store         *history.HistoryStore
+	queue         *taskQueue
+	workflowQueue *workflowTaskQueue // polyglot: decisions awaiting an SDK worker
 
-	leaseDuration time.Duration // immutable after NewEngine
+	timers         *timer.Service // durable Sleep steps
+	retryTimers    *timer.Service // activity retry backoffs (not history steps)
+	leaseTimers    *timer.Service // lease expiry checks (dead-worker detection)
+	decisionTimers *timer.Service // polyglot: SDK worker died holding a workflow task
+	log            *slog.Logger
+	registry       *metrics.Registry
+	metrics        *engineMetrics
+
+	leaseDuration   time.Duration // immutable after NewEngine
+	decisionTimeout time.Duration // immutable after NewEngine
 
 	closeOnce sync.Once
 
-	mu       sync.Mutex
-	planners map[string]Planner     // workflow type -> planner
-	policies map[string]RetryPolicy // activity step name -> retry policy
-	leases   map[string]*lease      // workflow id -> current task lease
+	mu               sync.Mutex
+	planners         map[string]Planner       // workflow type -> planner
+	policies         map[string]RetryPolicy   // activity step name -> retry policy
+	leases           map[string]*lease        // workflow id -> current task lease
+	pendingDecisions map[string]*decisionTask // workflow id -> outstanding SDK decision
 }
 
 // Option configures an Engine at construction (the functional-options pattern:
@@ -64,30 +69,46 @@ func WithLeaseDuration(d time.Duration) Option {
 	return func(e *Engine) { e.leaseDuration = d }
 }
 
+// WithDecisionTimeout sets how long an SDK worker may hold a workflow task
+// before the engine re-dispatches it. Re-deciding is always safe (replay is
+// pure and stale commands are fenced), so this only bounds how long a dead SDK
+// worker can stall a workflow.
+func WithDecisionTimeout(d time.Duration) Option {
+	return func(e *Engine) { e.decisionTimeout = d }
+}
+
 // NewEngine builds an Engine over an open history store and starts its timer
 // services. Register the workflow types it can run before serving traffic, and
 // Close it on shutdown to stop the timer goroutines.
 func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option) *Engine {
 	e := &Engine{
-		store:         store,
-		queue:         newTaskQueue(),
-		log:           logger,
-		leaseDuration: defaultLeaseDuration,
-		planners:      make(map[string]Planner),
-		policies:      make(map[string]RetryPolicy),
-		leases:        make(map[string]*lease),
+		store:           store,
+		queue:           newTaskQueue(),
+		log:             logger,
+		leaseDuration:   defaultLeaseDuration,
+		decisionTimeout: defaultDecisionTimeout,
+		workflowQueue:   newWorkflowTaskQueue(),
+
+		planners:         make(map[string]Planner),
+		policies:         make(map[string]RetryPolicy),
+		leases:           make(map[string]*lease),
+		pendingDecisions: make(map[string]*decisionTask),
 	}
 	for _, opt := range opts {
 		opt(e)
 	}
 	e.registry = metrics.NewRegistry()
-	e.metrics = newEngineMetrics(e.registry, func() float64 { return float64(e.queue.depth()) })
+	e.metrics = newEngineMetrics(e.registry,
+		func() float64 { return float64(e.queue.depth()) },
+		func() float64 { return float64(e.workflowQueue.depth()) })
 	e.timers = timer.New(e.onTimerFired)
 	e.timers.Start()
 	e.retryTimers = timer.New(e.onRetryDue)
 	e.retryTimers.Start()
 	e.leaseTimers = timer.New(e.onLeaseExpired)
 	e.leaseTimers.Start()
+	e.decisionTimers = timer.New(e.onDecisionTimeout)
+	e.decisionTimers.Start()
 	return e
 }
 
@@ -98,6 +119,7 @@ func (e *Engine) Close() {
 		e.timers.Stop()
 		e.retryTimers.Stop()
 		e.leaseTimers.Stop()
+		e.decisionTimers.Stop()
 	})
 }
 
@@ -508,12 +530,28 @@ func (e *Engine) advanceLocked(workflowID string, planner Planner) error {
 	if err != nil {
 		return fmt.Errorf("server: read history %s: %w", workflowID, err)
 	}
+
+	// A remote (polyglot) planner can't be consulted inline: deciding means a
+	// network round-trip to an SDK worker, and e.mu is held here. Instead we
+	// hand the history out as a workflow task and apply the command when it
+	// comes back through CompleteWorkflowTask.
+	if rp, ok := planner.(*remotePlanner); ok {
+		return e.dispatchWorkflowTaskLocked(workflowID, rp.workflowType, events)
+	}
+
 	decision, err := planner.Decide(events)
 	if err != nil {
 		return fmt.Errorf("server: decide %s: %w", workflowID, err)
 	}
-	nextID := int64(len(events) + 1)
+	return e.applyDecisionLocked(workflowID, decision, int64(len(events)+1))
+}
 
+// applyDecisionLocked records the event a decision implies and performs its side
+// effect (enqueue a task, arm a timer, ...). It is the single place a decision
+// becomes durable, shared by in-process planners and remote SDK workers alike —
+// so a TypeScript workflow and a Go workflow take exactly the same path through
+// the engine. The caller must hold e.mu.
+func (e *Engine) applyDecisionLocked(workflowID string, decision state.Decision, nextID int64) error {
 	switch decision.Type {
 	case state.DecideScheduleStep:
 		scheduled := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{

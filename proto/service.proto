@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package workflow.v1;
 
+// Workflow tasks carry raw history to the SDK that replays it.
+import "event.proto";
+
 // Generated Go (messages + gRPC stubs) lands in internal/server as package
 // `server`, alongside the hand-written Engine that implements the service.
 option go_package = "github.com/olayanju-1234/durable-workflow-engine/internal/server;server";
@@ -39,7 +42,127 @@ service WorkflowService {
   rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
   rpc GetWorkflow(GetWorkflowRequest) returns (GetWorkflowResponse);
   rpc TerminateWorkflow(TerminateWorkflowRequest) returns (TerminateWorkflowResponse);
+
+  // ---- Polyglot workflow execution -------------------------------------
+  //
+  // Workflow code does not have to run inside the engine. These three RPCs let
+  // an SDK in ANY language own the orchestration logic:
+  //
+  //   RegisterWorkflowType — "I can run workflows of this type."
+  //   PollWorkflowTask     — receive a workflow's history to replay.
+  //   CompleteWorkflowTask — return the single next command.
+  //
+  // The engine stays the durable authority: it owns the history, applies the
+  // returned command, and records the resulting event. The SDK is a pure
+  // function from history to the next command — no state of its own, which is
+  // why a crashed SDK worker costs nothing but a re-dispatch.
+  //
+  // This is the same split as activities (PollTask/CompleteTask), applied one
+  // level up: activities are *what the work is*, workflow tasks are *what to
+  // do next*.
+  rpc RegisterWorkflowType(RegisterWorkflowTypeRequest) returns (RegisterWorkflowTypeResponse);
+  rpc PollWorkflowTask(PollWorkflowTaskRequest) returns (PollWorkflowTaskResponse);
+  rpc CompleteWorkflowTask(CompleteWorkflowTaskRequest) returns (CompleteWorkflowTaskResponse);
 }
+
+message RegisterWorkflowTypeRequest {
+  // Workflow types this worker can replay, e.g. ["OrderWorkflow"].
+  repeated string workflow_types = 1;
+  // Identifies the SDK worker, for logs.
+  string worker_id = 2;
+  // Informational: the SDK language/version, e.g. "typescript/0.1.0".
+  string sdk = 3;
+}
+
+message RegisterWorkflowTypeResponse {}
+
+message PollWorkflowTaskRequest {
+  string worker_id = 1;
+  // Only receive tasks for these types. A worker that registered several types
+  // normally passes all of them.
+  repeated string workflow_types = 2;
+}
+
+// WorkflowTask asks "given this history, what happens next?". It carries the
+// workflow's ENTIRE history: the SDK is stateless, so everything it needs to
+// reconstruct the workflow's position is in this message.
+message WorkflowTask {
+  string workflow_id = 1;
+  string workflow_type = 2;
+  repeated history.v1.HistoryEvent history = 3;
+  // Proof of ownership, presented on CompleteWorkflowTask.
+  string task_token = 4;
+  // How many events the decision is based on. The engine rejects a completion
+  // whose history has moved on since — optimistic concurrency, which is what
+  // makes re-dispatching a workflow task safe (see CompleteWorkflowTask).
+  int64 history_length = 5;
+}
+
+message PollWorkflowTaskResponse {
+  WorkflowTask task = 1;
+}
+
+// ---- Commands the SDK can return ----
+//
+// Exactly one per task: the engine drives one step at a time, so replay stops
+// at the first command the history has no record of. (Batched commands arrive
+// with parallel steps.)
+
+// ScheduleActivityCommand: run a named activity on a worker.
+message ScheduleActivityCommand {
+  string step_name = 1;
+  int64 sequence = 2;
+  bytes input = 3;
+}
+
+// StartTimerCommand: sleep durably. delay_ms is relative; the engine converts
+// it to an absolute deadline and records that, so restarts re-arm correctly.
+message StartTimerCommand {
+  string step_name = 1;
+  int64 sequence = 2;
+  int64 delay_ms = 3;
+  bytes input = 4;
+}
+
+// AwaitSignalCommand: park until a matching external signal arrives.
+message AwaitSignalCommand {
+  string step_name = 1;
+  int64 sequence = 2;
+  string signal_name = 3;
+  bytes input = 4;
+}
+
+message CompleteWorkflowCommand {
+  bytes output = 1;
+}
+
+message FailWorkflowCommand {
+  string error = 1;
+}
+
+message WorkflowCommand {
+  oneof command {
+    ScheduleActivityCommand schedule_activity = 1;
+    StartTimerCommand start_timer = 2;
+    AwaitSignalCommand await_signal = 3;
+    CompleteWorkflowCommand complete_workflow = 4;
+    FailWorkflowCommand fail_workflow = 5;
+  }
+}
+
+message CompleteWorkflowTaskRequest {
+  string workflow_id = 1;
+  string task_token = 2;
+  // The next thing to do. Omit it to report "nothing to do yet" (the workflow
+  // is blocked on a step already in flight).
+  WorkflowCommand command = 3;
+  // Set when the SDK could not replay the history — e.g. the workflow code no
+  // longer matches the recorded run (non-determinism). The engine records this
+  // as a workflow failure rather than looping on a task it can never complete.
+  string replay_error = 4;
+}
+
+message CompleteWorkflowTaskResponse {}
 
 // WorkflowStatus mirrors the engine's reconstructed lifecycle states.
 // TERMINATED is a presentation of FAILED-by-operator: on disk it is a

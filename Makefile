@@ -19,7 +19,7 @@ proto:
 		--go_opt=module=$(MODULE) \
 		--go-grpc_out=. \
 		--go-grpc_opt=module=$(MODULE) \
-		proto/event.proto proto/service.proto
+		proto/event.proto proto/service.proto proto/raft.proto
 
 fmt:
 	gofmt -w .

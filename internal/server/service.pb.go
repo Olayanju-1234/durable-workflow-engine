@@ -7,6 +7,7 @@
 package server
 
 import (
+	history "github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -85,6 +86,813 @@ func (WorkflowStatus) EnumDescriptor() ([]byte, []int) {
 	return file_service_proto_rawDescGZIP(), []int{0}
 }
 
+type RegisterWorkflowTypeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Workflow types this worker can replay, e.g. ["OrderWorkflow"].
+	WorkflowTypes []string `protobuf:"bytes,1,rep,name=workflow_types,json=workflowTypes,proto3" json:"workflow_types,omitempty"`
+	// Identifies the SDK worker, for logs.
+	WorkerId string `protobuf:"bytes,2,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	// Informational: the SDK language/version, e.g. "typescript/0.1.0".
+	Sdk           string `protobuf:"bytes,3,opt,name=sdk,proto3" json:"sdk,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterWorkflowTypeRequest) Reset() {
+	*x = RegisterWorkflowTypeRequest{}
+	mi := &file_service_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterWorkflowTypeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterWorkflowTypeRequest) ProtoMessage() {}
+
+func (x *RegisterWorkflowTypeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterWorkflowTypeRequest.ProtoReflect.Descriptor instead.
+func (*RegisterWorkflowTypeRequest) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *RegisterWorkflowTypeRequest) GetWorkflowTypes() []string {
+	if x != nil {
+		return x.WorkflowTypes
+	}
+	return nil
+}
+
+func (x *RegisterWorkflowTypeRequest) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *RegisterWorkflowTypeRequest) GetSdk() string {
+	if x != nil {
+		return x.Sdk
+	}
+	return ""
+}
+
+type RegisterWorkflowTypeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterWorkflowTypeResponse) Reset() {
+	*x = RegisterWorkflowTypeResponse{}
+	mi := &file_service_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterWorkflowTypeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterWorkflowTypeResponse) ProtoMessage() {}
+
+func (x *RegisterWorkflowTypeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterWorkflowTypeResponse.ProtoReflect.Descriptor instead.
+func (*RegisterWorkflowTypeResponse) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{1}
+}
+
+type PollWorkflowTaskRequest struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	// Only receive tasks for these types. A worker that registered several types
+	// normally passes all of them.
+	WorkflowTypes []string `protobuf:"bytes,2,rep,name=workflow_types,json=workflowTypes,proto3" json:"workflow_types,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PollWorkflowTaskRequest) Reset() {
+	*x = PollWorkflowTaskRequest{}
+	mi := &file_service_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PollWorkflowTaskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PollWorkflowTaskRequest) ProtoMessage() {}
+
+func (x *PollWorkflowTaskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PollWorkflowTaskRequest.ProtoReflect.Descriptor instead.
+func (*PollWorkflowTaskRequest) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *PollWorkflowTaskRequest) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *PollWorkflowTaskRequest) GetWorkflowTypes() []string {
+	if x != nil {
+		return x.WorkflowTypes
+	}
+	return nil
+}
+
+// WorkflowTask asks "given this history, what happens next?". It carries the
+// workflow's ENTIRE history: the SDK is stateless, so everything it needs to
+// reconstruct the workflow's position is in this message.
+type WorkflowTask struct {
+	state        protoimpl.MessageState  `protogen:"open.v1"`
+	WorkflowId   string                  `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	WorkflowType string                  `protobuf:"bytes,2,opt,name=workflow_type,json=workflowType,proto3" json:"workflow_type,omitempty"`
+	History      []*history.HistoryEvent `protobuf:"bytes,3,rep,name=history,proto3" json:"history,omitempty"`
+	// Proof of ownership, presented on CompleteWorkflowTask.
+	TaskToken string `protobuf:"bytes,4,opt,name=task_token,json=taskToken,proto3" json:"task_token,omitempty"`
+	// How many events the decision is based on. The engine rejects a completion
+	// whose history has moved on since — optimistic concurrency, which is what
+	// makes re-dispatching a workflow task safe (see CompleteWorkflowTask).
+	HistoryLength int64 `protobuf:"varint,5,opt,name=history_length,json=historyLength,proto3" json:"history_length,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkflowTask) Reset() {
+	*x = WorkflowTask{}
+	mi := &file_service_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkflowTask) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkflowTask) ProtoMessage() {}
+
+func (x *WorkflowTask) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkflowTask.ProtoReflect.Descriptor instead.
+func (*WorkflowTask) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *WorkflowTask) GetWorkflowId() string {
+	if x != nil {
+		return x.WorkflowId
+	}
+	return ""
+}
+
+func (x *WorkflowTask) GetWorkflowType() string {
+	if x != nil {
+		return x.WorkflowType
+	}
+	return ""
+}
+
+func (x *WorkflowTask) GetHistory() []*history.HistoryEvent {
+	if x != nil {
+		return x.History
+	}
+	return nil
+}
+
+func (x *WorkflowTask) GetTaskToken() string {
+	if x != nil {
+		return x.TaskToken
+	}
+	return ""
+}
+
+func (x *WorkflowTask) GetHistoryLength() int64 {
+	if x != nil {
+		return x.HistoryLength
+	}
+	return 0
+}
+
+type PollWorkflowTaskResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Task          *WorkflowTask          `protobuf:"bytes,1,opt,name=task,proto3" json:"task,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PollWorkflowTaskResponse) Reset() {
+	*x = PollWorkflowTaskResponse{}
+	mi := &file_service_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PollWorkflowTaskResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PollWorkflowTaskResponse) ProtoMessage() {}
+
+func (x *PollWorkflowTaskResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PollWorkflowTaskResponse.ProtoReflect.Descriptor instead.
+func (*PollWorkflowTaskResponse) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PollWorkflowTaskResponse) GetTask() *WorkflowTask {
+	if x != nil {
+		return x.Task
+	}
+	return nil
+}
+
+// ScheduleActivityCommand: run a named activity on a worker.
+type ScheduleActivityCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StepName      string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
+	Sequence      int64                  `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Input         []byte                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScheduleActivityCommand) Reset() {
+	*x = ScheduleActivityCommand{}
+	mi := &file_service_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScheduleActivityCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScheduleActivityCommand) ProtoMessage() {}
+
+func (x *ScheduleActivityCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScheduleActivityCommand.ProtoReflect.Descriptor instead.
+func (*ScheduleActivityCommand) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ScheduleActivityCommand) GetStepName() string {
+	if x != nil {
+		return x.StepName
+	}
+	return ""
+}
+
+func (x *ScheduleActivityCommand) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *ScheduleActivityCommand) GetInput() []byte {
+	if x != nil {
+		return x.Input
+	}
+	return nil
+}
+
+// StartTimerCommand: sleep durably. delay_ms is relative; the engine converts
+// it to an absolute deadline and records that, so restarts re-arm correctly.
+type StartTimerCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StepName      string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
+	Sequence      int64                  `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	DelayMs       int64                  `protobuf:"varint,3,opt,name=delay_ms,json=delayMs,proto3" json:"delay_ms,omitempty"`
+	Input         []byte                 `protobuf:"bytes,4,opt,name=input,proto3" json:"input,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartTimerCommand) Reset() {
+	*x = StartTimerCommand{}
+	mi := &file_service_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartTimerCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartTimerCommand) ProtoMessage() {}
+
+func (x *StartTimerCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartTimerCommand.ProtoReflect.Descriptor instead.
+func (*StartTimerCommand) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *StartTimerCommand) GetStepName() string {
+	if x != nil {
+		return x.StepName
+	}
+	return ""
+}
+
+func (x *StartTimerCommand) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *StartTimerCommand) GetDelayMs() int64 {
+	if x != nil {
+		return x.DelayMs
+	}
+	return 0
+}
+
+func (x *StartTimerCommand) GetInput() []byte {
+	if x != nil {
+		return x.Input
+	}
+	return nil
+}
+
+// AwaitSignalCommand: park until a matching external signal arrives.
+type AwaitSignalCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StepName      string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
+	Sequence      int64                  `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	SignalName    string                 `protobuf:"bytes,3,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
+	Input         []byte                 `protobuf:"bytes,4,opt,name=input,proto3" json:"input,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AwaitSignalCommand) Reset() {
+	*x = AwaitSignalCommand{}
+	mi := &file_service_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AwaitSignalCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AwaitSignalCommand) ProtoMessage() {}
+
+func (x *AwaitSignalCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AwaitSignalCommand.ProtoReflect.Descriptor instead.
+func (*AwaitSignalCommand) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *AwaitSignalCommand) GetStepName() string {
+	if x != nil {
+		return x.StepName
+	}
+	return ""
+}
+
+func (x *AwaitSignalCommand) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *AwaitSignalCommand) GetSignalName() string {
+	if x != nil {
+		return x.SignalName
+	}
+	return ""
+}
+
+func (x *AwaitSignalCommand) GetInput() []byte {
+	if x != nil {
+		return x.Input
+	}
+	return nil
+}
+
+type CompleteWorkflowCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Output        []byte                 `protobuf:"bytes,1,opt,name=output,proto3" json:"output,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompleteWorkflowCommand) Reset() {
+	*x = CompleteWorkflowCommand{}
+	mi := &file_service_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompleteWorkflowCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompleteWorkflowCommand) ProtoMessage() {}
+
+func (x *CompleteWorkflowCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompleteWorkflowCommand.ProtoReflect.Descriptor instead.
+func (*CompleteWorkflowCommand) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CompleteWorkflowCommand) GetOutput() []byte {
+	if x != nil {
+		return x.Output
+	}
+	return nil
+}
+
+type FailWorkflowCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Error         string                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FailWorkflowCommand) Reset() {
+	*x = FailWorkflowCommand{}
+	mi := &file_service_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FailWorkflowCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FailWorkflowCommand) ProtoMessage() {}
+
+func (x *FailWorkflowCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FailWorkflowCommand.ProtoReflect.Descriptor instead.
+func (*FailWorkflowCommand) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *FailWorkflowCommand) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type WorkflowCommand struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Command:
+	//
+	//	*WorkflowCommand_ScheduleActivity
+	//	*WorkflowCommand_StartTimer
+	//	*WorkflowCommand_AwaitSignal
+	//	*WorkflowCommand_CompleteWorkflow
+	//	*WorkflowCommand_FailWorkflow
+	Command       isWorkflowCommand_Command `protobuf_oneof:"command"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkflowCommand) Reset() {
+	*x = WorkflowCommand{}
+	mi := &file_service_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkflowCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkflowCommand) ProtoMessage() {}
+
+func (x *WorkflowCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkflowCommand.ProtoReflect.Descriptor instead.
+func (*WorkflowCommand) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *WorkflowCommand) GetCommand() isWorkflowCommand_Command {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+func (x *WorkflowCommand) GetScheduleActivity() *ScheduleActivityCommand {
+	if x != nil {
+		if x, ok := x.Command.(*WorkflowCommand_ScheduleActivity); ok {
+			return x.ScheduleActivity
+		}
+	}
+	return nil
+}
+
+func (x *WorkflowCommand) GetStartTimer() *StartTimerCommand {
+	if x != nil {
+		if x, ok := x.Command.(*WorkflowCommand_StartTimer); ok {
+			return x.StartTimer
+		}
+	}
+	return nil
+}
+
+func (x *WorkflowCommand) GetAwaitSignal() *AwaitSignalCommand {
+	if x != nil {
+		if x, ok := x.Command.(*WorkflowCommand_AwaitSignal); ok {
+			return x.AwaitSignal
+		}
+	}
+	return nil
+}
+
+func (x *WorkflowCommand) GetCompleteWorkflow() *CompleteWorkflowCommand {
+	if x != nil {
+		if x, ok := x.Command.(*WorkflowCommand_CompleteWorkflow); ok {
+			return x.CompleteWorkflow
+		}
+	}
+	return nil
+}
+
+func (x *WorkflowCommand) GetFailWorkflow() *FailWorkflowCommand {
+	if x != nil {
+		if x, ok := x.Command.(*WorkflowCommand_FailWorkflow); ok {
+			return x.FailWorkflow
+		}
+	}
+	return nil
+}
+
+type isWorkflowCommand_Command interface {
+	isWorkflowCommand_Command()
+}
+
+type WorkflowCommand_ScheduleActivity struct {
+	ScheduleActivity *ScheduleActivityCommand `protobuf:"bytes,1,opt,name=schedule_activity,json=scheduleActivity,proto3,oneof"`
+}
+
+type WorkflowCommand_StartTimer struct {
+	StartTimer *StartTimerCommand `protobuf:"bytes,2,opt,name=start_timer,json=startTimer,proto3,oneof"`
+}
+
+type WorkflowCommand_AwaitSignal struct {
+	AwaitSignal *AwaitSignalCommand `protobuf:"bytes,3,opt,name=await_signal,json=awaitSignal,proto3,oneof"`
+}
+
+type WorkflowCommand_CompleteWorkflow struct {
+	CompleteWorkflow *CompleteWorkflowCommand `protobuf:"bytes,4,opt,name=complete_workflow,json=completeWorkflow,proto3,oneof"`
+}
+
+type WorkflowCommand_FailWorkflow struct {
+	FailWorkflow *FailWorkflowCommand `protobuf:"bytes,5,opt,name=fail_workflow,json=failWorkflow,proto3,oneof"`
+}
+
+func (*WorkflowCommand_ScheduleActivity) isWorkflowCommand_Command() {}
+
+func (*WorkflowCommand_StartTimer) isWorkflowCommand_Command() {}
+
+func (*WorkflowCommand_AwaitSignal) isWorkflowCommand_Command() {}
+
+func (*WorkflowCommand_CompleteWorkflow) isWorkflowCommand_Command() {}
+
+func (*WorkflowCommand_FailWorkflow) isWorkflowCommand_Command() {}
+
+type CompleteWorkflowTaskRequest struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowId string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	TaskToken  string                 `protobuf:"bytes,2,opt,name=task_token,json=taskToken,proto3" json:"task_token,omitempty"`
+	// The next thing to do. Omit it to report "nothing to do yet" (the workflow
+	// is blocked on a step already in flight).
+	Command *WorkflowCommand `protobuf:"bytes,3,opt,name=command,proto3" json:"command,omitempty"`
+	// Set when the SDK could not replay the history — e.g. the workflow code no
+	// longer matches the recorded run (non-determinism). The engine records this
+	// as a workflow failure rather than looping on a task it can never complete.
+	ReplayError   string `protobuf:"bytes,4,opt,name=replay_error,json=replayError,proto3" json:"replay_error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompleteWorkflowTaskRequest) Reset() {
+	*x = CompleteWorkflowTaskRequest{}
+	mi := &file_service_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompleteWorkflowTaskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompleteWorkflowTaskRequest) ProtoMessage() {}
+
+func (x *CompleteWorkflowTaskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompleteWorkflowTaskRequest.ProtoReflect.Descriptor instead.
+func (*CompleteWorkflowTaskRequest) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *CompleteWorkflowTaskRequest) GetWorkflowId() string {
+	if x != nil {
+		return x.WorkflowId
+	}
+	return ""
+}
+
+func (x *CompleteWorkflowTaskRequest) GetTaskToken() string {
+	if x != nil {
+		return x.TaskToken
+	}
+	return ""
+}
+
+func (x *CompleteWorkflowTaskRequest) GetCommand() *WorkflowCommand {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+func (x *CompleteWorkflowTaskRequest) GetReplayError() string {
+	if x != nil {
+		return x.ReplayError
+	}
+	return ""
+}
+
+type CompleteWorkflowTaskResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompleteWorkflowTaskResponse) Reset() {
+	*x = CompleteWorkflowTaskResponse{}
+	mi := &file_service_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompleteWorkflowTaskResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompleteWorkflowTaskResponse) ProtoMessage() {}
+
+func (x *CompleteWorkflowTaskResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompleteWorkflowTaskResponse.ProtoReflect.Descriptor instead.
+func (*CompleteWorkflowTaskResponse) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{12}
+}
+
 type StartWorkflowRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The registered workflow type to run (e.g. "OrderWorkflow").
@@ -99,7 +907,7 @@ type StartWorkflowRequest struct {
 
 func (x *StartWorkflowRequest) Reset() {
 	*x = StartWorkflowRequest{}
-	mi := &file_service_proto_msgTypes[0]
+	mi := &file_service_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -111,7 +919,7 @@ func (x *StartWorkflowRequest) String() string {
 func (*StartWorkflowRequest) ProtoMessage() {}
 
 func (x *StartWorkflowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[0]
+	mi := &file_service_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -124,7 +932,7 @@ func (x *StartWorkflowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartWorkflowRequest.ProtoReflect.Descriptor instead.
 func (*StartWorkflowRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{0}
+	return file_service_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *StartWorkflowRequest) GetWorkflowType() string {
@@ -157,7 +965,7 @@ type StartWorkflowResponse struct {
 
 func (x *StartWorkflowResponse) Reset() {
 	*x = StartWorkflowResponse{}
-	mi := &file_service_proto_msgTypes[1]
+	mi := &file_service_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -169,7 +977,7 @@ func (x *StartWorkflowResponse) String() string {
 func (*StartWorkflowResponse) ProtoMessage() {}
 
 func (x *StartWorkflowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[1]
+	mi := &file_service_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -182,7 +990,7 @@ func (x *StartWorkflowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartWorkflowResponse.ProtoReflect.Descriptor instead.
 func (*StartWorkflowResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{1}
+	return file_service_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StartWorkflowResponse) GetWorkflowId() string {
@@ -203,7 +1011,7 @@ type PollTaskRequest struct {
 
 func (x *PollTaskRequest) Reset() {
 	*x = PollTaskRequest{}
-	mi := &file_service_proto_msgTypes[2]
+	mi := &file_service_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -215,7 +1023,7 @@ func (x *PollTaskRequest) String() string {
 func (*PollTaskRequest) ProtoMessage() {}
 
 func (x *PollTaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[2]
+	mi := &file_service_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -228,7 +1036,7 @@ func (x *PollTaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PollTaskRequest.ProtoReflect.Descriptor instead.
 func (*PollTaskRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{2}
+	return file_service_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PollTaskRequest) GetWorkerId() string {
@@ -257,7 +1065,7 @@ type Task struct {
 
 func (x *Task) Reset() {
 	*x = Task{}
-	mi := &file_service_proto_msgTypes[3]
+	mi := &file_service_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -269,7 +1077,7 @@ func (x *Task) String() string {
 func (*Task) ProtoMessage() {}
 
 func (x *Task) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[3]
+	mi := &file_service_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -282,7 +1090,7 @@ func (x *Task) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Task.ProtoReflect.Descriptor instead.
 func (*Task) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{3}
+	return file_service_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Task) GetWorkflowId() string {
@@ -336,7 +1144,7 @@ type PollTaskResponse struct {
 
 func (x *PollTaskResponse) Reset() {
 	*x = PollTaskResponse{}
-	mi := &file_service_proto_msgTypes[4]
+	mi := &file_service_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -348,7 +1156,7 @@ func (x *PollTaskResponse) String() string {
 func (*PollTaskResponse) ProtoMessage() {}
 
 func (x *PollTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[4]
+	mi := &file_service_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -361,7 +1169,7 @@ func (x *PollTaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PollTaskResponse.ProtoReflect.Descriptor instead.
 func (*PollTaskResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{4}
+	return file_service_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *PollTaskResponse) GetTask() *Task {
@@ -393,7 +1201,7 @@ type CompleteTaskRequest struct {
 
 func (x *CompleteTaskRequest) Reset() {
 	*x = CompleteTaskRequest{}
-	mi := &file_service_proto_msgTypes[5]
+	mi := &file_service_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -405,7 +1213,7 @@ func (x *CompleteTaskRequest) String() string {
 func (*CompleteTaskRequest) ProtoMessage() {}
 
 func (x *CompleteTaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[5]
+	mi := &file_service_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -418,7 +1226,7 @@ func (x *CompleteTaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompleteTaskRequest.ProtoReflect.Descriptor instead.
 func (*CompleteTaskRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{5}
+	return file_service_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CompleteTaskRequest) GetWorkflowId() string {
@@ -498,7 +1306,7 @@ type CompleteTaskResponse struct {
 
 func (x *CompleteTaskResponse) Reset() {
 	*x = CompleteTaskResponse{}
-	mi := &file_service_proto_msgTypes[6]
+	mi := &file_service_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -510,7 +1318,7 @@ func (x *CompleteTaskResponse) String() string {
 func (*CompleteTaskResponse) ProtoMessage() {}
 
 func (x *CompleteTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[6]
+	mi := &file_service_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -523,7 +1331,7 @@ func (x *CompleteTaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompleteTaskResponse.ProtoReflect.Descriptor instead.
 func (*CompleteTaskResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{6}
+	return file_service_proto_rawDescGZIP(), []int{19}
 }
 
 type HeartbeatRequest struct {
@@ -539,7 +1347,7 @@ type HeartbeatRequest struct {
 
 func (x *HeartbeatRequest) Reset() {
 	*x = HeartbeatRequest{}
-	mi := &file_service_proto_msgTypes[7]
+	mi := &file_service_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -551,7 +1359,7 @@ func (x *HeartbeatRequest) String() string {
 func (*HeartbeatRequest) ProtoMessage() {}
 
 func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[7]
+	mi := &file_service_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -564,7 +1372,7 @@ func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{7}
+	return file_service_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *HeartbeatRequest) GetWorkflowId() string {
@@ -596,7 +1404,7 @@ type HeartbeatResponse struct {
 
 func (x *HeartbeatResponse) Reset() {
 	*x = HeartbeatResponse{}
-	mi := &file_service_proto_msgTypes[8]
+	mi := &file_service_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -608,7 +1416,7 @@ func (x *HeartbeatResponse) String() string {
 func (*HeartbeatResponse) ProtoMessage() {}
 
 func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[8]
+	mi := &file_service_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -621,7 +1429,7 @@ func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{8}
+	return file_service_proto_rawDescGZIP(), []int{21}
 }
 
 type SignalWorkflowRequest struct {
@@ -635,7 +1443,7 @@ type SignalWorkflowRequest struct {
 
 func (x *SignalWorkflowRequest) Reset() {
 	*x = SignalWorkflowRequest{}
-	mi := &file_service_proto_msgTypes[9]
+	mi := &file_service_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -647,7 +1455,7 @@ func (x *SignalWorkflowRequest) String() string {
 func (*SignalWorkflowRequest) ProtoMessage() {}
 
 func (x *SignalWorkflowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[9]
+	mi := &file_service_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -660,7 +1468,7 @@ func (x *SignalWorkflowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignalWorkflowRequest.ProtoReflect.Descriptor instead.
 func (*SignalWorkflowRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{9}
+	return file_service_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SignalWorkflowRequest) GetWorkflowId() string {
@@ -692,7 +1500,7 @@ type SignalWorkflowResponse struct {
 
 func (x *SignalWorkflowResponse) Reset() {
 	*x = SignalWorkflowResponse{}
-	mi := &file_service_proto_msgTypes[10]
+	mi := &file_service_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -704,7 +1512,7 @@ func (x *SignalWorkflowResponse) String() string {
 func (*SignalWorkflowResponse) ProtoMessage() {}
 
 func (x *SignalWorkflowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[10]
+	mi := &file_service_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -717,7 +1525,7 @@ func (x *SignalWorkflowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignalWorkflowResponse.ProtoReflect.Descriptor instead.
 func (*SignalWorkflowResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{10}
+	return file_service_proto_rawDescGZIP(), []int{23}
 }
 
 type ListWorkflowsRequest struct {
@@ -730,7 +1538,7 @@ type ListWorkflowsRequest struct {
 
 func (x *ListWorkflowsRequest) Reset() {
 	*x = ListWorkflowsRequest{}
-	mi := &file_service_proto_msgTypes[11]
+	mi := &file_service_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -742,7 +1550,7 @@ func (x *ListWorkflowsRequest) String() string {
 func (*ListWorkflowsRequest) ProtoMessage() {}
 
 func (x *ListWorkflowsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[11]
+	mi := &file_service_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -755,7 +1563,7 @@ func (x *ListWorkflowsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkflowsRequest.ProtoReflect.Descriptor instead.
 func (*ListWorkflowsRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{11}
+	return file_service_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ListWorkflowsRequest) GetStatusFilter() WorkflowStatus {
@@ -787,7 +1595,7 @@ type WorkflowSummary struct {
 
 func (x *WorkflowSummary) Reset() {
 	*x = WorkflowSummary{}
-	mi := &file_service_proto_msgTypes[12]
+	mi := &file_service_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -799,7 +1607,7 @@ func (x *WorkflowSummary) String() string {
 func (*WorkflowSummary) ProtoMessage() {}
 
 func (x *WorkflowSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[12]
+	mi := &file_service_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -812,7 +1620,7 @@ func (x *WorkflowSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowSummary.ProtoReflect.Descriptor instead.
 func (*WorkflowSummary) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{12}
+	return file_service_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *WorkflowSummary) GetWorkflowId() string {
@@ -873,7 +1681,7 @@ type ListWorkflowsResponse struct {
 
 func (x *ListWorkflowsResponse) Reset() {
 	*x = ListWorkflowsResponse{}
-	mi := &file_service_proto_msgTypes[13]
+	mi := &file_service_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -885,7 +1693,7 @@ func (x *ListWorkflowsResponse) String() string {
 func (*ListWorkflowsResponse) ProtoMessage() {}
 
 func (x *ListWorkflowsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[13]
+	mi := &file_service_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -898,7 +1706,7 @@ func (x *ListWorkflowsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkflowsResponse.ProtoReflect.Descriptor instead.
 func (*ListWorkflowsResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{13}
+	return file_service_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ListWorkflowsResponse) GetWorkflows() []*WorkflowSummary {
@@ -917,7 +1725,7 @@ type GetWorkflowRequest struct {
 
 func (x *GetWorkflowRequest) Reset() {
 	*x = GetWorkflowRequest{}
-	mi := &file_service_proto_msgTypes[14]
+	mi := &file_service_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -929,7 +1737,7 @@ func (x *GetWorkflowRequest) String() string {
 func (*GetWorkflowRequest) ProtoMessage() {}
 
 func (x *GetWorkflowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[14]
+	mi := &file_service_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -942,7 +1750,7 @@ func (x *GetWorkflowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWorkflowRequest.ProtoReflect.Descriptor instead.
 func (*GetWorkflowRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{14}
+	return file_service_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *GetWorkflowRequest) GetWorkflowId() string {
@@ -957,7 +1765,7 @@ type StepInfo struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	StepName string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	Sequence int64                  `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	// "activity", "timer", or "signal".
+	// "ACTIVITY", "TIMER", or "SIGNAL".
 	Kind string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
 	// "SCHEDULED", "COMPLETED", or "FAILED".
 	Status string `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
@@ -974,7 +1782,7 @@ type StepInfo struct {
 
 func (x *StepInfo) Reset() {
 	*x = StepInfo{}
-	mi := &file_service_proto_msgTypes[15]
+	mi := &file_service_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -986,7 +1794,7 @@ func (x *StepInfo) String() string {
 func (*StepInfo) ProtoMessage() {}
 
 func (x *StepInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[15]
+	mi := &file_service_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -999,7 +1807,7 @@ func (x *StepInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepInfo.ProtoReflect.Descriptor instead.
 func (*StepInfo) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{15}
+	return file_service_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *StepInfo) GetStepName() string {
@@ -1078,7 +1886,7 @@ type GetWorkflowResponse struct {
 
 func (x *GetWorkflowResponse) Reset() {
 	*x = GetWorkflowResponse{}
-	mi := &file_service_proto_msgTypes[16]
+	mi := &file_service_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1090,7 +1898,7 @@ func (x *GetWorkflowResponse) String() string {
 func (*GetWorkflowResponse) ProtoMessage() {}
 
 func (x *GetWorkflowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[16]
+	mi := &file_service_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1103,7 +1911,7 @@ func (x *GetWorkflowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWorkflowResponse.ProtoReflect.Descriptor instead.
 func (*GetWorkflowResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{16}
+	return file_service_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *GetWorkflowResponse) GetSummary() *WorkflowSummary {
@@ -1145,7 +1953,7 @@ type TerminateWorkflowRequest struct {
 
 func (x *TerminateWorkflowRequest) Reset() {
 	*x = TerminateWorkflowRequest{}
-	mi := &file_service_proto_msgTypes[17]
+	mi := &file_service_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1157,7 +1965,7 @@ func (x *TerminateWorkflowRequest) String() string {
 func (*TerminateWorkflowRequest) ProtoMessage() {}
 
 func (x *TerminateWorkflowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[17]
+	mi := &file_service_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1170,7 +1978,7 @@ func (x *TerminateWorkflowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminateWorkflowRequest.ProtoReflect.Descriptor instead.
 func (*TerminateWorkflowRequest) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{17}
+	return file_service_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *TerminateWorkflowRequest) GetWorkflowId() string {
@@ -1195,7 +2003,7 @@ type TerminateWorkflowResponse struct {
 
 func (x *TerminateWorkflowResponse) Reset() {
 	*x = TerminateWorkflowResponse{}
-	mi := &file_service_proto_msgTypes[18]
+	mi := &file_service_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1207,7 +2015,7 @@ func (x *TerminateWorkflowResponse) String() string {
 func (*TerminateWorkflowResponse) ProtoMessage() {}
 
 func (x *TerminateWorkflowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_service_proto_msgTypes[18]
+	mi := &file_service_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1220,14 +2028,67 @@ func (x *TerminateWorkflowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminateWorkflowResponse.ProtoReflect.Descriptor instead.
 func (*TerminateWorkflowResponse) Descriptor() ([]byte, []int) {
-	return file_service_proto_rawDescGZIP(), []int{18}
+	return file_service_proto_rawDescGZIP(), []int{31}
 }
 
 var File_service_proto protoreflect.FileDescriptor
 
 const file_service_proto_rawDesc = "" +
 	"\n" +
-	"\rservice.proto\x12\vworkflow.v1\"r\n" +
+	"\rservice.proto\x12\vworkflow.v1\x1a\vevent.proto\"s\n" +
+	"\x1bRegisterWorkflowTypeRequest\x12%\n" +
+	"\x0eworkflow_types\x18\x01 \x03(\tR\rworkflowTypes\x12\x1b\n" +
+	"\tworker_id\x18\x02 \x01(\tR\bworkerId\x12\x10\n" +
+	"\x03sdk\x18\x03 \x01(\tR\x03sdk\"\x1e\n" +
+	"\x1cRegisterWorkflowTypeResponse\"]\n" +
+	"\x17PollWorkflowTaskRequest\x12\x1b\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12%\n" +
+	"\x0eworkflow_types\x18\x02 \x03(\tR\rworkflowTypes\"\xce\x01\n" +
+	"\fWorkflowTask\x12\x1f\n" +
+	"\vworkflow_id\x18\x01 \x01(\tR\n" +
+	"workflowId\x12#\n" +
+	"\rworkflow_type\x18\x02 \x01(\tR\fworkflowType\x122\n" +
+	"\ahistory\x18\x03 \x03(\v2\x18.history.v1.HistoryEventR\ahistory\x12\x1d\n" +
+	"\n" +
+	"task_token\x18\x04 \x01(\tR\ttaskToken\x12%\n" +
+	"\x0ehistory_length\x18\x05 \x01(\x03R\rhistoryLength\"I\n" +
+	"\x18PollWorkflowTaskResponse\x12-\n" +
+	"\x04task\x18\x01 \x01(\v2\x19.workflow.v1.WorkflowTaskR\x04task\"h\n" +
+	"\x17ScheduleActivityCommand\x12\x1b\n" +
+	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
+	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x14\n" +
+	"\x05input\x18\x03 \x01(\fR\x05input\"}\n" +
+	"\x11StartTimerCommand\x12\x1b\n" +
+	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
+	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x19\n" +
+	"\bdelay_ms\x18\x03 \x01(\x03R\adelayMs\x12\x14\n" +
+	"\x05input\x18\x04 \x01(\fR\x05input\"\x84\x01\n" +
+	"\x12AwaitSignalCommand\x12\x1b\n" +
+	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
+	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x1f\n" +
+	"\vsignal_name\x18\x03 \x01(\tR\n" +
+	"signalName\x12\x14\n" +
+	"\x05input\x18\x04 \x01(\fR\x05input\"1\n" +
+	"\x17CompleteWorkflowCommand\x12\x16\n" +
+	"\x06output\x18\x01 \x01(\fR\x06output\"+\n" +
+	"\x13FailWorkflowCommand\x12\x14\n" +
+	"\x05error\x18\x01 \x01(\tR\x05error\"\x98\x03\n" +
+	"\x0fWorkflowCommand\x12S\n" +
+	"\x11schedule_activity\x18\x01 \x01(\v2$.workflow.v1.ScheduleActivityCommandH\x00R\x10scheduleActivity\x12A\n" +
+	"\vstart_timer\x18\x02 \x01(\v2\x1e.workflow.v1.StartTimerCommandH\x00R\n" +
+	"startTimer\x12D\n" +
+	"\fawait_signal\x18\x03 \x01(\v2\x1f.workflow.v1.AwaitSignalCommandH\x00R\vawaitSignal\x12S\n" +
+	"\x11complete_workflow\x18\x04 \x01(\v2$.workflow.v1.CompleteWorkflowCommandH\x00R\x10completeWorkflow\x12G\n" +
+	"\rfail_workflow\x18\x05 \x01(\v2 .workflow.v1.FailWorkflowCommandH\x00R\ffailWorkflowB\t\n" +
+	"\acommand\"\xb8\x01\n" +
+	"\x1bCompleteWorkflowTaskRequest\x12\x1f\n" +
+	"\vworkflow_id\x18\x01 \x01(\tR\n" +
+	"workflowId\x12\x1d\n" +
+	"\n" +
+	"task_token\x18\x02 \x01(\tR\ttaskToken\x126\n" +
+	"\acommand\x18\x03 \x01(\v2\x1c.workflow.v1.WorkflowCommandR\acommand\x12!\n" +
+	"\freplay_error\x18\x04 \x01(\tR\vreplayError\"\x1e\n" +
+	"\x1cCompleteWorkflowTaskResponse\"r\n" +
 	"\x14StartWorkflowRequest\x12#\n" +
 	"\rworkflow_type\x18\x01 \x01(\tR\fworkflowType\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1f\n" +
@@ -1320,7 +2181,7 @@ const file_service_proto_rawDesc = "" +
 	"\x19WORKFLOW_STATUS_COMPLETED\x10\x03\x12\x1a\n" +
 	"\x16WORKFLOW_STATUS_FAILED\x10\x04\x12\x1d\n" +
 	"\x19WORKFLOW_STATUS_TIMED_OUT\x10\x05\x12\x1e\n" +
-	"\x1aWORKFLOW_STATUS_TERMINATED\x10\x062\xbc\x05\n" +
+	"\x1aWORKFLOW_STATUS_TERMINATED\x10\x062\xf7\a\n" +
 	"\x0fWorkflowService\x12V\n" +
 	"\rStartWorkflow\x12!.workflow.v1.StartWorkflowRequest\x1a\".workflow.v1.StartWorkflowResponse\x12G\n" +
 	"\bPollTask\x12\x1c.workflow.v1.PollTaskRequest\x1a\x1d.workflow.v1.PollTaskResponse\x12S\n" +
@@ -1329,7 +2190,10 @@ const file_service_proto_rawDesc = "" +
 	"\tHeartbeat\x12\x1d.workflow.v1.HeartbeatRequest\x1a\x1e.workflow.v1.HeartbeatResponse\x12V\n" +
 	"\rListWorkflows\x12!.workflow.v1.ListWorkflowsRequest\x1a\".workflow.v1.ListWorkflowsResponse\x12P\n" +
 	"\vGetWorkflow\x12\x1f.workflow.v1.GetWorkflowRequest\x1a .workflow.v1.GetWorkflowResponse\x12b\n" +
-	"\x11TerminateWorkflow\x12%.workflow.v1.TerminateWorkflowRequest\x1a&.workflow.v1.TerminateWorkflowResponseBIZGgithub.com/olayanju-1234/durable-workflow-engine/internal/server;serverb\x06proto3"
+	"\x11TerminateWorkflow\x12%.workflow.v1.TerminateWorkflowRequest\x1a&.workflow.v1.TerminateWorkflowResponse\x12k\n" +
+	"\x14RegisterWorkflowType\x12(.workflow.v1.RegisterWorkflowTypeRequest\x1a).workflow.v1.RegisterWorkflowTypeResponse\x12_\n" +
+	"\x10PollWorkflowTask\x12$.workflow.v1.PollWorkflowTaskRequest\x1a%.workflow.v1.PollWorkflowTaskResponse\x12k\n" +
+	"\x14CompleteWorkflowTask\x12(.workflow.v1.CompleteWorkflowTaskRequest\x1a).workflow.v1.CompleteWorkflowTaskResponseBIZGgithub.com/olayanju-1234/durable-workflow-engine/internal/server;serverb\x06proto3"
 
 var (
 	file_service_proto_rawDescOnce sync.Once
@@ -1344,57 +2208,85 @@ func file_service_proto_rawDescGZIP() []byte {
 }
 
 var file_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_service_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_service_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_service_proto_goTypes = []any{
-	(WorkflowStatus)(0),               // 0: workflow.v1.WorkflowStatus
-	(*StartWorkflowRequest)(nil),      // 1: workflow.v1.StartWorkflowRequest
-	(*StartWorkflowResponse)(nil),     // 2: workflow.v1.StartWorkflowResponse
-	(*PollTaskRequest)(nil),           // 3: workflow.v1.PollTaskRequest
-	(*Task)(nil),                      // 4: workflow.v1.Task
-	(*PollTaskResponse)(nil),          // 5: workflow.v1.PollTaskResponse
-	(*CompleteTaskRequest)(nil),       // 6: workflow.v1.CompleteTaskRequest
-	(*CompleteTaskResponse)(nil),      // 7: workflow.v1.CompleteTaskResponse
-	(*HeartbeatRequest)(nil),          // 8: workflow.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),         // 9: workflow.v1.HeartbeatResponse
-	(*SignalWorkflowRequest)(nil),     // 10: workflow.v1.SignalWorkflowRequest
-	(*SignalWorkflowResponse)(nil),    // 11: workflow.v1.SignalWorkflowResponse
-	(*ListWorkflowsRequest)(nil),      // 12: workflow.v1.ListWorkflowsRequest
-	(*WorkflowSummary)(nil),           // 13: workflow.v1.WorkflowSummary
-	(*ListWorkflowsResponse)(nil),     // 14: workflow.v1.ListWorkflowsResponse
-	(*GetWorkflowRequest)(nil),        // 15: workflow.v1.GetWorkflowRequest
-	(*StepInfo)(nil),                  // 16: workflow.v1.StepInfo
-	(*GetWorkflowResponse)(nil),       // 17: workflow.v1.GetWorkflowResponse
-	(*TerminateWorkflowRequest)(nil),  // 18: workflow.v1.TerminateWorkflowRequest
-	(*TerminateWorkflowResponse)(nil), // 19: workflow.v1.TerminateWorkflowResponse
+	(WorkflowStatus)(0),                  // 0: workflow.v1.WorkflowStatus
+	(*RegisterWorkflowTypeRequest)(nil),  // 1: workflow.v1.RegisterWorkflowTypeRequest
+	(*RegisterWorkflowTypeResponse)(nil), // 2: workflow.v1.RegisterWorkflowTypeResponse
+	(*PollWorkflowTaskRequest)(nil),      // 3: workflow.v1.PollWorkflowTaskRequest
+	(*WorkflowTask)(nil),                 // 4: workflow.v1.WorkflowTask
+	(*PollWorkflowTaskResponse)(nil),     // 5: workflow.v1.PollWorkflowTaskResponse
+	(*ScheduleActivityCommand)(nil),      // 6: workflow.v1.ScheduleActivityCommand
+	(*StartTimerCommand)(nil),            // 7: workflow.v1.StartTimerCommand
+	(*AwaitSignalCommand)(nil),           // 8: workflow.v1.AwaitSignalCommand
+	(*CompleteWorkflowCommand)(nil),      // 9: workflow.v1.CompleteWorkflowCommand
+	(*FailWorkflowCommand)(nil),          // 10: workflow.v1.FailWorkflowCommand
+	(*WorkflowCommand)(nil),              // 11: workflow.v1.WorkflowCommand
+	(*CompleteWorkflowTaskRequest)(nil),  // 12: workflow.v1.CompleteWorkflowTaskRequest
+	(*CompleteWorkflowTaskResponse)(nil), // 13: workflow.v1.CompleteWorkflowTaskResponse
+	(*StartWorkflowRequest)(nil),         // 14: workflow.v1.StartWorkflowRequest
+	(*StartWorkflowResponse)(nil),        // 15: workflow.v1.StartWorkflowResponse
+	(*PollTaskRequest)(nil),              // 16: workflow.v1.PollTaskRequest
+	(*Task)(nil),                         // 17: workflow.v1.Task
+	(*PollTaskResponse)(nil),             // 18: workflow.v1.PollTaskResponse
+	(*CompleteTaskRequest)(nil),          // 19: workflow.v1.CompleteTaskRequest
+	(*CompleteTaskResponse)(nil),         // 20: workflow.v1.CompleteTaskResponse
+	(*HeartbeatRequest)(nil),             // 21: workflow.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),            // 22: workflow.v1.HeartbeatResponse
+	(*SignalWorkflowRequest)(nil),        // 23: workflow.v1.SignalWorkflowRequest
+	(*SignalWorkflowResponse)(nil),       // 24: workflow.v1.SignalWorkflowResponse
+	(*ListWorkflowsRequest)(nil),         // 25: workflow.v1.ListWorkflowsRequest
+	(*WorkflowSummary)(nil),              // 26: workflow.v1.WorkflowSummary
+	(*ListWorkflowsResponse)(nil),        // 27: workflow.v1.ListWorkflowsResponse
+	(*GetWorkflowRequest)(nil),           // 28: workflow.v1.GetWorkflowRequest
+	(*StepInfo)(nil),                     // 29: workflow.v1.StepInfo
+	(*GetWorkflowResponse)(nil),          // 30: workflow.v1.GetWorkflowResponse
+	(*TerminateWorkflowRequest)(nil),     // 31: workflow.v1.TerminateWorkflowRequest
+	(*TerminateWorkflowResponse)(nil),    // 32: workflow.v1.TerminateWorkflowResponse
+	(*history.HistoryEvent)(nil),         // 33: history.v1.HistoryEvent
 }
 var file_service_proto_depIdxs = []int32{
-	4,  // 0: workflow.v1.PollTaskResponse.task:type_name -> workflow.v1.Task
-	0,  // 1: workflow.v1.ListWorkflowsRequest.status_filter:type_name -> workflow.v1.WorkflowStatus
-	0,  // 2: workflow.v1.WorkflowSummary.status:type_name -> workflow.v1.WorkflowStatus
-	13, // 3: workflow.v1.ListWorkflowsResponse.workflows:type_name -> workflow.v1.WorkflowSummary
-	13, // 4: workflow.v1.GetWorkflowResponse.summary:type_name -> workflow.v1.WorkflowSummary
-	16, // 5: workflow.v1.GetWorkflowResponse.steps:type_name -> workflow.v1.StepInfo
-	1,  // 6: workflow.v1.WorkflowService.StartWorkflow:input_type -> workflow.v1.StartWorkflowRequest
-	3,  // 7: workflow.v1.WorkflowService.PollTask:input_type -> workflow.v1.PollTaskRequest
-	6,  // 8: workflow.v1.WorkflowService.CompleteTask:input_type -> workflow.v1.CompleteTaskRequest
-	10, // 9: workflow.v1.WorkflowService.SignalWorkflow:input_type -> workflow.v1.SignalWorkflowRequest
-	8,  // 10: workflow.v1.WorkflowService.Heartbeat:input_type -> workflow.v1.HeartbeatRequest
-	12, // 11: workflow.v1.WorkflowService.ListWorkflows:input_type -> workflow.v1.ListWorkflowsRequest
-	15, // 12: workflow.v1.WorkflowService.GetWorkflow:input_type -> workflow.v1.GetWorkflowRequest
-	18, // 13: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
-	2,  // 14: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
-	5,  // 15: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
-	7,  // 16: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
-	11, // 17: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
-	9,  // 18: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
-	14, // 19: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
-	17, // 20: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
-	19, // 21: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
-	14, // [14:22] is the sub-list for method output_type
-	6,  // [6:14] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	33, // 0: workflow.v1.WorkflowTask.history:type_name -> history.v1.HistoryEvent
+	4,  // 1: workflow.v1.PollWorkflowTaskResponse.task:type_name -> workflow.v1.WorkflowTask
+	6,  // 2: workflow.v1.WorkflowCommand.schedule_activity:type_name -> workflow.v1.ScheduleActivityCommand
+	7,  // 3: workflow.v1.WorkflowCommand.start_timer:type_name -> workflow.v1.StartTimerCommand
+	8,  // 4: workflow.v1.WorkflowCommand.await_signal:type_name -> workflow.v1.AwaitSignalCommand
+	9,  // 5: workflow.v1.WorkflowCommand.complete_workflow:type_name -> workflow.v1.CompleteWorkflowCommand
+	10, // 6: workflow.v1.WorkflowCommand.fail_workflow:type_name -> workflow.v1.FailWorkflowCommand
+	11, // 7: workflow.v1.CompleteWorkflowTaskRequest.command:type_name -> workflow.v1.WorkflowCommand
+	17, // 8: workflow.v1.PollTaskResponse.task:type_name -> workflow.v1.Task
+	0,  // 9: workflow.v1.ListWorkflowsRequest.status_filter:type_name -> workflow.v1.WorkflowStatus
+	0,  // 10: workflow.v1.WorkflowSummary.status:type_name -> workflow.v1.WorkflowStatus
+	26, // 11: workflow.v1.ListWorkflowsResponse.workflows:type_name -> workflow.v1.WorkflowSummary
+	26, // 12: workflow.v1.GetWorkflowResponse.summary:type_name -> workflow.v1.WorkflowSummary
+	29, // 13: workflow.v1.GetWorkflowResponse.steps:type_name -> workflow.v1.StepInfo
+	14, // 14: workflow.v1.WorkflowService.StartWorkflow:input_type -> workflow.v1.StartWorkflowRequest
+	16, // 15: workflow.v1.WorkflowService.PollTask:input_type -> workflow.v1.PollTaskRequest
+	19, // 16: workflow.v1.WorkflowService.CompleteTask:input_type -> workflow.v1.CompleteTaskRequest
+	23, // 17: workflow.v1.WorkflowService.SignalWorkflow:input_type -> workflow.v1.SignalWorkflowRequest
+	21, // 18: workflow.v1.WorkflowService.Heartbeat:input_type -> workflow.v1.HeartbeatRequest
+	25, // 19: workflow.v1.WorkflowService.ListWorkflows:input_type -> workflow.v1.ListWorkflowsRequest
+	28, // 20: workflow.v1.WorkflowService.GetWorkflow:input_type -> workflow.v1.GetWorkflowRequest
+	31, // 21: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
+	1,  // 22: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
+	3,  // 23: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
+	12, // 24: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
+	15, // 25: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
+	18, // 26: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
+	20, // 27: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
+	24, // 28: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
+	22, // 29: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
+	27, // 30: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
+	30, // 31: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
+	32, // 32: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
+	2,  // 33: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
+	5,  // 34: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
+	13, // 35: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
+	25, // [25:36] is the sub-list for method output_type
+	14, // [14:25] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_service_proto_init() }
@@ -1402,7 +2294,14 @@ func file_service_proto_init() {
 	if File_service_proto != nil {
 		return
 	}
-	file_service_proto_msgTypes[5].OneofWrappers = []any{
+	file_service_proto_msgTypes[10].OneofWrappers = []any{
+		(*WorkflowCommand_ScheduleActivity)(nil),
+		(*WorkflowCommand_StartTimer)(nil),
+		(*WorkflowCommand_AwaitSignal)(nil),
+		(*WorkflowCommand_CompleteWorkflow)(nil),
+		(*WorkflowCommand_FailWorkflow)(nil),
+	}
+	file_service_proto_msgTypes[18].OneofWrappers = []any{
 		(*CompleteTaskRequest_Output)(nil),
 		(*CompleteTaskRequest_Error)(nil),
 	}
@@ -1412,7 +2311,7 @@ func file_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_service_proto_rawDesc), len(file_service_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   19,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

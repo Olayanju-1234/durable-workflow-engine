@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package raft.v1;
+
+// Generated Go lands in internal/raft as package `raft`, alongside the
+// hand-written Node that implements the algorithm.
+option go_package = "github.com/olayanju-1234/durable-workflow-engine/internal/raft;raft";
+
+// RaftService is the peer-to-peer protocol between nodes in a cluster. It is
+// deliberately separate from WorkflowService: that one faces clients and
+// workers, this one is internal cluster traffic and should never be exposed.
+//
+// Raft defines exactly two RPCs for the core algorithm, and both are issued
+// only by a node that believes it is a candidate (RequestVote) or the leader
+// (AppendEntries). Every RPC carries a term, and any node seeing a term higher
+// than its own immediately steps down — that single rule is what makes stale
+// leaders harmless.
+service RaftService {
+  // RequestVote is sent by a candidate to gather votes for an election.
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  // AppendEntries replicates log entries. With an empty entries list it is the
+  // leader's heartbeat, which is what suppresses new elections.
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+// LogEntry is one command in the replicated log. Index is 1-based and assigned
+// by the leader; term is the leader's term when the entry was created. The pair
+// (index, term) uniquely identifies an entry across the whole cluster, which is
+// what the log-matching consistency check relies on.
+message LogEntry {
+  uint64 index = 1;
+  uint64 term = 2;
+  // Opaque payload. Once Raft is wired into the engine (Week 14) this carries a
+  // serialized history event; Raft itself never interprets it.
+  bytes data = 3;
+}
+
+// PersistentState is the subset of a node's state that MUST survive a crash
+// (paper §5, Figure 2 "Persistent state on all servers"). It has to be durable
+// before the node replies to any RPC: a node that forgot its term or its vote
+// could vote twice in one term after a restart, and two leaders could then be
+// elected for that term. Everything else (commit index, leader state) is
+// rebuilt at runtime.
+message PersistentState {
+  uint64 current_term = 1;
+  // Candidate this node voted for in current_term; empty means it hasn't voted.
+  string voted_for = 2;
+  repeated LogEntry entries = 3;
+}
+
+message RequestVoteRequest {
+  // Candidate's term.
+  uint64 term = 1;
+  // Who is asking, so the voter can record who it voted for.
+  string candidate_id = 2;
+  // The candidate's last log entry — the voter refuses to vote for a candidate
+  // whose log is less up to date than its own. This is the Leader Completeness
+  // guarantee: a leader can never be elected while missing committed entries.
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+  // The voter's term, so a stale candidate learns it has fallen behind.
+  uint64 term = 1;
+  bool vote_granted = 2;
+}
+
+message AppendEntriesRequest {
+  // Leader's term.
+  uint64 term = 1;
+  // So followers can redirect clients (and so logs name the leader).
+  string leader_id = 2;
+  // The entry immediately preceding the new ones. The follower rejects the
+  // request unless its own log matches at that position — the induction step
+  // that keeps every log identical up to the point of agreement.
+  uint64 prev_log_index = 3;
+  uint64 prev_log_term = 4;
+  // Empty for a heartbeat.
+  repeated LogEntry entries = 5;
+  // The leader's commit index, so followers learn what is safely replicated.
+  uint64 leader_commit = 6;
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  bool success = 2;
+  // On success, the highest index the follower now has — lets the leader
+  // advance match_index without recomputing it.
+  uint64 match_index = 3;
+  // On failure, the first index of the conflicting term, so the leader can back
+  // up by a whole term instead of one entry at a time (§5.3 optimization).
+  uint64 conflict_index = 4;
+}

@@ -5,6 +5,85 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-08-05 — Session 13: Polyglot workflows — TypeScript, Python & Java SDKs
+
+**Roadmap change.** Started Week 11 (Raft), then the user redirected: workflows
+should not be Go-only. Agreed that adoption beats HA for a pre-alpha project, and
+that settling the wire protocol *before* replicating it is the cheaper order. Raft
+is parked (its `proto/raft.proto` design is kept as groundwork; the half-written
+`log.go` was removed rather than left broken).
+
+**The insight that made this small:** the engine already drives workflows through
+the `Planner` seam — `Decide(events) → Decision`. Polyglot support is just a
+`Planner` implementation that answers over the network. No changes to history,
+recovery, timers, retries or leases.
+
+```
+engine → enqueues a WorkflowTask carrying the workflow's history
+SDK    → PollWorkflowTask, replays the workflow in ITS runtime
+SDK    → CompleteWorkflowTask with ONE command
+engine → applies it exactly like a local decision
+```
+
+**Done:**
+- **Protocol** (`proto/service.proto`): `RegisterWorkflowType`, `PollWorkflowTask`,
+  `CompleteWorkflowTask`; `WorkflowTask` (carries full history + `task_token` +
+  `history_length`); `WorkflowCommand` oneof (schedule_activity / start_timer /
+  await_signal / complete_workflow / fail_workflow). Cross-package proto import
+  of `event.proto` for `HistoryEvent`.
+- **Engine** (`internal/server/polyglot.go`): split `applyDecisionLocked` out of
+  `advanceLocked` — the single place a decision becomes durable, now shared by
+  in-process and remote planners. `remotePlanner` marks a type as SDK-owned;
+  `advanceLocked` dispatches a task instead of deciding inline (deciding needs a
+  network round-trip and `e.mu` is held). `workflowTaskQueue` filters by type
+  (broadcast channel + slice, since pollers need type matching). Fourth timer
+  service (`decisionTimers`) re-dispatches if an SDK worker dies.
+- **Two safety properties**, both tested:
+  - *Stale-decision fencing.* A task records the history length it was computed
+    from; a command whose history has moved on is rejected (`Aborted` / HTTP 409).
+    This is what makes re-dispatch safe — two workers may both decide, only one
+    command can apply.
+  - *Command validation.* Step sequencing is checked before anything reaches the
+    log, so a buggy SDK can't write a history `Reconstruct` later refuses to read.
+- **HTTP transport** (`httpapi_polyglot.go`): the gRPC path ships raw protobuf
+  history; the HTTP path ships the **already-reconstructed** view (input, steps
+  with results, buffered signals). That single decision is why an SDK is ~250
+  lines with **zero dependencies** instead of requiring a protobuf toolchain.
+  Also added polyglot activity endpoints, so a non-Go process can run both halves.
+- **SDKs** (`sdks/`): TypeScript and Python — both verified end-to-end against a
+  live engine (activity → durable timer → signal → Saga compensation → completion).
+  Java written but **never compiled** (no JDK on this machine); shipped as a
+  clearly-labelled reference implementation.
+- **Docs**: polyglot guide on the site (protocol, per-language suspend table,
+  safety properties), `sdks/README.md`, README, landing page. Corrected the
+  now-false "Go only" claims written last session.
+
+**State:** `make ci` ✅ (9 new Go polyglot tests). Live cross-language run ✅.
+
+**Next:** Phase 4 / Week 11 — Raft (resumed), or more SDK polish.
+
+**Gotchas:**
+- **Rejecting a malformed command must NOT clear the pending decision.** The first
+  version did, which left the workflow with no queued task *and* no pending
+  decision — stranded forever. Now the decision stays pending so the timer
+  re-offers it, and a fixed deployment heals the workflow. **Teeth-verified**: the
+  test hangs on the old behaviour.
+- **JavaScript cannot use exceptions to suspend replay.** `catch (err)` catches
+  *everything*, so a workflow's `try { await ctx.activity(...) } catch {…}` swallowed
+  the yield sentinel and ran compensation on every replay pass — the TS example
+  silently stalled while Python (whose `_Yield` extends `BaseException`) worked
+  first time. The TS SDK now suspends with a **promise that never settles**, raced
+  against a suspend signal, which workflow code cannot observe. Java uses `Error`
+  for the same reason.
+- Activity workers were *already* language-agnostic (gRPC, since Week 3). The gap
+  was only ever the workflow function. Worth saying plainly rather than implying
+  the whole thing was Go-locked.
+- Two workers registering the same activity *name* share one queue — a test that
+  ran two examples concurrently had its failing `charge` silently satisfied by the
+  other worker's succeeding one. Use distinct step names when testing failure paths.
+
+---
+
 ## 2026-08-05 — Session 12: Dashboard, JSON API & public site (Phase 3, Week 10 — PHASE 3 COMPLETE)
 
 The engine grew a face. Three things landed: a JSON HTTP API, the embedded

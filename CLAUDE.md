@@ -40,6 +40,7 @@ schedule next step → record result.** Four components, built across phases:
 | Leases/Heartbeats| `internal/server`  | 3 ✅  | Lease tokens on dispatch, Heartbeat RPC, dead-worker reassignment. |
 | Observability    | `internal/metrics` | 3 ✅  | Zero-dep Prometheus `/metrics`; visibility API (List/Get/Terminate). |
 | Dashboard + site | `web/`             | 3 ✅  | `go:embed` operational UI + JSON HTTP API; public landing page & docs. |
+| Polyglot SDKs    | `sdks/`            | —  ✅  | Workflow-task protocol + TypeScript/Python/Java SDKs (dependency-free). |
 | Consensus (Raft) | `internal/raft`    | 4     | Leader election, log replication, snapshots, HA. |
 | Public SDK       | `sdk`              | 5     | Ergonomic Go API developers import. |
 
@@ -82,12 +83,19 @@ source of truth because they travel with `git clone`; the global memory is the l
 
 ## Current status
 
-**Phase 3 complete (Weeks 1–10).** Week 9 delivered observability (zero-dep
-Prometheus `/metrics` via `internal/metrics`; visibility API List/Get/Terminate
-with lease-fenced terminate). Week 10 delivered the user-facing layer: a
-hand-rolled JSON HTTP API (`internal/server/httpapi.go` — browsers can't speak
-gRPC), the `go:embed` dashboard (`web/dashboard`, served on `--http-addr`
-:8233), and the public site (`web/site` — landing page + full developer docs).
-Next: **Phase 4 / Week 11 — Raft** (paper, leader election, 3-node localhost
-cluster). See `docs/SESSION_LOG.md` for the running log; `docs/ROADMAP.md`
-Status line is authoritative.
+**Phase 3 complete (Weeks 1–10), plus polyglot workflows (Session 13, unplanned).**
+Week 9: observability (zero-dep Prometheus `/metrics`; visibility API). Week 10:
+JSON HTTP API + `go:embed` dashboard + public site under `web/`. Session 13:
+**workflows are no longer Go-only** — a `PollWorkflowTask`/`CompleteWorkflowTask`
+protocol built on the existing `Planner` seam lets an SDK in any language replay
+workflow code and return one command; TypeScript and Python SDKs are verified
+end-to-end, Java is written but uncompiled. Next: **Phase 4 / Week 11 — Raft**
+(started, parked for polyglot; `proto/raft.proto` is groundwork). See
+`docs/SESSION_LOG.md` for the running log; `docs/ROADMAP.md` Status line is
+authoritative.
+
+**Polyglot invariants worth not breaking:** SDK decisions are fenced by history
+length (stale → reject); a malformed command must leave the task *pending* or the
+workflow strands; and each language needs a suspend mechanism workflow code can't
+catch (Go panic, Python `BaseException`, Java `Error`, JS **non-settling promise** —
+`catch` catches everything in JS).

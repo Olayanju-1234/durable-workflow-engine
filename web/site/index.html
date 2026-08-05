@@ -28,8 +28,8 @@
     <span class="pill">Pre-alpha · Weeks 1–10 of 17</span>
     <h1>Durable execution<br>without the <span class="grad">infrastructure tax</span></h1>
     <p class="sub">
-      Write ordinary Go functions. The engine makes them crash-proof, resumable and
-      observable — one binary, no external database, no Kubernetes, no ops team.
+      Write ordinary functions in Go, TypeScript or Python. The engine makes them crash-proof,
+      resumable and observable — one binary, no external database, no Kubernetes, no ops team.
     </p>
     <div class="hero-actions">
       <a class="btn btn-primary" href="./docs.html#quickstart">Get started</a>
@@ -179,6 +179,14 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
         <h3>Metrics &amp; dashboard</h3>
         <p>Prometheus <code>/metrics</code> and a built-in web dashboard — both compiled into the binary.</p>
       </div>
+      <div class="card">
+        <div class="icon">⌘</div>
+        <h3>Any language</h3>
+        <p>
+          Write workflows in TypeScript or Python as well as Go. The SDKs are dependency-free —
+          no npm install, no protobuf toolchain.
+        </p>
+      </div>
     </div>
   </div>
 </section>
@@ -201,7 +209,7 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
           <tr><td>Deploy artifact</td><td>your app</td><td class="yes">1 binary</td><td>several services</td></tr>
           <tr><td>Time to first workflow</td><td>days of glue</td><td class="yes">minutes</td><td>a sprint</td></tr>
           <tr><td>Horizontal HA</td><td>varies</td><td class="no">Phase 4 (Raft)</td><td class="yes">✓</td></tr>
-          <tr><td>Multi-language SDKs</td><td>n/a</td><td class="no">Go only</td><td class="yes">✓</td></tr>
+          <tr><td>Multi-language SDKs</td><td>n/a</td><td>Go, TS, Python (+Java ref)</td><td class="yes">✓</td></tr>
           <tr><td>Battle-tested at scale</td><td>—</td><td class="no">✗ pre-alpha</td><td class="yes">✓</td></tr>
         </tbody>
       </table>

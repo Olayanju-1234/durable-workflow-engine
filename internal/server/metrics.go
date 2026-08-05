@@ -17,11 +17,19 @@ type engineMetrics struct {
 	signalsReceived   *metrics.Counter
 	timersFired       *metrics.Counter
 	stepDuration      *metrics.Histogram // dispatch (lease grant) → worker result
+
+	// Polyglot: workflow decisions made by external SDK workers.
+	workflowTasksDispatched  *metrics.Counter
+	workflowTasksCompleted   *metrics.Counter
+	workflowTaskTimeouts     *metrics.Counter
+	workflowTaskReplayErrors *metrics.Counter
 }
 
-func newEngineMetrics(reg *metrics.Registry, queueDepth func() float64) *engineMetrics {
+func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func() float64) *engineMetrics {
 	reg.GaugeFunc("workflowd_task_queue_depth",
-		"Tasks buffered in the queue awaiting a worker.", queueDepth)
+		"Activity tasks buffered in the queue awaiting a worker.", queueDepth)
+	reg.GaugeFunc("workflowd_workflow_task_queue_depth",
+		"Workflow decisions awaiting an external SDK worker.", workflowQueueDepth)
 	return &engineMetrics{
 		workflowsStarted: reg.Counter("workflowd_workflows_started_total",
 			"Workflow executions started."),
@@ -43,5 +51,13 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth func() float64) *engineM
 			"Durable timers that reached their deadline."),
 		stepDuration: reg.Histogram("workflowd_step_duration_seconds",
 			"Seconds from task dispatch to the worker's result.", nil),
+		workflowTasksDispatched: reg.Counter("workflowd_workflow_tasks_dispatched_total",
+			"Workflow decisions handed to external SDK workers."),
+		workflowTasksCompleted: reg.Counter("workflowd_workflow_tasks_completed_total",
+			"Workflow commands returned by SDK workers and applied."),
+		workflowTaskTimeouts: reg.Counter("workflowd_workflow_task_timeouts_total",
+			"Workflow tasks re-dispatched because an SDK worker went dark."),
+		workflowTaskReplayErrors: reg.Counter("workflowd_workflow_task_replay_errors_total",
+			"Workflows failed because an SDK could not replay their history."),
 	}
 }

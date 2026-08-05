@@ -14,6 +14,13 @@ import (
 var (
 	ErrNotFound        = errors.New("server: workflow not found")
 	ErrAlreadyTerminal = errors.New("server: workflow already terminal")
+	// ErrStaleDecision: an SDK returned a command for a position the workflow
+	// has already moved past. Expected under re-dispatch; the worker should
+	// simply poll again rather than treat it as a failure.
+	ErrStaleDecision = errors.New("server: stale workflow decision")
+	// ErrInvalidCommand: an SDK returned a structurally invalid command (bad
+	// step sequence, empty name). A client bug, not a transient condition.
+	ErrInvalidCommand = errors.New("server: invalid workflow command")
 )
 
 // ListWorkflows summarizes every workflow in the store, sorted by id. When

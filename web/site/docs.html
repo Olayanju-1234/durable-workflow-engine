@@ -43,6 +43,11 @@
     <a href="#workers">Writing a worker</a>
     <a href="#retries">Retries &amp; Saga</a>
 
+    <h4>Other languages</h4>
+    <a href="#polyglot">Polyglot workflows</a>
+    <a href="#polyglot-quickstart">TypeScript &amp; Python</a>
+    <a href="#polyglot-protocol">The SDK protocol</a>
+
     <h4>Reference</h4>
     <a href="#cli">CLI flags</a>
     <a href="#api">gRPC API</a>
@@ -389,6 +394,156 @@ if err := engine.Recover(); err != nil {
       that calls more activities, as in the <code>release</code> call in the example above.
     </p>
 
+    <h2 id="polyglot">Polyglot workflows</h2>
+    <p>
+      Workflow code does <strong>not</strong> have to be Go. The engine owns durability —
+      history, replay position, timers, retries, leases — while an SDK in your language owns
+      the orchestration logic. They talk over a small protocol.
+    </p>
+    <table>
+      <thead><tr><th>SDK</th><th>Location</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>Go</td><td><code>sdk/</code></td><td>In-process (compiled into the engine)</td></tr>
+        <tr><td>TypeScript / Node</td><td><code>sdks/typescript/</code></td><td>Verified end-to-end</td></tr>
+        <tr><td>Python</td><td><code>sdks/python/</code></td><td>Verified end-to-end</td></tr>
+        <tr><td>Java</td><td><code>sdks/java/</code></td><td>Written but not yet compiled — reference implementation</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Every non-Go SDK is <strong>dependency-free</strong>: Node's <code>fetch</code>, Python's
+      <code>urllib</code> and Java's <code>HttpClient</code> are all built in. No npm install,
+      no pip install, no protobuf toolchain.
+    </p>
+
+    <div class="callout">
+      <strong>Activities were already language-agnostic.</strong> Any process that speaks the
+      API can execute activities — that has been true since Week 3. What the SDKs add is
+      running the <em>workflow function itself</em> outside the engine.
+    </div>
+
+    <h3 id="polyglot-quickstart">TypeScript</h3>
+    <pre data-lang="js"><code>import { Worker, WorkflowFailure } from './workflowd.mjs';
+
+const worker = new Worker({ address: 'http://localhost:8233' });
+
+worker.workflow('OrderWorkflow', async (ctx) => {
+  const reserved = await ctx.activity('reserve', ctx.input);
+
+  await ctx.sleep('settle', 2000);                    // durable
+  const ok = await ctx.waitForSignal('gate', 'approved');
+  if (ok !== 'yes') throw new WorkflowFailure('rejected');
+
+  try {
+    await ctx.activity('charge', reserved);
+  } catch (err) {
+    await ctx.activity('release', reserved);          // compensate
+    throw new WorkflowFailure(`charge failed: ${err.message}`);
+  }
+  return await ctx.activity('ship', reserved);
+});
+
+worker.activity('reserve', async (input) => `reserved:${input}`);
+await worker.run();</code></pre>
+    <p>Run it with <code>node example.mjs</code> — no install step.</p>
+
+    <h3>Python</h3>
+    <pre data-lang="py"><code>from workflowd import Worker, WorkflowFailure, ActivityFailure
+
+worker = Worker(address="http://localhost:8233")
+
+@worker.workflow("OrderWorkflow")
+def order(ctx):
+    reserved = ctx.activity("reserve", ctx.input)
+
+    ctx.sleep("settle", 2.0)                          # durable
+    if ctx.wait_for_signal("gate", "approved") != "yes":
+        raise WorkflowFailure("rejected")
+
+    try:
+        ctx.activity("charge", reserved)
+    except ActivityFailure as err:
+        ctx.activity("release", reserved)             # compensate
+        raise WorkflowFailure(f"charge failed: {err}")
+    return ctx.activity("ship", reserved)
+
+@worker.activity("reserve")
+def reserve(payload):
+    return f"reserved:{payload}"
+
+worker.run()</code></pre>
+
+    <h2 id="polyglot-protocol">The SDK protocol</h2>
+    <p>
+      Three HTTP endpoints. If your language isn't listed above, this is everything you need
+      to add it — a complete SDK is about 250 lines.
+    </p>
+    <pre data-lang="sh"><code>POST /api/workflow-types            {"workflow_types":["OrderWorkflow"],"worker_id":"w1"}
+GET  /api/workflow-tasks?types=OrderWorkflow    (long-poll; 204 = nothing yet)
+POST /api/workflow-tasks/complete   {"workflow_id":...,"task_token":...,"command":{...}}</code></pre>
+    <p>
+      A workflow task carries the <em>already-reconstructed</em> state — input, steps in order
+      with their results, and buffered signals — so your SDK never has to implement the history
+      fold:
+    </p>
+    <pre data-lang="json"><code>{
+  "workflow_id": "order-42",
+  "workflow_type": "OrderWorkflow",
+  "task_token": "9f3c...",
+  "history_length": 4,
+  "input": "order-42",
+  "steps": [
+    {"step_name":"reserve","sequence":1,"kind":"ACTIVITY","status":"COMPLETED","output":"reserved:order-42"},
+    {"step_name":"charge","sequence":2,"kind":"ACTIVITY","status":"SCHEDULED","attempts":2}
+  ],
+  "signals": [{"name":"approved","payload":"yes"}]
+}</code></pre>
+    <p>Replay your workflow function against <code>steps</code> in call order, then return one command:</p>
+    <pre data-lang="json"><code>{"type":"schedule_activity","step_name":"charge","sequence":2,"input":"..."}
+{"type":"start_timer","step_name":"wait","sequence":3,"delay_ms":60000}
+{"type":"await_signal","step_name":"gate","sequence":4,"signal_name":"approved"}
+{"type":"complete_workflow","output":"..."}
+{"type":"fail_workflow","error":"..."}
+{"type":"noop"}</code></pre>
+
+    <h3>How replay suspends — the one hard part</h3>
+    <p>
+      When replay reaches a step with no recorded result, your workflow function must stop
+      <strong>without workflow code being able to intercept it</strong>. This matters more than
+      it sounds, because workflows legitimately write <code>try { await activity() } catch { compensate() }</code>.
+      If your suspend signal is an ordinary exception, that <code>catch</code> swallows it and
+      compensation runs on every replay pass.
+    </p>
+    <table>
+      <thead><tr><th>Language</th><th>Mechanism</th><th>Why it's safe</th></tr></thead>
+      <tbody>
+        <tr><td>Go</td><td><code>panic</code> / <code>recover</code></td><td>Recovered only in the SDK's own frame</td></tr>
+        <tr><td>Python</td><td>subclass <code>BaseException</code></td><td><code>except Exception</code> doesn't catch it</td></tr>
+        <tr><td>Java</td><td>subclass <code>Error</code></td><td><code>catch (Exception)</code> doesn't catch it</td></tr>
+        <tr><td>TypeScript</td><td>a promise that <em>never settles</em></td><td><code>catch</code> catches everything in JS, so suspension must not be a throw at all</td></tr>
+      </tbody>
+    </table>
+    <div class="callout warn">
+      The TypeScript case is not hypothetical: the first version of that SDK used a thrown
+      sentinel, and a workflow with a <code>try/catch</code> around an activity silently
+      stalled. It now suspends with a non-settling promise, which workflow code cannot observe.
+    </div>
+
+    <h3>Safety properties you get for free</h3>
+    <ul>
+      <li><strong>SDK workers are stateless.</strong> Every task carries everything needed to
+        replay, so a crashed SDK worker costs nothing — the task is re-dispatched.</li>
+      <li><strong>Stale decisions are fenced.</strong> Each task records the history length it
+        was based on. If history moved on while your worker was thinking, the command is
+        rejected with <code>409</code> — poll again. This is what makes re-dispatch safe: two
+        workers may both decide, but only one command can ever apply.</li>
+      <li><strong>Malformed commands can't corrupt a workflow.</strong> The engine validates
+        step sequencing before anything reaches the log, and a rejected command leaves the task
+        pending so a fixed deployment heals the workflow automatically.</li>
+      <li><strong>Replay errors fail loudly.</strong> If your SDK reports that it can't replay
+        a history (the code changed incompatibly), the workflow fails with that message rather
+        than spinning forever.</li>
+    </ul>
+
     <h2 id="cli">CLI flags</h2>
     <pre data-lang="sh"><code>workflowd --serve [flags]</code></pre>
     <table>
@@ -605,8 +760,10 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
       <li><strong>Single node.</strong> No replication or failover yet — Raft is Phase 4. The data
         directory is a single point of failure; back it up.</li>
       <li><strong>No authentication or TLS</strong> on any port. Keep them private.</li>
-      <li><strong>Go only</strong>, and workflows must be compiled into the engine binary. An
-        importable SDK is Phase 5.</li>
+      <li><strong>Go workflows must be compiled into the engine binary</strong> (Go's
+        <code>internal/</code> rule). Workflows in TypeScript, Python and Java run out of
+        process via the <a href="#polyglot">SDK protocol</a> and have no such constraint; an
+        importable Go SDK is Phase 5.</li>
       <li><strong>Sequential steps.</strong> One step in flight per workflow; no parallel fan-out yet.</li>
       <li><strong>At-least-once</strong> activity execution (see above).</li>
       <li><strong>No workflow versioning</strong> yet — changing a running workflow's step
@@ -647,9 +804,11 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
 
     <h3>Can I use it from another language?</h3>
     <p>
-      Partly. <em>Workers</em> can be written in any language with gRPC support — generate stubs
-      from <code>proto/service.proto</code>. <em>Workflow definitions</em> are Go only, because
-      replay executes Go code.
+      Yes — both halves. <em>Activities</em> have always been language-agnostic (any process
+      that speaks the API can execute them). <em>Workflow definitions</em> can now also run
+      outside the engine: TypeScript and Python SDKs ship in <code>sdks/</code>, with a Java
+      reference implementation, and the <a href="#polyglot-protocol">protocol</a> is three HTTP
+      endpoints if you want to add another language.
     </p>
 
     <h3>What is the license?</h3>

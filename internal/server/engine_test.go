@@ -32,6 +32,13 @@ type harness struct {
 
 func newHarness(t *testing.T, defs ...state.WorkflowDefinition) *harness {
 	t.Helper()
+	return newHarnessWithOptions(t, nil, defs...)
+}
+
+// newHarnessWithOptions is newHarness with engine tuning — short lease or
+// decision timeouts let tests exercise the expiry paths in milliseconds.
+func newHarnessWithOptions(t *testing.T, opts []server.Option, defs ...state.WorkflowDefinition) *harness {
+	t.Helper()
 
 	store, err := history.NewHistoryStore(t.TempDir())
 	if err != nil {
@@ -40,7 +47,7 @@ func newHarness(t *testing.T, defs ...state.WorkflowDefinition) *harness {
 	t.Cleanup(func() { store.Close() })
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := server.NewEngine(store, logger)
+	engine := server.NewEngine(store, logger, opts...)
 	t.Cleanup(engine.Close)
 	for _, d := range defs {
 		engine.Register(d)
