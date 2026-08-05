@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation — workflowd</title>
+<meta name="description" content="Developer documentation for workflowd: quickstart, core concepts, writing workflows, the gRPC and JSON APIs, metrics, and operations.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="./index.html"><span class="mark">◆</span> workflowd</a>
+    <div class="nav-links">
+      <a href="./index.html#how" class="hide-sm">How it works</a>
+      <a href="./index.html#status" class="hide-sm">Status</a>
+      <a href="./docs.html">Docs</a>
+      <a href="https://github.com/olayanju-1234/durable-workflow-engine">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="wrap">
+<div class="docs">
+
+  <aside class="sidebar">
+    <h4>Getting started</h4>
+    <a href="#introduction">Introduction</a>
+    <a href="#quickstart">Quickstart</a>
+    <a href="#mental-model">Mental model</a>
+
+    <h4>Concepts</h4>
+    <a href="#history">History &amp; durability</a>
+    <a href="#replay">Replay</a>
+    <a href="#determinism">Determinism rules</a>
+    <a href="#steps">Steps: activity, timer, signal</a>
+
+    <h4>Building</h4>
+    <a href="#writing-workflows">Writing workflows</a>
+    <a href="#registering">Registering &amp; running</a>
+    <a href="#workers">Writing a worker</a>
+    <a href="#retries">Retries &amp; Saga</a>
+
+    <h4>Reference</h4>
+    <a href="#cli">CLI flags</a>
+    <a href="#api">gRPC API</a>
+    <a href="#http-api">HTTP / JSON API</a>
+    <a href="#metrics">Metrics</a>
+    <a href="#dashboard">Dashboard</a>
+
+    <h4>Operating</h4>
+    <a href="#recovery">Crash recovery</a>
+    <a href="#leases">Leases &amp; dead workers</a>
+    <a href="#limitations">Limitations</a>
+    <a href="#faq">FAQ</a>
+  </aside>
+
+  <main class="content">
+
+    <h1>Documentation</h1>
+    <p class="lead">
+      Everything you need to run the engine, write durable workflows, and integrate
+      with it from your own services.
+    </p>
+
+    <div class="callout warn">
+      <strong>Pre-alpha.</strong> Weeks 1–10 of a 17-week plan are complete. The core
+      (durability, replay, retries, leases, observability) is implemented and tested,
+      but the public API is still moving and there is no HA yet. Don't run payroll on it.
+    </div>
+
+    <h2 id="introduction">Introduction</h2>
+    <p>
+      <strong>workflowd</strong> is a durable workflow execution engine: you write ordinary
+      Go functions, and the engine guarantees they run to completion even if the process is
+      killed halfway through. It is a lightweight, self-hostable alternative to Temporal —
+      a single binary with no external database.
+    </p>
+    <p>A workflow is a good fit when your business process:</p>
+    <ul>
+      <li>spans multiple steps that each might fail (charge, ship, notify),</li>
+      <li>needs to wait — minutes, days, or for a human approval,</li>
+      <li>must never half-execute (charged but never shipped),</li>
+      <li>needs an audit trail of exactly what happened.</li>
+    </ul>
+
+    <h2 id="quickstart">Quickstart</h2>
+    <p>Requires Go 1.26+. No database, no broker, no container runtime.</p>
+
+    <h3>1. Build and run the engine</h3>
+    <pre data-lang="sh"><code>git clone https://github.com/olayanju-1234/durable-workflow-engine
+cd durable-workflow-engine
+make build
+go build -o workflowd ./cmd/workflowd
+
+./workflowd --serve</code></pre>
+    <p>That single process now exposes three things:</p>
+    <table>
+      <thead><tr><th>Address</th><th>Protocol</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>:7233</code></td><td>gRPC</td><td>Workflow API — start workflows, poll and complete tasks</td></tr>
+        <tr><td><code>:8233</code></td><td>HTTP</td><td>Dashboard + JSON API</td></tr>
+        <tr><td><code>:9090</code></td><td>HTTP</td><td><code>/metrics</code> for Prometheus</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2. Open the dashboard</h3>
+    <p>
+      Visit <code>http://localhost:8233</code>. It is compiled into the binary — nothing to
+      deploy separately.
+    </p>
+
+    <h3>3. Start a workflow</h3>
+    <p>The bundled demo registers an <code>OrderSaga</code> workflow. Start one over HTTP:</p>
+    <pre data-lang="sh"><code>curl -X POST http://localhost:8233/api/workflows \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"OrderSaga","input":"order-42"}'</code></pre>
+    <p>
+      It immediately parks in <code>WAITING</code> — no worker is running yet, so nobody
+      can execute the <code>reserve</code> activity. Watch it in the dashboard, then start a
+      worker (see <a href="#workers">Writing a worker</a>) and it will run to completion.
+    </p>
+
+    <h3>4. Prove it's durable</h3>
+    <p>
+      Kill the engine with <code>kill -9</code> while a workflow is mid-flight, then start it
+      again. It re-reads the log, replays, and resumes at the exact step it was on. That
+      behaviour is enforced by a test in the repo (<code>kill_test.go</code>) that SIGKILLs a
+      real engine process at step 3 of 5 and asserts the workflow finishes with no duplicated
+      steps.
+    </p>
+
+    <h2 id="mental-model">Mental model</h2>
+    <p>
+      Everything rests on one idea: <strong>a workflow is an append-only list of events.</strong>
+      The engine never stores "current state" anywhere — it derives state by replaying events.
+    </p>
+    <pre><code>read history → replay to find current position
+             → schedule next step → record result → repeat</code></pre>
+    <p>
+      Because state is a pure function of the log, crash recovery is not a special code path.
+      Restarting is just running the loop again.
+    </p>
+    <table>
+      <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Workflow</strong></td><td>Your orchestration function. Deterministic, no I/O. Runs on the engine.</td></tr>
+        <tr><td><strong>Activity</strong></td><td>One unit of real work (charge a card, send an email). Runs on a worker. May fail and be retried.</td></tr>
+        <tr><td><strong>Step</strong></td><td>One entry in a workflow's history: an activity, a timer, or a signal wait.</td></tr>
+        <tr><td><strong>History</strong></td><td>The append-only event log for one workflow execution. The only source of truth.</td></tr>
+        <tr><td><strong>Worker</strong></td><td>A separate process that polls for activity tasks over gRPC and reports results.</td></tr>
+        <tr><td><strong>Lease</strong></td><td>A time-boxed claim a worker holds on a dispatched task.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="history">History &amp; durability</h2>
+    <p>
+      Each workflow execution gets its own file: <code>&lt;data-dir&gt;/&lt;workflow-id&gt;.history</code>.
+      Records are appended one at a time and <code>fsync</code>'d before the write is
+      acknowledged, so a "recorded" event has genuinely reached the disk.
+    </p>
+    <pre><code>┌───────────┬──────────────┬────────────────────────────┐
+│ 4B length │ 4B CRC32C    │ N-byte protobuf HistoryEvent │
+└───────────┴──────────────┴────────────────────────────┘</code></pre>
+    <ul>
+      <li><strong>Length prefix</strong> — lets records be read back sequentially.</li>
+      <li><strong>CRC32C</strong> — detects bit rot and torn writes.</li>
+      <li><strong>Torn tail</strong> — a partial record from a crash mid-append is truncated on
+        the next open, so the log always resumes on a clean boundary. A checksum failure in the
+        <em>middle</em> of a log is a hard error, never silently skipped.</li>
+      <li><strong>Directory fsync</strong> — a new workflow's file is fsync'd into its parent
+        directory, so the file itself can't vanish in a power loss.</li>
+    </ul>
+    <p>Event types recorded today:</p>
+    <ul>
+      <li><code>WorkflowStarted</code>, <code>WorkflowCompleted</code>, <code>WorkflowFailed</code></li>
+      <li><code>StepScheduled</code>, <code>StepCompleted</code>, <code>StepFailed</code></li>
+      <li><code>TimerStarted</code>, <code>TimerFired</code>, <code>SignalReceived</code></li>
+    </ul>
+
+    <h2 id="replay">Replay</h2>
+    <p>
+      To decide what a workflow should do next, the engine <strong>re-runs your workflow
+      function from the top</strong>. Each durable call it makes is matched against history:
+    </p>
+    <ul>
+      <li><strong>Step already completed</strong> → the call returns the recorded result
+        instantly. The real work is <em>not</em> repeated.</li>
+      <li><strong>Step still in flight</strong> → the function is suspended; the engine waits.</li>
+      <li><strong>Step not in history</strong> → this is the next action. The engine records it
+        and dispatches it.</li>
+    </ul>
+    <p>
+      So your function runs many times, but each side effect happens exactly once. This is why
+      workflow code must be deterministic — replay must take the same path every time.
+    </p>
+
+    <h2 id="determinism">Determinism rules</h2>
+    <div class="callout warn">
+      Breaking these makes a workflow diverge from its recorded history. The engine detects
+      step-level divergence and refuses to proceed rather than corrupting the run.
+    </div>
+    <table>
+      <thead><tr><th>Don't</th><th>Do</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>time.Now()</code></td><td><code>ctx.Sleep(...)</code>, or pass time in as activity output</td><td>Wall clock differs on every replay</td></tr>
+        <tr><td><code>rand</code>, <code>uuid.New()</code></td><td>Generate inside an activity</td><td>New value each replay</td></tr>
+        <tr><td>HTTP calls, DB queries, file I/O</td><td><code>ctx.ExecuteActivity(...)</code></td><td>Side effects would repeat on every replay</td></tr>
+        <tr><td><code>go func(){}</code>, channels</td><td>Sequential code (parallel steps land in Phase 5)</td><td>Goroutine scheduling is non-deterministic</td></tr>
+        <tr><td>Reading global mutable state</td><td>Pass data through step inputs/outputs</td><td>Process memory is gone after a restart</td></tr>
+        <tr><td>Reordering or renaming steps in a running deployment</td><td>Version your workflow (Phase 5)</td><td>In-flight histories won't match the new code</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Also avoid <code>defer</code> with side effects inside workflow functions — the deferred
+      call runs on every replay pass.
+    </p>
+
+    <h2 id="steps">Steps: activity, timer, signal</h2>
+    <p>Three kinds of step, all recorded in the same history:</p>
+    <table>
+      <thead><tr><th>Kind</th><th>Created by</th><th>Completed by</th></tr></thead>
+      <tbody>
+        <tr><td><code>ACTIVITY</code></td><td><code>ctx.ExecuteActivity</code></td><td>A worker reporting a result over gRPC</td></tr>
+        <tr><td><code>TIMER</code></td><td><code>ctx.Sleep</code></td><td>The engine's timer service when the deadline passes</td></tr>
+        <tr><td><code>SIGNAL</code></td><td><code>ctx.WaitForSignal</code></td><td>An external <code>SignalWorkflow</code> call</td></tr>
+      </tbody>
+    </table>
+    <p>
+      A timer's absolute deadline is written to disk, so a sleep of 24 hours survives any number
+      of restarts — on recovery the timer is re-armed against the recorded deadline (and fires
+      immediately if it already elapsed while the engine was down).
+    </p>
+
+    <h2 id="writing-workflows">Writing workflows</h2>
+    <p>
+      A workflow is a Go function matching <code>sdk.WorkflowFunc</code>. It interacts with the
+      outside world <em>only</em> through the <code>sdk.Context</code> it is given.
+    </p>
+
+    <h3>The Context API</h3>
+    <pre data-lang="go"><code>type Context interface {
+	// Run a named activity on a worker and wait for its result.
+	// A failed activity returns an error you can handle or propagate.
+	ExecuteActivity(name string, input []byte) ([]byte, error)
+
+	// Pause durably for d. Survives restarts.
+	Sleep(name string, d time.Duration)
+
+	// Block until a matching external signal arrives; returns its payload.
+	// A signal that arrived earlier is buffered and returned immediately.
+	WaitForSignal(name, signal string) []byte
+
+	// The workflow's start input.
+	Input() []byte
+}</code></pre>
+
+    <h3>A complete example</h3>
+    <pre data-lang="go"><code>func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
+	// 1. Reserve stock. If this fails, the workflow fails — nothing to undo.
+	reserved, err := ctx.ExecuteActivity("reserve", input)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Wait for a human to approve. Could be seconds or days.
+	approval := ctx.WaitForSignal("await-approval", "approved")
+	if string(approval) != "yes" {
+		ctx.ExecuteActivity("release", reserved)
+		return nil, errors.New("order rejected by reviewer")
+	}
+
+	// 3. Give the payment processor a moment to settle.
+	ctx.Sleep("settle", 2*time.Second)
+
+	// 4. Charge. Retries are automatic (see Retries below); we only see an
+	//    error once the policy is exhausted — so compensate and fail.
+	if _, err := ctx.ExecuteActivity("charge", reserved); err != nil {
+		ctx.ExecuteActivity("release", reserved)
+		return nil, fmt.Errorf("charge failed, reservation released: %w", err)
+	}
+
+	return ctx.ExecuteActivity("ship", reserved)
+}</code></pre>
+
+    <div class="callout">
+      <strong>Step names matter.</strong> Each call's name is recorded in history and checked on
+      replay. Names must be stable and unique within a workflow — they are how the engine lines
+      your code up against the durable record.
+    </div>
+
+    <h2 id="registering">Registering &amp; running your workflow</h2>
+    <div class="callout warn">
+      <strong>Today the engine is embedded, not a library.</strong> Go's <code>internal/</code>
+      rule means packages under <code>internal/</code> cannot be imported from outside this
+      module, so you register workflows by building the daemon from this repo. A properly
+      importable client/worker package is the Phase 5 deliverable.
+    </div>
+    <p>
+      Register your workflow in <code>cmd/workflowd/main.go</code>, in <code>runServe</code>,
+      before the engine starts serving:
+    </p>
+    <pre data-lang="go"><code>engine := server.NewEngine(store, logger)
+defer engine.Close()
+
+// Register a code-based workflow.
+engine.RegisterWorkflow("OrderWorkflow", sdk.Workflow{
+	Type: "OrderWorkflow",
+	Fn:   OrderWorkflow,
+})
+
+// Optional: retry policy for a specific activity, by step name.
+engine.SetRetryPolicy("charge", server.RetryPolicy{
+	MaxAttempts: 3,
+	Backoff:     200 * time.Millisecond,
+	MaxBackoff:  5 * time.Second,
+})
+
+// Rebuild state from disk before accepting traffic.
+if err := engine.Recover(); err != nil {
+	return err
+}</code></pre>
+    <p>Then rebuild and run: <code>go build -o workflowd ./cmd/workflowd &amp;&amp; ./workflowd --serve</code>.</p>
+
+    <h2 id="workers">Writing a worker</h2>
+    <p>
+      A worker is any process that speaks the gRPC service. It long-polls for a task, does the
+      real work, and reports the result. Workers are stateless — all replay happens on the
+      engine — so you can run as many as you like.
+    </p>
+    <p>
+      From outside this repo, generate your own stubs from <code>proto/service.proto</code>
+      (the proto file is the stable contract). The loop looks like this:
+    </p>
+    <pre data-lang="go"><code>for {
+	// Long-poll. Blocks until the engine has work.
+	resp, err := client.PollTask(ctx, &pb.PollTaskRequest{WorkerId: "worker-1"})
+	if err != nil {
+		return // context cancelled or engine gone
+	}
+	task := resp.GetTask()
+
+	// Do the actual work, dispatching on the step name.
+	output, execErr := run(task.GetStepName(), task.GetInput())
+
+	req := &pb.CompleteTaskRequest{
+		WorkflowId: task.GetWorkflowId(),
+		StepName:   task.GetStepName(),
+		Sequence:   task.GetSequence(),
+		LeaseToken: task.GetLeaseToken(), // proof you still own the task
+	}
+	if execErr != nil {
+		req.Result = &pb.CompleteTaskRequest_Error{Error: execErr.Error()}
+	} else {
+		req.Result = &pb.CompleteTaskRequest_Output{Output: output}
+	}
+	client.CompleteTask(ctx, req)
+}</code></pre>
+
+    <h3>Long-running activities must heartbeat</h3>
+    <p>
+      Every dispatched task carries a <code>lease_duration_ms</code>. If your activity will run
+      longer than that, call <code>Heartbeat</code> periodically (a third of the lease duration
+      is a sane interval). A rejected heartbeat means you lost the lease — stop working and
+      discard the result, because the task has been given to someone else.
+    </p>
+
+    <h2 id="retries">Retries &amp; Saga compensation</h2>
+    <p>
+      Retries are handled by the engine and are invisible to your workflow. Register a policy
+      per activity step name:
+    </p>
+    <pre data-lang="go"><code>engine.SetRetryPolicy("charge", server.RetryPolicy{
+	MaxAttempts: 3,                      // counts the first try; 1 = no retry
+	Backoff:     200 * time.Millisecond, // doubles each attempt
+	MaxBackoff:  5 * time.Second,        // ceiling
+})</code></pre>
+    <p>
+      The default is <strong>no retry</strong> (<code>MaxAttempts: 1</code>) — a failure surfaces
+      to the workflow immediately. Retries reuse the same step sequence, so a retried activity
+      stays one logical step with an <code>attempts</code> count (visible in the dashboard).
+      Backoffs are durable: if the engine restarts during one, the retry is re-armed.
+    </p>
+    <p>
+      <strong>Saga compensation needs no special machinery.</strong> Once retries are exhausted,
+      the activity error is returned to your Go code — so "undo" is just an ordinary error branch
+      that calls more activities, as in the <code>release</code> call in the example above.
+    </p>
+
+    <h2 id="cli">CLI flags</h2>
+    <pre data-lang="sh"><code>workflowd --serve [flags]</code></pre>
+    <table>
+      <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>--serve</code></td><td><code>false</code></td><td>Run the engine (gRPC + HTTP). Without it the daemon just bootstraps and exits.</td></tr>
+        <tr><td><code>--data-dir</code></td><td><code>data</code></td><td>Directory holding <code>*.history</code> files. This is your database — back it up.</td></tr>
+        <tr><td><code>--addr</code></td><td><code>:7233</code></td><td>gRPC listen address.</td></tr>
+        <tr><td><code>--http-addr</code></td><td><code>:8233</code></td><td>Dashboard + JSON API. Empty string disables.</td></tr>
+        <tr><td><code>--metrics-addr</code></td><td><code>:9090</code></td><td>Prometheus <code>/metrics</code>. Empty string disables.</td></tr>
+        <tr><td><code>--demo</code></td><td><code>false</code></td><td>Drive a sample workflow to completion against a real store, then exit.</td></tr>
+        <tr><td><code>--version</code></td><td>—</td><td>Print version and exit.</td></tr>
+      </tbody>
+    </table>
+    <div class="callout warn">
+      <strong>There is no authentication yet.</strong> Anyone who can reach these ports can start,
+      signal and terminate workflows. Bind them to localhost or a private network, and put an
+      authenticating proxy in front if they must be exposed.
+    </div>
+
+    <h2 id="api">gRPC API</h2>
+    <p>
+      Service <code>workflow.v1.WorkflowService</code>, defined in <code>proto/service.proto</code>.
+    </p>
+    <table>
+      <thead><tr><th>RPC</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>StartWorkflow</code></td><td>Begin a new execution. Takes <code>workflow_type</code>, <code>input</code>, optional <code>workflow_id</code> (generated when blank; a supplied id must not already exist).</td></tr>
+        <tr><td><code>PollTask</code></td><td>Long-poll for the next activity task. Returns a <code>Task</code> with a <code>lease_token</code> and <code>lease_duration_ms</code>.</td></tr>
+        <tr><td><code>CompleteTask</code></td><td>Report a result. Requires the current <code>lease_token</code>; sets exactly one of <code>output</code> or <code>error</code>.</td></tr>
+        <tr><td><code>Heartbeat</code></td><td>Extend a lease on a long-running task. A rejection means the lease was lost.</td></tr>
+        <tr><td><code>SignalWorkflow</code></td><td>Deliver an external event. Buffered if the workflow isn't waiting yet; rejected for unknown or terminal workflows.</td></tr>
+        <tr><td><code>ListWorkflows</code></td><td>Summaries of all workflows, with an optional status filter.</td></tr>
+        <tr><td><code>GetWorkflow</code></td><td>One workflow in full, including every step.</td></tr>
+        <tr><td><code>TerminateWorkflow</code></td><td>Operator kill switch. Durably fails the workflow and fences any worker still holding its task.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Status codes</h3>
+    <table>
+      <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>INVALID_ARGUMENT</code></td><td>Unknown workflow type, or a duplicate workflow id.</td></tr>
+        <tr><td><code>FAILED_PRECONDITION</code></td><td>Stale/expired lease, result doesn't match the in-flight step, or the workflow is already terminal.</td></tr>
+        <tr><td><code>NOT_FOUND</code></td><td>No such workflow.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="http-api">HTTP / JSON API</h2>
+    <p>
+      Served on <code>--http-addr</code> (default <code>:8233</code>) alongside the dashboard.
+      Browsers can't speak raw gRPC, so this is the integration point for UIs, scripts and
+      <code>curl</code>. Status values are the bare names <code>RUNNING</code>,
+      <code>WAITING</code>, <code>COMPLETED</code>, <code>FAILED</code>,
+      <code>TERMINATED</code>, <code>TIMED_OUT</code>, or <code>UNKNOWN</code> (history that
+      could not be replayed). Timestamps are RFC 3339.
+    </p>
+
+    <h3>List workflows</h3>
+    <pre data-lang="sh"><code>GET /api/workflows
+GET /api/workflows?status=RUNNING</code></pre>
+    <pre data-lang="json"><code>{
+  "workflows": [
+    {
+      "workflow_id": "OrderSaga-1752...-a1b2c3d4",
+      "workflow_type": "OrderSaga",
+      "status": "WAITING",
+      "started_at": "2026-07-13T00:35:06.915Z",
+      "updated_at": "2026-07-13T00:35:07.002Z",
+      "history_length": 3
+    }
+  ]
+}</code></pre>
+
+    <h3>Get one workflow</h3>
+    <pre data-lang="sh"><code>GET /api/workflows/{id}</code></pre>
+    <pre data-lang="json"><code>{
+  "workflow_id": "order-42",
+  "workflow_type": "OrderSaga",
+  "status": "WAITING",
+  "history_length": 5,
+  "input": "order-42",
+  "steps": [
+    {
+      "step_name": "reserve", "sequence": 1, "kind": "ACTIVITY",
+      "status": "COMPLETED", "attempts": 1, "output": "reserved:order-42"
+    },
+    {
+      "step_name": "charge", "sequence": 2, "kind": "ACTIVITY",
+      "status": "SCHEDULED", "attempts": 2
+    }
+  ]
+}</code></pre>
+
+    <h3>Start a workflow</h3>
+    <pre data-lang="sh"><code>POST /api/workflows
+{"type":"OrderSaga","input":"order-42","workflow_id":"optional"}
+→ 201 {"workflow_id":"order-42"}</code></pre>
+
+    <h3>Signal a workflow</h3>
+    <pre data-lang="sh"><code>POST /api/workflows/{id}/signal
+{"name":"approved","payload":"yes"}
+→ 200 {"status":"delivered"}</code></pre>
+
+    <h3>Terminate a workflow</h3>
+    <pre data-lang="sh"><code>POST /api/workflows/{id}/terminate
+{"reason":"stuck on a bad payload"}
+→ 200 {"status":"terminated"}</code></pre>
+
+    <h3>Health</h3>
+    <pre data-lang="sh"><code>GET /api/health → 200 {"status":"ok"}</code></pre>
+
+    <h3>Errors</h3>
+    <p>Failures return <code>{"error": "..."}</code> with a matching status code:</p>
+    <table>
+      <thead><tr><th>Code</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td><code>400</code></td><td>Malformed JSON, unknown field, unknown workflow type, bad status filter</td></tr>
+        <tr><td><code>404</code></td><td>No such workflow</td></tr>
+        <tr><td><code>409</code></td><td>Workflow already terminal (double terminate, signal after finish)</td></tr>
+        <tr><td><code>500</code></td><td>Unreadable or structurally invalid history</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="metrics">Metrics</h2>
+    <p>
+      Prometheus text format at <code>--metrics-addr</code> (default <code>:9090/metrics</code>).
+      The registry is hand-rolled, so there is no <code>client_golang</code> dependency.
+    </p>
+    <table>
+      <thead><tr><th>Metric</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>workflowd_workflows_started_total</code></td><td>counter</td><td>Executions started</td></tr>
+        <tr><td><code>workflowd_workflows_finished_total{status}</code></td><td>counter</td><td>Terminal outcomes: <code>completed</code>, <code>failed</code>, <code>terminated</code></td></tr>
+        <tr><td><code>workflowd_workflows_active</code></td><td>gauge</td><td>Running or waiting right now</td></tr>
+        <tr><td><code>workflowd_tasks_dispatched_total</code></td><td>counter</td><td>Tasks handed to workers (including retries)</td></tr>
+        <tr><td><code>workflowd_task_results_total{result}</code></td><td>counter</td><td>Worker-reported results: <code>completed</code> / <code>failed</code></td></tr>
+        <tr><td><code>workflowd_leases_expired_total</code></td><td>counter</td><td>Tasks reclaimed from dead workers</td></tr>
+        <tr><td><code>workflowd_retries_scheduled_total</code></td><td>counter</td><td>Retries armed after a failed attempt</td></tr>
+        <tr><td><code>workflowd_signals_received_total</code></td><td>counter</td><td>Signals durably recorded</td></tr>
+        <tr><td><code>workflowd_timers_fired_total</code></td><td>counter</td><td>Durable timers that reached their deadline</td></tr>
+        <tr><td><code>workflowd_task_queue_depth</code></td><td>gauge</td><td>Tasks buffered awaiting a worker</td></tr>
+        <tr><td><code>workflowd_step_duration_seconds</code></td><td>histogram</td><td>Dispatch → worker result latency</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Useful queries</h3>
+    <pre data-lang="sh"><code># Workflow failure rate over 5 minutes
+rate(workflowd_workflows_finished_total{status="failed"}[5m])
+
+# Are workers keeping up? (a rising queue means add workers)
+workflowd_task_queue_depth
+
+# 95th percentile activity latency
+histogram_quantile(0.95, rate(workflowd_step_duration_seconds_bucket[5m]))
+
+# Dead workers
+rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
+
+    <h2 id="dashboard">Dashboard</h2>
+    <p>
+      Served at <code>--http-addr</code> and compiled into the binary with <code>go:embed</code>.
+      It gives you:
+    </p>
+    <ul>
+      <li>counts of total / active / completed / failed workflows,</li>
+      <li>a filterable workflow list that auto-refreshes every 2 seconds,</li>
+      <li>a detail view with the full step timeline — kinds, statuses, attempt counts,
+        per-step errors and outputs, and which signal a step is parked on,</li>
+      <li>actions to send a signal to, or terminate, a live workflow.</li>
+    </ul>
+    <p>It is plain HTML, CSS and vanilla JS — no build step, no npm, nothing to bundle.</p>
+
+    <h2 id="recovery">Crash recovery</h2>
+    <p>On startup (before serving traffic) the engine scans the data directory and, for each workflow:</p>
+    <ul>
+      <li><strong>Terminal or not started</strong> — nothing to do.</li>
+      <li><strong>Waiting on an activity</strong> — the task is re-queued for a worker.</li>
+      <li><strong>Waiting on a timer</strong> — re-armed against the recorded deadline (fires
+        immediately if it already passed).</li>
+      <li><strong>Waiting on a signal</strong> — any signal buffered before the crash is delivered.</li>
+      <li><strong>Mid-decision</strong> — the decision loop advances one step.</li>
+      <li><strong>Failed with retries remaining</strong> — the backoff timer is re-armed.</li>
+    </ul>
+    <div class="callout warn">
+      <strong>At-least-once, not exactly-once.</strong> If a worker finished an activity but died
+      before reporting the result, that activity runs again after recovery. Make your activities
+      idempotent — use the workflow id plus step name as an idempotency key.
+    </div>
+
+    <h2 id="leases">Leases &amp; dead workers</h2>
+    <p>
+      When a task is dispatched, the worker receives a random <strong>lease token</strong> and a
+      deadline (30s by default). <code>CompleteTask</code> and <code>Heartbeat</code> must present
+      that token.
+    </p>
+    <ul>
+      <li>Miss the deadline and the engine records <code>StepFailed("lease expired")</code>, then
+        feeds it to the normal retry machinery — attempts remaining means backoff and reassign;
+        exhausted means the workflow sees the error and can compensate.</li>
+      <li>A "zombie" worker that comes back late has a stale token and is rejected, so two
+        workers can never both record a result for the same attempt.</li>
+      <li>Because a dead worker counts as a failed attempt, a task that kills every worker it
+        touches can't loop forever.</li>
+    </ul>
+    <p>
+      With the default no-retry policy, one dead worker fails the workflow explicitly. Set
+      <code>MaxAttempts &gt; 1</code> on activities that should tolerate worker crashes.
+    </p>
+
+    <h2 id="limitations">Limitations</h2>
+    <p>Known and deliberate, as of Weeks 1–10:</p>
+    <ul>
+      <li><strong>Single node.</strong> No replication or failover yet — Raft is Phase 4. The data
+        directory is a single point of failure; back it up.</li>
+      <li><strong>No authentication or TLS</strong> on any port. Keep them private.</li>
+      <li><strong>Go only</strong>, and workflows must be compiled into the engine binary. An
+        importable SDK is Phase 5.</li>
+      <li><strong>Sequential steps.</strong> One step in flight per workflow; no parallel fan-out yet.</li>
+      <li><strong>At-least-once</strong> activity execution (see above).</li>
+      <li><strong>No workflow versioning</strong> yet — changing a running workflow's step
+        sequence breaks in-flight executions. <code>workflow.Version</code> is Phase 5.</li>
+      <li><strong>Listing is a full scan</strong> of the data directory; fine for thousands of
+        workflows, not for millions.</li>
+      <li><strong>One global lock</strong> and a full history re-read per operation, which caps
+        throughput. Per-workflow locks and a state cache are planned.</li>
+      <li><strong>No cron scheduling</strong> yet.</li>
+    </ul>
+
+    <h2 id="faq">FAQ</h2>
+
+    <h3>How is this different from a job queue?</h3>
+    <p>
+      A queue remembers <em>tasks</em>; this remembers <em>your program's position</em>. With a
+      queue, a crash between "charge succeeded" and "enqueue ship" loses the thread of the
+      process. Here that transition is an event in a durable log, so restarting resumes exactly
+      at the next step.
+    </p>
+
+    <h3>Do I need a database?</h3>
+    <p>No. The data directory is the database. Each workflow is one append-only file.</p>
+
+    <h3>What happens if I redeploy while workflows are running?</h3>
+    <p>
+      Workflows resume from history. That is safe as long as the step sequence your code produces
+      hasn't changed. Adding a step in the middle, renaming one, or reordering will be detected as
+      non-determinism and the affected executions will refuse to advance. Until versioning lands,
+      drain in-flight workflows before changing an existing workflow's shape.
+    </p>
+
+    <h3>How many workers should I run?</h3>
+    <p>
+      Watch <code>workflowd_task_queue_depth</code>. If it grows, add workers. Workers are
+      stateless, so scaling is just running more processes pointed at the same engine.
+    </p>
+
+    <h3>Can I use it from another language?</h3>
+    <p>
+      Partly. <em>Workers</em> can be written in any language with gRPC support — generate stubs
+      from <code>proto/service.proto</code>. <em>Workflow definitions</em> are Go only, because
+      replay executes Go code.
+    </p>
+
+    <h3>What is the license?</h3>
+    <p>
+      Apache-2.0. The engine is open source and stays that way; a managed/hosted product is the
+      intended commercial layer.
+    </p>
+
+    <h2 id="next">Where to go next</h2>
+    <ul>
+      <li><a href="https://github.com/olayanju-1234/durable-workflow-engine">Source on GitHub</a> —
+        the <code>docs/</code> folder holds the architecture notes, ADRs and per-session walkthroughs.</li>
+      <li><code>docs/ARCHITECTURE.md</code> — component-by-component design.</li>
+      <li><code>docs/ROADMAP.md</code> — the 17-week plan and what's checked off.</li>
+      <li><code>docs/walkthroughs/</code> — plain-English explanations of how each subsystem was built.</li>
+    </ul>
+
+  </main>
+</div>
+</div>
+
+<footer>
+  <div class="wrap footer-inner">
+    <div>
+      <strong>◆ workflowd</strong> — durable workflow engine for Go<br>
+      <span style="font-size:13px">Apache-2.0 · pre-alpha</span>
+    </div>
+    <div class="footer-links">
+      <a href="./index.html">Home</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="https://github.com/olayanju-1234/durable-workflow-engine">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

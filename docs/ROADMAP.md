@@ -3,7 +3,7 @@
 17 weeks, 5 phases, distilled from the blueprint. Check items off as they land. The
 **Status** line below is the single source of truth for "where are we."
 
-> **Status:** Phase 3 / Week 9 COMPLETE (observability — zero-dep Prometheus `/metrics` via hand-rolled `internal/metrics`; visibility API `ListWorkflows`/`GetWorkflow`/`TerminateWorkflow`; terminate = durable `WorkflowFailed{terminated}` + lease fencing, teeth-verified). Weeks 1–8 COMPLETE. Next: Week 10 — embedded web dashboard (`go:embed`) over the new visibility RPCs + metrics. Open backlog: O(n) visibility full-scan, O(n²) global-lock ceiling, `CronSchedule` (deferred from Wk5).
+> **Status:** Phase 3 COMPLETE (Weeks 1–10). Week 10: embedded `go:embed` dashboard + a hand-rolled JSON HTTP API (browsers can't speak gRPC), plus the public site (landing page + developer docs) under `web/`. Week 9 delivered observability (zero-dep Prometheus `/metrics`; visibility API with lease-fenced terminate). Next: **Phase 4 / Week 11 — Raft** (read the paper, leader election, 3-node localhost cluster). Open backlog: no auth/TLS on any port, O(n) visibility full-scan, O(n²) global-lock ceiling, `CronSchedule` (deferred from Wk5).
 
 Legend: ✅ done · 🚧 in progress · ⬜ not started
 
@@ -63,8 +63,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Visibility API — `ListWorkflows` (+status filter; broken logs surfaced, not hidden), `GetWorkflow` (per-step reconstruction), `TerminateWorkflow` (durable `WorkflowFailed{terminated:true}`, lease dropped so in-flight workers are fenced; presents as `TERMINATED`)
 - ⬜ Visibility index — List is a full scan+replay of the data dir; fine now, revisit with the storage upgrade (ADR-0001)
 
-**Week 10**
-- ⬜ Wk10: embedded web dashboard (`go:embed`)
+**Week 10 — Embedded dashboard & public site** ✅
+- ✅ JSON HTTP API (`internal/server/httpapi.go`) — hand-rolled on `net/http` + `encoding/json` (no grpc-gateway dep); list/get/start/signal/terminate/health; explicit DTOs so the wire contract is readable (`"RUNNING"`, RFC3339) and decoupled from proto naming
+- ✅ Embedded dashboard (`web/` package, `go:embed dashboard`) — workflow list + status filters + auto-refresh, detail drawer with step timeline/attempts/errors, signal + terminate actions; vanilla HTML/CSS/JS, no build step; served by `workflowd --serve --http-addr` (default `:8233`), SPA fallback to index.html
+- ✅ Public site (`web/site/`, not embedded) — landing page + comprehensive developer documentation (quickstart, concepts, determinism rules, writing workflows/workers, gRPC + HTTP + metrics reference, operations, limitations, FAQ)
+- ✅ Tests: HTTP API lifecycle (start→inspect→terminate), error-code table, signal round-trip, embedded-assets-served + API-wins-over-catch-all; live smoke-tested end to end
+- ⬜ Auth/TLS on the HTTP + gRPC ports — none today; documented as a deployment constraint (bind to localhost / front with a proxy)
 
 ## Phase 4 — Replication with Raft (Weeks 11–14)
 - ⬜ Wk11: read the Raft paper; leader election; 3-node localhost cluster

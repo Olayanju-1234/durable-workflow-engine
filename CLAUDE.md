@@ -39,6 +39,7 @@ schedule next step → record result.** Four components, built across phases:
 | Timers/Signals   | `internal/timer`   | 2 ✅  | Min-heap timers, external signals (cron deferred). |
 | Leases/Heartbeats| `internal/server`  | 3 ✅  | Lease tokens on dispatch, Heartbeat RPC, dead-worker reassignment. |
 | Observability    | `internal/metrics` | 3 ✅  | Zero-dep Prometheus `/metrics`; visibility API (List/Get/Terminate). |
+| Dashboard + site | `web/`             | 3 ✅  | `go:embed` operational UI + JSON HTTP API; public landing page & docs. |
 | Consensus (Raft) | `internal/raft`    | 4     | Leader election, log replication, snapshots, HA. |
 | Public SDK       | `sdk`              | 5     | Ergonomic Go API developers import. |
 
@@ -81,11 +82,12 @@ source of truth because they travel with `git clone`; the global memory is the l
 
 ## Current status
 
-Weeks 1–9 complete. Phase 3 / Week 9: observability — zero-dependency Prometheus
-`/metrics` (hand-rolled `internal/metrics`, served via `workflowd --serve
---metrics-addr`) and the visibility API (`ListWorkflows`/`GetWorkflow`/
-`TerminateWorkflow`; terminate durably fails the workflow with a `terminated`
-marker and fences in-flight workers via the lease map). Next: Week 10 — embedded
-web dashboard (`go:embed`) consuming those RPCs + metrics. See
-`docs/SESSION_LOG.md` for the running log; `docs/ROADMAP.md` Status line is
-authoritative.
+**Phase 3 complete (Weeks 1–10).** Week 9 delivered observability (zero-dep
+Prometheus `/metrics` via `internal/metrics`; visibility API List/Get/Terminate
+with lease-fenced terminate). Week 10 delivered the user-facing layer: a
+hand-rolled JSON HTTP API (`internal/server/httpapi.go` — browsers can't speak
+gRPC), the `go:embed` dashboard (`web/dashboard`, served on `--http-addr`
+:8233), and the public site (`web/site` — landing page + full developer docs).
+Next: **Phase 4 / Week 11 — Raft** (paper, leader election, 3-node localhost
+cluster). See `docs/SESSION_LOG.md` for the running log; `docs/ROADMAP.md`
+Status line is authoritative.

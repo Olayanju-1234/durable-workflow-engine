@@ -24,6 +24,7 @@ import (
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
 	"github.com/olayanju-1234/durable-workflow-engine/sdk"
+	"github.com/olayanju-1234/durable-workflow-engine/web"
 )
 
 func main() {
@@ -34,6 +35,7 @@ func main() {
 		serve       = flag.Bool("serve", false, "run the gRPC workflow server")
 		addr        = flag.String("addr", ":7233", "gRPC listen address (serve mode)")
 		metricsAddr = flag.String("metrics-addr", ":9090", "HTTP listen address for /metrics (serve mode; empty disables)")
+		httpAddr    = flag.String("http-addr", ":8233", "HTTP listen address for the dashboard + JSON API (serve mode; empty disables)")
 	)
 	flag.Parse()
 
@@ -61,7 +63,7 @@ func main() {
 	}
 
 	if *serve {
-		if err := runServe(logger, store, *addr, *metricsAddr); err != nil {
+		if err := runServe(logger, store, *addr, *metricsAddr, *httpAddr); err != nil {
 			logger.Error("server stopped", "err", err)
 			os.Exit(1)
 		}
@@ -80,7 +82,7 @@ const shutdownGracePeriod = 10 * time.Second
 // and blocks until SIGINT/SIGTERM, then drains in-flight RPCs with
 // GracefulStop. The engine is wired to the same store the daemon opened, and
 // the Phase-1 workflow types are registered up front.
-func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAddr string) error {
+func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAddr, httpAddr string) error {
 	engine := server.NewEngine(store, logger)
 	defer engine.Close()
 	engine.Register(demoDef)
@@ -99,18 +101,23 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 		return fmt.Errorf("recover: %w", err)
 	}
 
-	// /metrics gets its own HTTP listener so Prometheus scrapes never share a
-	// port (or a failure mode) with workflow gRPC traffic. Empty addr disables.
-	var metricsSrv *http.Server
+	// Two HTTP listeners, deliberately separate from each other and from gRPC:
+	// the dashboard + JSON API are for humans and operators, while /metrics is
+	// scraped by Prometheus and is usually kept on an internal-only port. Either
+	// can be disabled with an empty address.
+	var httpSrvs []*http.Server
+
+	if httpAddr != "" {
+		mux := server.NewHTTPAPI(engine, logger).Handler()
+		mux.Handle("/", web.Handler()) // embedded dashboard; API routes win by specificity
+		httpSrvs = append(httpSrvs, startHTTP(httpAddr, mux, "dashboard", logger))
+		logger.Info("dashboard listening", "addr", httpAddr, "url", "http://localhost"+httpAddr)
+	}
+
 	if metricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", engine.Metrics().Handler())
-		metricsSrv = &http.Server{Addr: metricsAddr, Handler: mux}
-		go func() {
-			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logger.Error("metrics server stopped", "err", err)
-			}
-		}()
+		httpSrvs = append(httpSrvs, startHTTP(metricsAddr, mux, "metrics", logger))
 		logger.Info("metrics endpoint listening", "addr", metricsAddr, "path", "/metrics")
 	}
 
@@ -127,10 +134,10 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 	go func() {
 		<-ctx.Done()
 		logger.Info("shutdown signal received; draining gRPC server", "grace", shutdownGracePeriod)
-		if metricsSrv != nil {
-			sctx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
-			defer cancel()
-			_ = metricsSrv.Shutdown(sctx)
+		sctx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
+		defer cancel()
+		for _, srv := range httpSrvs {
+			_ = srv.Shutdown(sctx)
 		}
 		// GracefulStop waits for in-flight RPCs, but an idle worker parked on a
 		// long-poll PollTask never returns on its own. Bound the drain and force a
@@ -150,6 +157,23 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// startHTTP runs an HTTP server in the background, logging (but not fatally
+// failing on) a listen error — a busy dashboard port must not take down an
+// otherwise healthy engine.
+func startHTTP(addr string, handler http.Handler, name string, logger *slog.Logger) *http.Server {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second, // basic slowloris guard
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("http server stopped", "server", name, "addr", addr, "err", err)
+		}
+	}()
+	return srv
 }
 
 // demoDef is the Phase-1 stand-in for "workflow code": a fixed, ordered pipeline.

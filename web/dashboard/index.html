@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>workflowd — dashboard</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙️</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">◆</span>
+    <div>
+      <h1>workflowd</h1>
+      <p class="tagline">durable workflow engine</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span id="conn" class="conn" data-state="connecting">
+      <span class="dot"></span><span id="conn-text">connecting…</span>
+    </span>
+    <label class="toggle">
+      <input type="checkbox" id="autorefresh" checked>
+      <span>auto-refresh</span>
+    </label>
+    <button id="refresh" class="btn" title="Refresh now">↻</button>
+    <button id="theme" class="btn" title="Toggle theme">◐</button>
+  </div>
+</header>
+
+<main>
+  <section class="stats" id="stats">
+    <div class="stat" data-kind="total">
+      <span class="stat-label">Total</span>
+      <span class="stat-value" id="stat-total">—</span>
+    </div>
+    <div class="stat" data-kind="active">
+      <span class="stat-label">Active</span>
+      <span class="stat-value" id="stat-active">—</span>
+    </div>
+    <div class="stat" data-kind="completed">
+      <span class="stat-label">Completed</span>
+      <span class="stat-value" id="stat-completed">—</span>
+    </div>
+    <div class="stat" data-kind="failed">
+      <span class="stat-label">Failed</span>
+      <span class="stat-value" id="stat-failed">—</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Workflows</h2>
+      <div class="filters" id="filters" role="group" aria-label="Filter by status">
+        <button class="chip is-active" data-status="">All</button>
+        <button class="chip" data-status="RUNNING">Running</button>
+        <button class="chip" data-status="WAITING">Waiting</button>
+        <button class="chip" data-status="COMPLETED">Completed</button>
+        <button class="chip" data-status="FAILED">Failed</button>
+        <button class="chip" data-status="TERMINATED">Terminated</button>
+      </div>
+    </div>
+
+    <div class="table-scroll">
+      <table class="wf-table">
+        <thead>
+          <tr>
+            <th>Workflow ID</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th class="num">Events</th>
+            <th>Started</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr class="empty"><td colspan="6">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<!-- Detail drawer -->
+<aside class="drawer" id="drawer" hidden aria-label="Workflow detail">
+  <div class="drawer-head">
+    <div>
+      <h2 id="d-id">—</h2>
+      <p class="muted"><span id="d-type">—</span> · <span id="d-status">—</span></p>
+    </div>
+    <button class="btn" id="d-close" title="Close">✕</button>
+  </div>
+
+  <div class="drawer-body">
+    <div class="kv">
+      <div><span class="k">Started</span><span class="v" id="d-started">—</span></div>
+      <div><span class="k">Updated</span><span class="v" id="d-updated">—</span></div>
+      <div><span class="k">Events</span><span class="v" id="d-events">—</span></div>
+    </div>
+
+    <div id="d-error-wrap" hidden>
+      <h3>Error</h3>
+      <pre class="err" id="d-error"></pre>
+    </div>
+
+    <h3>Input</h3>
+    <pre id="d-input" class="io">—</pre>
+
+    <div id="d-output-wrap" hidden>
+      <h3>Output</h3>
+      <pre id="d-output" class="io"></pre>
+    </div>
+
+    <h3>Steps</h3>
+    <ol class="steps" id="d-steps"></ol>
+
+    <div class="drawer-actions" id="d-actions" hidden>
+      <div class="action-row">
+        <input type="text" id="sig-name" placeholder="signal name" aria-label="Signal name">
+        <input type="text" id="sig-payload" placeholder="payload" aria-label="Signal payload">
+        <button class="btn btn-secondary" id="d-signal">Send signal</button>
+      </div>
+      <div class="action-row">
+        <input type="text" id="term-reason" placeholder="reason (optional)" aria-label="Terminate reason">
+        <button class="btn btn-danger" id="d-terminate">Terminate</button>
+      </div>
+    </div>
+  </div>
+</aside>
+<div class="scrim" id="scrim" hidden></div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

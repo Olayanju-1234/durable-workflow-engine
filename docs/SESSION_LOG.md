@@ -5,6 +5,75 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-08-05 — Session 12: Dashboard, JSON API & public site (Phase 3, Week 10 — PHASE 3 COMPLETE)
+
+The engine grew a face. Three things landed: a JSON HTTP API, the embedded
+`go:embed` dashboard (the Week-10 deliverable), and a public website with
+comprehensive developer documentation.
+
+**Why a JSON API at all:** browsers cannot speak raw gRPC, so the dashboard
+needed an HTTP surface. The options were grpc-gateway (a dependency tree and a
+codegen step) or ~200 lines of `net/http` + `encoding/json`. Hand-rolled won, for
+the same reason the WAL and the metrics registry are hand-rolled.
+
+**Done:**
+- **`internal/server/httpapi.go`** — `GET /api/health`, `GET /api/workflows`
+  (+`?status=`), `POST /api/workflows`, `GET /api/workflows/{id}`,
+  `POST /api/workflows/{id}/terminate`, `POST /api/workflows/{id}/signal`.
+  Uses Go 1.22+ method+wildcard mux patterns (`GET /api/workflows/{id}` +
+  `r.PathValue("id")`) so there is no hand-rolled path parsing. **Explicit DTOs,
+  not the generated protobuf structs** — the HTTP contract stays readable
+  (statuses are bare strings like `"RUNNING"`, timestamps RFC3339) and survives
+  proto renames. `DisallowUnknownFields` + a 1 MB body cap. Sentinel errors map
+  to codes: 400 / 404 / 409 (already terminal) / 500.
+- **`web/` Go package** — `//go:embed dashboard` + `Handler()` with an SPA
+  fallback (unknown path → index.html). `site/` sits beside it and is
+  deliberately **not** embedded.
+- **`web/dashboard/`** — stat tiles, filterable auto-refreshing (2s) workflow
+  table, detail drawer with the full step timeline (kind/status/attempts/errors/
+  outputs/awaited signal), signal + terminate actions, theme toggle persisted to
+  localStorage. Vanilla HTML/CSS/JS, **no build step, no npm** — a dashboard
+  needing a Node toolchain would undermine the single-binary promise. 32K total.
+- **`web/site/`** — landing page (problem/solution, feature grid, honest
+  comparison table vs queues and Temporal, phase status) and `docs.html`: a
+  full developer manual — quickstart, mental model, history/durability, replay,
+  a determinism do/don't table, writing workflows, registering, writing a worker,
+  retries + Saga, CLI flags, gRPC API, HTTP API, metrics reference with example
+  PromQL, dashboard, recovery, leases, limitations, FAQ.
+- **`cmd/workflowd`**: new `--http-addr` (default `:8233`); extracted a
+  `startHTTP` helper now shared by the dashboard and metrics servers (both
+  drained on shutdown). Added `ReadHeaderTimeout` as a slowloris guard.
+- **README refreshed** — it still claimed "Phase 1 in progress" from Session 2.
+- **Tests** (`httpapi_test.go`): full lifecycle over HTTP (start→list→filter→
+  detail→terminate→409), a table of error codes, signal round-trip, and
+  `TestDashboardServed` proving the assets really are compiled in and that the
+  API still wins over the dashboard's `/` catch-all.
+
+**State:** `make ci` ✅. Live smoke test ✅ — booted the daemon, served the
+dashboard + assets, started/listed/inspected/terminated a workflow over curl,
+confirmed `/metrics` agreed (`started_total 1`, `finished_total{terminated} 1`,
+`active 0`), verified 404/409 paths and the SPA fallback.
+
+**Next:** Phase 4 / Week 11 — Raft: read the paper, leader election, 3-node
+localhost cluster.
+
+**Gotchas:**
+- **`go:embed` cannot reference parent directories.** The embed directive must
+  live in a package whose directory contains the assets — hence `web/embed.go`
+  next to `web/dashboard/`, rather than embedding from `internal/`.
+- **Go's `internal/` rule shapes the whole integration story.** External code
+  can't import `internal/server`, so today workflows are registered by building
+  the daemon from this repo, and third-party workers must generate their own
+  stubs from `proto/service.proto`. Documented honestly on the docs page; fixing
+  it properly *is* the Phase-5 SDK work.
+- Route specificity: `mux.Handle("/", web.Handler())` is registered alongside the
+  `/api/...` patterns and loses to them, so the dashboard catch-all never
+  swallows API calls — asserted in a test rather than assumed.
+- Everything rendered into the dashboard (ids, types, errors, outputs) is
+  workflow-controlled and is escaped before touching `innerHTML`.
+
+---
+
 ## 2026-07-12 — Session 11: Observability — /metrics + visibility API (Phase 3, Week 9)
 
 The engine can now be *watched* and *operated*: Prometheus metrics on an HTTP
