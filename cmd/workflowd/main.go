@@ -36,6 +36,7 @@ func main() {
 		addr        = flag.String("addr", ":7233", "gRPC listen address (serve mode)")
 		metricsAddr = flag.String("metrics-addr", ":9090", "HTTP listen address for /metrics (serve mode; empty disables)")
 		httpAddr    = flag.String("http-addr", ":8233", "HTTP listen address for the dashboard + JSON API (serve mode; empty disables)")
+		authToken   = flag.String("auth-token", "", "require this bearer token on mutating /api routes (empty disables auth)")
 	)
 	flag.Parse()
 
@@ -63,7 +64,7 @@ func main() {
 	}
 
 	if *serve {
-		if err := runServe(logger, store, *addr, *metricsAddr, *httpAddr); err != nil {
+		if err := runServe(logger, store, *addr, *metricsAddr, *httpAddr, *authToken); err != nil {
 			logger.Error("server stopped", "err", err)
 			os.Exit(1)
 		}
@@ -82,7 +83,7 @@ const shutdownGracePeriod = 10 * time.Second
 // and blocks until SIGINT/SIGTERM, then drains in-flight RPCs with
 // GracefulStop. The engine is wired to the same store the daemon opened, and
 // the Phase-1 workflow types are registered up front.
-func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAddr, httpAddr string) error {
+func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAddr, httpAddr, authToken string) error {
 	engine := server.NewEngine(store, logger)
 	defer engine.Close()
 	engine.Register(demoDef)
@@ -108,9 +109,14 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 	var httpSrvs []*http.Server
 
 	if httpAddr != "" {
-		mux := server.NewHTTPAPI(engine, logger).Handler()
+		api := server.NewHTTPAPI(engine, logger, server.WithAuthToken(authToken))
+		mux := api.Handler()
 		mux.Handle("/", web.Handler()) // embedded dashboard; API routes win by specificity
-		httpSrvs = append(httpSrvs, startHTTP(httpAddr, mux, "dashboard", logger))
+		if authToken == "" {
+			logger.Warn("API auth is disabled; anyone who can reach the HTTP port can start, signal and terminate workflows",
+				"hint", "pass --auth-token to require a bearer token")
+		}
+		startHTTP(httpAddr, api.Wrap(mux), "dashboard", logger)
 		logger.Info("dashboard listening", "addr", httpAddr, "url", "http://localhost"+httpAddr)
 	}
 

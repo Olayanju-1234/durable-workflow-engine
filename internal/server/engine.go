@@ -42,6 +42,7 @@ type Engine struct {
 	retryTimers    *timer.Service // activity retry backoffs (not history steps)
 	leaseTimers    *timer.Service // lease expiry checks (dead-worker detection)
 	decisionTimers *timer.Service // polyglot: SDK worker died holding a workflow task
+	advanceRetries *timer.Service // decision loops that failed mid-advance (transient I/O)
 	log            *slog.Logger
 	registry       *metrics.Registry
 	metrics        *engineMetrics
@@ -109,6 +110,8 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 	e.leaseTimers.Start()
 	e.decisionTimers = timer.New(e.onDecisionTimeout)
 	e.decisionTimers.Start()
+	e.advanceRetries = timer.New(e.onAdvanceRetry)
+	e.advanceRetries.Start()
 	return e
 }
 
@@ -120,6 +123,7 @@ func (e *Engine) Close() {
 		e.retryTimers.Stop()
 		e.leaseTimers.Stop()
 		e.decisionTimers.Stop()
+		e.advanceRetries.Stop()
 	})
 }
 
@@ -151,7 +155,7 @@ func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID str
 
 	planner, ok := e.planners[workflowType]
 	if !ok {
-		return "", fmt.Errorf("server: unknown workflow type %q", workflowType)
+		return "", fmt.Errorf("%w: %q is not registered on this node", ErrUnknownType, workflowType)
 	}
 	if workflowID == "" {
 		// Timestamp alone can collide at coarse clock resolution or under rapid
@@ -164,7 +168,7 @@ func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID str
 		return "", fmt.Errorf("server: read history %s: %w", workflowID, err)
 	}
 	if len(existing) > 0 {
-		return "", fmt.Errorf("server: workflow %q already exists", workflowID)
+		return "", fmt.Errorf("%w: %q already has history", ErrAlreadyExists, workflowID)
 	}
 
 	started := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
@@ -385,8 +389,12 @@ func (e *Engine) PollTask(ctx context.Context, workerID string) (*Task, error) {
 // SignalWorkflow delivers an external signal to a running workflow. The signal is
 // recorded durably (buffered in the log), then, if the workflow is currently
 // waiting for a matching signal, the wait is satisfied and the workflow advances.
-// A signal to a not-yet-started or terminal workflow is rejected.
+// A signal to a not-yet-started or terminal workflow is rejected; so is an empty
+// signal name — it would be recorded forever and could never match a real wait.
 func (e *Engine) SignalWorkflow(workflowID, signalName string, payload []byte) error {
+	if signalName == "" {
+		return fmt.Errorf("%w: signal name must not be empty", ErrInvalidArgument)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -399,10 +407,10 @@ func (e *Engine) SignalWorkflow(workflowID, signalName string, payload []byte) e
 		return fmt.Errorf("server: reconstruct %s: %w", workflowID, err)
 	}
 	if st.Status == state.StatusNotStarted {
-		return fmt.Errorf("server: unknown workflow %q", workflowID)
+		return fmt.Errorf("%w: %q", ErrNotFound, workflowID)
 	}
 	if st.Status.IsTerminal() {
-		return fmt.Errorf("server: workflow %q is %s; cannot signal a terminal workflow", workflowID, st.Status)
+		return fmt.Errorf("%w: %q is %s; cannot signal a terminal workflow", ErrAlreadyTerminal, workflowID, st.Status)
 	}
 
 	sig := &history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
@@ -491,6 +499,7 @@ func (e *Engine) onTimerFired(tm timer.Timer) {
 	events, err := e.store.ReadAll(tm.WorkflowID)
 	if err != nil {
 		e.log.Error("timer fired: read history", "workflow_id", tm.WorkflowID, "err", err)
+		e.rearmCallback(e.timers, tm)
 		return
 	}
 	st, err := state.Reconstruct(events)
@@ -512,13 +521,12 @@ func (e *Engine) onTimerFired(tm timer.Timer) {
 	}}
 	if err := e.appendLocked(tm.WorkflowID, fired, int64(len(events)+1)); err != nil {
 		e.log.Error("timer fired: append", "workflow_id", tm.WorkflowID, "err", err)
+		e.rearmCallback(e.timers, tm)
 		return
 	}
 	e.metrics.timersFired.Inc()
 	e.log.Info("timer fired", "workflow_id", tm.WorkflowID, "step", tm.StepName, "sequence", tm.Sequence)
-	if err := e.advanceLocked(tm.WorkflowID, planner); err != nil {
-		e.log.Error("timer fired: advance", "workflow_id", tm.WorkflowID, "err", err)
-	}
+	e.advanceOrRetry(tm, tm.WorkflowID, planner)
 }
 
 // advanceLocked runs one turn of the decision loop: replay history, Decide, and
@@ -644,4 +652,82 @@ func (e *Engine) appendLocked(workflowID string, ev *history.HistoryEvent, event
 		return fmt.Errorf("server: append %s: %w", workflowID, err)
 	}
 	return nil
+}
+
+// callbackRetryDelay is how long a failed timer callback waits before retrying.
+// The timer has already been popped from its heap when the callback runs, so a
+// transient I/O error (disk full, EIO) would otherwise strand the workflow until
+// the next restart — re-arming turns that into a bounded retry loop that is loud
+// in the logs and self-heals.
+const callbackRetryDelay = 10 * time.Second
+
+// rearmCallback re-arms a popped callback timer after a transient failure. The
+// caller must hold e.mu.
+func (e *Engine) rearmCallback(svc *timer.Service, tm timer.Timer) {
+	svc.Add(timer.Timer{
+		WorkflowID: tm.WorkflowID, StepName: tm.StepName,
+		Sequence: tm.Sequence, FireAt: time.Now().Add(callbackRetryDelay),
+	})
+}
+
+// advanceOrRetry runs the decision loop; on failure it schedules a retry instead
+// of leaving the workflow stranded between "event recorded" and "next step
+// dispatched". Advancing is idempotent — Decide derives everything from history —
+// so a blind retry is safe. The caller must hold e.mu.
+func (e *Engine) advanceOrRetry(tm timer.Timer, workflowID string, planner Planner) {
+	if err := e.advanceLocked(workflowID, planner); err != nil {
+		e.log.Error("advance failed; scheduling retry", "workflow_id", workflowID, "err", err)
+		e.advanceRetries.Add(timer.Timer{WorkflowID: workflowID, FireAt: time.Now().Add(callbackRetryDelay)})
+	}
+}
+
+// onAdvanceRetry re-runs a decision loop whose previous advance failed mid-flight.
+// Guarded like every callback: only acts when the workflow is still RUNNING and
+// its type is registered here.
+func (e *Engine) onAdvanceRetry(tm timer.Timer) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	events, err := e.store.ReadAll(tm.WorkflowID)
+	if err != nil {
+		e.log.Error("advance retry: read history", "workflow_id", tm.WorkflowID, "err", err)
+		e.advanceRetries.Add(timer.Timer{WorkflowID: tm.WorkflowID, FireAt: time.Now().Add(callbackRetryDelay)})
+		return
+	}
+	st, err := state.Reconstruct(events)
+	if err != nil {
+		// A corrupt history will not heal by retrying; recovery or an operator
+		// must intervene. Say so loudly once per attempt-free cycle.
+		e.log.Error("advance retry: history unreadable; giving up", "workflow_id", tm.WorkflowID, "err", err)
+		return
+	}
+	if st.Status != state.StatusRunning {
+		return // moved on (or terminal); nothing to decide
+	}
+	planner, ok := e.planners[st.WorkflowType]
+	if !ok {
+		e.log.Warn("advance retry for unregistered type", "workflow_id", tm.WorkflowID, "type", st.WorkflowType)
+		return
+	}
+	if err := e.advanceLocked(tm.WorkflowID, planner); err != nil {
+		e.log.Error("advance retry failed; will retry again", "workflow_id", tm.WorkflowID, "err", err)
+		e.advanceRetries.Add(timer.Timer{WorkflowID: tm.WorkflowID, FireAt: time.Now().Add(callbackRetryDelay)})
+	}
+}
+
+// EngineStats is a point-in-time snapshot of the engine's live gauges, for the
+// health endpoint and operational tooling.
+type EngineStats struct {
+	ActiveWorkflows        int64
+	TaskQueueDepth         int
+	WorkflowTaskQueueDepth int
+}
+
+// Stats returns the current gauge values. Cheap: all three are atomic/channel-len reads.
+func (e *Engine) Stats() EngineStats {
+	return EngineStats{
+		ActiveWorkflows:        e.metrics.workflowsActive.Value(),
+		TaskQueueDepth:         e.queue.depth(),
+		WorkflowTaskQueueDepth: e.workflowQueue.depth(),
+	}
 }

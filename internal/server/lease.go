@@ -130,11 +130,13 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		})
 		return
 	}
-	delete(e.leases, tm.WorkflowID)
 
+	// Read history before dropping the lease: on a transient I/O failure the
+	// lease stays armed and the re-check below retries the whole reclaim.
 	events, err := e.store.ReadAll(tm.WorkflowID)
 	if err != nil {
 		e.log.Error("lease expired: read history", "workflow_id", tm.WorkflowID, "err", err)
+		e.rearmCallback(e.leaseTimers, tm)
 		return
 	}
 	st, err := state.Reconstruct(events)
@@ -142,6 +144,8 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		e.log.Error("lease expired: reconstruct", "workflow_id", tm.WorkflowID, "err", err)
 		return
 	}
+	delete(e.leases, tm.WorkflowID)
+
 	tail := st.Tail()
 	// Belt and braces: only reclaim if history still shows this exact step in
 	// flight. Anything else means the workflow moved on without the lease map
@@ -164,7 +168,14 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		},
 	}}
 	if err := e.appendLocked(tm.WorkflowID, failedEv, int64(len(events)+1)); err != nil {
-		e.log.Error("lease expired: append", "workflow_id", tm.WorkflowID, "err", err)
+		// The StepFailed event never landed, so history still shows this attempt
+		// as scheduled with no lease and no queue entry. Re-enqueue it: a worker
+		// gets a fresh lease and the attempt proceeds as if nothing happened.
+		e.log.Error("lease expired: append failed; re-enqueueing task", "workflow_id", tm.WorkflowID, "err", err)
+		e.queue.enqueue(&Task{
+			WorkflowId: le.workflowID, StepName: le.stepName,
+			Sequence: le.sequence, Input: tail.Input,
+		})
 		return
 	}
 	e.metrics.leasesExpired.Inc()
@@ -176,7 +187,5 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		e.scheduleRetryLocked(tm.WorkflowID, tail, policy.backoff(tail.Attempts))
 		return
 	}
-	if err := e.advanceLocked(tm.WorkflowID, planner); err != nil {
-		e.log.Error("lease expired: advance", "workflow_id", tm.WorkflowID, "err", err)
-	}
+	e.advanceOrRetry(tm, tm.WorkflowID, planner)
 }

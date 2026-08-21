@@ -167,7 +167,8 @@ func TestHTTPAPIErrors(t *testing.T) {
 		{"unknown type", "POST", "/api/workflows", `{"type":"Nope"}`, http.StatusBadRequest},
 		{"malformed json", "POST", "/api/workflows", `{"type":`, http.StatusBadRequest},
 		{"unknown field", "POST", "/api/workflows", `{"bogus":1}`, http.StatusBadRequest},
-		{"signal unknown", "POST", "/api/workflows/nope/signal", `{"name":"x"}`, http.StatusConflict},
+		{"signal unknown", "POST", "/api/workflows/nope/signal", `{"name":"x"}`, http.StatusNotFound},
+		{"signal empty name", "POST", "/api/workflows/api-1/signal", `{"name":""}`, http.StatusBadRequest},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

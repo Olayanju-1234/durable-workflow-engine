@@ -29,8 +29,15 @@ func NewGRPCServer(engine *Engine, logger *slog.Logger) *GRPCServer {
 
 func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowRequest) (*StartWorkflowResponse, error) {
 	id, err := s.engine.StartWorkflow(req.GetWorkflowType(), req.GetInput(), req.GetWorkflowId())
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrUnknownType):
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	case errors.Is(err, ErrAlreadyExists):
+		return nil, status.Errorf(codes.AlreadyExists, "%v", err)
+	default:
+		// History I/O failed server-side; a retry may succeed.
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	return &StartWorkflowResponse{WorkflowId: id}, nil
 }
@@ -77,9 +84,17 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *HeartbeatRequest) (*Hea
 }
 
 func (s *GRPCServer) SignalWorkflow(ctx context.Context, req *SignalWorkflowRequest) (*SignalWorkflowResponse, error) {
-	if err := s.engine.SignalWorkflow(req.GetWorkflowId(), req.GetSignalName(), req.GetPayload()); err != nil {
-		// Unknown or terminal workflow: a precondition the caller must fix.
+	err := s.engine.SignalWorkflow(req.GetWorkflowId(), req.GetSignalName(), req.GetPayload())
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrInvalidArgument):
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	case errors.Is(err, ErrNotFound):
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	case errors.Is(err, ErrAlreadyTerminal):
 		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+	default:
+		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 	return &SignalWorkflowResponse{}, nil
 }

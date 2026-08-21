@@ -74,6 +74,7 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 	events, err := e.store.ReadAll(tm.WorkflowID)
 	if err != nil {
 		e.log.Error("retry: read history", "workflow_id", tm.WorkflowID, "err", err)
+		e.rearmCallback(e.retryTimers, tm)
 		return
 	}
 	st, err := state.Reconstruct(events)
@@ -93,6 +94,7 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 	}}
 	if err := e.appendLocked(tm.WorkflowID, retry, int64(len(events)+1)); err != nil {
 		e.log.Error("retry: append", "workflow_id", tm.WorkflowID, "err", err)
+		e.rearmCallback(e.retryTimers, tm)
 		return
 	}
 	e.queue.enqueue(&Task{

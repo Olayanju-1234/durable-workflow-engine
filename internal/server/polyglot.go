@@ -242,6 +242,7 @@ func (e *Engine) onDecisionTimeout(tm timer.Timer) {
 	events, err := e.store.ReadAll(tm.WorkflowID)
 	if err != nil {
 		e.log.Error("decision timeout: read history", "workflow_id", tm.WorkflowID, "err", err)
+		e.rearmCallback(e.decisionTimers, tm)
 		return
 	}
 	st, err := state.Reconstruct(events)

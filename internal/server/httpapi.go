@@ -2,13 +2,17 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
 )
 
 // HTTPAPI exposes the visibility surface as JSON over HTTP. Browsers cannot
@@ -23,7 +27,7 @@ import (
 // Routes (all under the mux returned by Handler):
 //
 //	GET  /api/health
-//	GET  /api/workflows[?status=RUNNING]
+//	GET  /api/workflows[?status=RUNNING&q=&limit=&offset=]
 //	POST /api/workflows                      {"type","input","workflow_id"}
 //	GET  /api/workflows/{id}
 //	POST /api/workflows/{id}/terminate       {"reason"}
@@ -31,10 +35,28 @@ import (
 type HTTPAPI struct {
 	engine *Engine
 	log    *slog.Logger
+	// authToken guards every mutating /api route when set (Authorization:
+	// Bearer <token>). Empty disables auth entirely — the pre-existing default.
+	authToken string
+	startedAt time.Time
 }
 
-func NewHTTPAPI(engine *Engine, logger *slog.Logger) *HTTPAPI {
-	return &HTTPAPI{engine: engine, log: logger}
+func NewHTTPAPI(engine *Engine, logger *slog.Logger, opts ...HTTPOption) *HTTPAPI {
+	a := &HTTPAPI{engine: engine, log: logger, startedAt: time.Now()}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
+}
+
+// HTTPOption configures the API at construction.
+type HTTPOption func(*HTTPAPI)
+
+// WithAuthToken enables bearer-token auth on the JSON API. /api/health stays
+// open (liveness probes cannot carry secrets); the dashboard's static assets
+// stay open; every other /api route requires "Authorization: Bearer <token>".
+func WithAuthToken(token string) HTTPOption {
+	return func(a *HTTPAPI) { a.authToken = token }
 }
 
 // Handler returns the API routes. Go 1.22+ method+wildcard patterns keep the
@@ -50,6 +72,60 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
 	return mux
+}
+
+// Wrap layers request logging and (when configured) bearer-token auth around a
+// fully-assembled mux — call it after mounting the dashboard on Handler(), so
+// the middleware sees the final routing table. Auth applies only to /api routes
+// other than health; static assets stay public.
+func (a *HTTPAPI) Wrap(h http.Handler) http.Handler {
+	return a.logRequests(a.requireAuth(h))
+}
+
+// requireAuth enforces the bearer token on mutating API routes when one is
+// configured. Comparison is constant-time; the header form is exact ("Bearer").
+func (a *HTTPAPI) requireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.authToken == "" || !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(a.authToken)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="workflowd"`)
+			writeError(w, http.StatusUnauthorized, errors.New("missing or invalid bearer token"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// statusWriter captures the response code for request logging.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.code = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// logRequests emits one structured line per request: Info for mutations,
+// Debug for reads, so a quiet GET-heavy dashboard doesn't flood the log.
+func (a *HTTPAPI) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		lvl := slog.LevelDebug
+		if r.Method != http.MethodGet {
+			lvl = slog.LevelInfo
+		}
+		a.log.Log(r.Context(), lvl, "http request",
+			"method", r.Method, "path", r.URL.Path, "status", sw.code,
+			"duration_ms", time.Since(start).Milliseconds())
+	})
 }
 
 // contextWithPollTimeout bounds a long-poll so it returns before proxies or
@@ -89,25 +165,73 @@ type workflowDTO struct {
 }
 
 func (a *HTTPAPI) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	st := a.engine.Stats()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":                    "ok",
+		"version":                   version.Version,
+		"uptime_seconds":            int64(time.Since(a.startedAt).Seconds()),
+		"workflows_active":          st.ActiveWorkflows,
+		"task_queue_depth":          st.TaskQueueDepth,
+		"workflow_task_queue_depth": st.WorkflowTaskQueueDepth,
+	})
 }
 
+// listWorkflows supports status filtering (engine-side), a case-insensitive
+// substring query over workflow id and type, and offset/limit pagination.
+// The response carries "total" so clients can render page counts.
 func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	filter, err := parseStatusFilter(r.URL.Query().Get("status"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	const (
+		defaultLimit = 200
+		maxLimit     = 1000
+	)
+	limit := defaultLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > maxLimit {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("limit must be an integer in [1,%d]", maxLimit))
+			return
+		}
+	}
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if offset, err = strconv.Atoi(v); err != nil || offset < 0 {
+			writeError(w, http.StatusBadRequest, errors.New("offset must be a non-negative integer"))
+			return
+		}
+	}
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+
 	summaries, err := a.engine.ListWorkflows(filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	out := make([]*summaryDTO, 0, len(summaries))
+
+	matched := make([]*summaryDTO, 0, len(summaries))
 	for _, s := range summaries {
-		out = append(out, toSummaryDTO(s))
+		if q != "" && !strings.Contains(strings.ToLower(s.GetWorkflowId()+" "+s.GetWorkflowType()), q) {
+			continue
+		}
+		matched = append(matched, toSummaryDTO(s))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workflows": out})
+	total := len(matched)
+	if offset > total {
+		offset = total
+	}
+	page := matched[offset:]
+	if len(page) > limit {
+		page = page[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workflows": page,
+		"total":     total,
+		"offset":    offset,
+		"limit":     limit,
+	})
 }
 
 func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -154,9 +278,19 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := a.engine.StartWorkflow(body.Type, []byte(body.Input), body.WorkflowID)
-	if err != nil {
-		// Unknown workflow type or duplicate id: the caller must fix the request.
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrUnknownType):
+		// The caller must fix the request: the type is not registered here.
 		writeError(w, http.StatusBadRequest, err)
+		return
+	case errors.Is(err, ErrAlreadyExists):
+		// A supplied id collided with an existing workflow — a conflict, not a
+		// malformed request; the caller picks a new id (or reuses the workflow).
+		writeError(w, http.StatusConflict, err)
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"workflow_id": id})
@@ -196,8 +330,16 @@ func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.engine.SignalWorkflow(r.PathValue("id"), body.Name, []byte(body.Payload)); err != nil {
-		// Unknown or terminal workflow.
-		writeError(w, http.StatusConflict, err)
+		switch {
+		case errors.Is(err, ErrInvalidArgument):
+			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
+		case errors.Is(err, ErrAlreadyTerminal):
+			writeError(w, http.StatusConflict, err)
+		default:
+			writeError(w, http.StatusInternalServerError, err)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "delivered"})

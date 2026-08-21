@@ -14,6 +14,13 @@ import (
 var (
 	ErrNotFound        = errors.New("server: workflow not found")
 	ErrAlreadyTerminal = errors.New("server: workflow already terminal")
+	// ErrAlreadyExists: StartWorkflow with a workflow id that already has history.
+	ErrAlreadyExists = errors.New("server: workflow already exists")
+	// ErrUnknownType: StartWorkflow for a type no planner claims on this node.
+	ErrUnknownType = errors.New("server: unknown workflow type")
+	// ErrInvalidArgument: a request field is structurally invalid (empty signal
+	// name, ...). A client bug, not a transient condition.
+	ErrInvalidArgument = errors.New("server: invalid argument")
 	// ErrStaleDecision: an SDK returned a command for a position the workflow
 	// has already moved past. Expected under re-dispatch; the worker should
 	// simply poll again rather than treat it as a failure.
