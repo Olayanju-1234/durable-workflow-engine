@@ -5,19 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Documentation — workflowd</title>
 <meta name="description" content="Developer documentation for workflowd: quickstart, core concepts, writing workflows, the gRPC and JSON APIs, metrics, and operations.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='7' fill='%23F3ECDF'/%3E%3Crect x='4' y='4' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='13' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='22' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='13' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='22' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='4' y='4' width='6' height='6' fill='%233F5089'/%3E%3Crect x='22' y='4' width='6' height='6' fill='%233F5089'/%3E%3Crect x='13' y='13' width='6' height='6' fill='%233F5089'/%3E%3Crect x='4' y='22' width='6' height='6' fill='%233F5089'/%3E%3Crect x='22' y='22' width='6' height='6' fill='%233F5089'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
 </head>
 <body>
 
 <nav class="nav">
   <div class="nav-inner">
-    <a class="nav-brand" href="./index.html"><span class="mark">◆</span> workflowd</a>
+    <a class="nav-brand" href="./index.html" aria-label="workflowd home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="29" height="7" rx="2.5" class="mk-weft"/><rect x="1.5" y="12.5" width="29" height="7" rx="2.5" class="mk-weft"/><rect x="1.5" y="23.5" width="29" height="7" rx="2.5" class="mk-weft"/>
+        <rect x="1.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/><rect x="12.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/><rect x="23.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/>
+        <rect x="1.5" y="1.5" width="7" height="7" class="mk-weft"/><rect x="23.5" y="1.5" width="7" height="7" class="mk-weft"/><rect x="12.5" y="12.5" width="7" height="7" class="mk-weft"/><rect x="1.5" y="23.5" width="7" height="7" class="mk-weft"/><rect x="23.5" y="23.5" width="7" height="7" class="mk-weft"/>
+      </svg>
+      workflowd
+    </a>
     <div class="nav-links">
       <a href="./index.html#how" class="hide-sm">How it works</a>
       <a href="./index.html#status" class="hide-sm">Status</a>
       <a href="./docs.html">Docs</a>
-      <a href="https://github.com/olayanju-1234/durable-workflow-engine">GitHub</a>
+      <a class="nav-cta" href="https://github.com/olayanju-1234/durable-workflow-engine">GitHub</a>
     </div>
   </div>
 </nav>
@@ -555,13 +562,14 @@ POST /api/workflow-tasks/complete   {"workflow_id":...,"task_token":...,"command
         <tr><td><code>--http-addr</code></td><td><code>:8233</code></td><td>Dashboard + JSON API. Empty string disables.</td></tr>
         <tr><td><code>--metrics-addr</code></td><td><code>:9090</code></td><td>Prometheus <code>/metrics</code>. Empty string disables.</td></tr>
         <tr><td><code>--demo</code></td><td><code>false</code></td><td>Drive a sample workflow to completion against a real store, then exit.</td></tr>
+        <tr><td><code>--auth-token</code></td><td>empty</td><td>Require this bearer token on mutating <code>/api</code> routes (<code>Authorization: Bearer &lt;token&gt;</code>). Empty disables auth. <code>/api/health</code> and the dashboard's static assets stay open.</td></tr>
         <tr><td><code>--version</code></td><td>—</td><td>Print version and exit.</td></tr>
       </tbody>
     </table>
     <div class="callout warn">
-      <strong>There is no authentication yet.</strong> Anyone who can reach these ports can start,
-      signal and terminate workflows. Bind them to localhost or a private network, and put an
-      authenticating proxy in front if they must be exposed.
+      <strong>Auth is optional and there is no TLS.</strong> Without <code>--auth-token</code>, anyone who can reach these ports can start,
+      signal and terminate workflows. With it, the JSON API requires the token but gRPC and metrics remain unauthenticated.
+      Bind everything to localhost or a private network either way.
     </div>
 
     <h2 id="api">gRPC API</h2>
@@ -603,9 +611,19 @@ POST /api/workflow-tasks/complete   {"workflow_id":...,"task_token":...,"command
     </p>
 
     <h3>List workflows</h3>
+    <p>
+      Supports a status filter, a case-insensitive substring search over workflow id and
+      type (<code>q</code>), and offset/limit pagination. The response carries
+      <code>total</code> (matches after status+q filtering, before pagination) so clients
+      can page through.
+    </p>
     <pre data-lang="sh"><code>GET /api/workflows
-GET /api/workflows?status=RUNNING</code></pre>
+GET /api/workflows?status=RUNNING
+GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
     <pre data-lang="json"><code>{
+  "total": 1,
+  "offset": 0,
+  "limit": 200,
   "workflows": [
     {
       "workflow_id": "OrderSaga-1752...-a1b2c3d4",
@@ -642,6 +660,10 @@ GET /api/workflows?status=RUNNING</code></pre>
     <pre data-lang="sh"><code>POST /api/workflows
 {"type":"OrderSaga","input":"order-42","workflow_id":"optional"}
 → 201 {"workflow_id":"order-42"}</code></pre>
+    <p>
+      A duplicate <code>workflow_id</code> returns <code>409</code>; an unregistered type
+      returns <code>400</code>.
+    </p>
 
     <h3>Signal a workflow</h3>
     <pre data-lang="sh"><code>POST /api/workflows/{id}/signal
@@ -654,16 +676,20 @@ GET /api/workflows?status=RUNNING</code></pre>
 → 200 {"status":"terminated"}</code></pre>
 
     <h3>Health</h3>
-    <pre data-lang="sh"><code>GET /api/health → 200 {"status":"ok"}</code></pre>
+    <pre data-lang="sh"><code>GET /api/health → 200 {"status":"ok","version":"...","uptime_seconds":1234,
+                        "workflows_active":2,"task_queue_depth":0,
+                        "workflow_task_queue_depth":0}</code></pre>
+    <p><code>/api/health</code> never requires the auth token, so liveness probes work unconfigured.</p>
 
     <h3>Errors</h3>
     <p>Failures return <code>{"error": "..."}</code> with a matching status code:</p>
     <table>
       <thead><tr><th>Code</th><th>When</th></tr></thead>
       <tbody>
-        <tr><td><code>400</code></td><td>Malformed JSON, unknown field, unknown workflow type, bad status filter</td></tr>
+        <tr><td><code>400</code></td><td>Malformed JSON, unknown field, unknown workflow type, bad status filter, empty signal name</td></tr>
+        <tr><td><code>401</code></td><td>Missing or wrong bearer token (when <code>--auth-token</code> is set)</td></tr>
         <tr><td><code>404</code></td><td>No such workflow</td></tr>
-        <tr><td><code>409</code></td><td>Workflow already terminal (double terminate, signal after finish)</td></tr>
+        <tr><td><code>409</code></td><td>Workflow already terminal (double terminate, signal after finish), or duplicate workflow id on start</td></tr>
         <tr><td><code>500</code></td><td>Unreadable or structurally invalid history</td></tr>
       </tbody>
     </table>
@@ -711,8 +737,10 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
     <ul>
       <li>counts of total / active / completed / failed workflows,</li>
       <li>a filterable workflow list that auto-refreshes every 2 seconds,</li>
-      <li>a detail view with the full step timeline — kinds, statuses, attempt counts,
-        per-step errors and outputs, and which signal a step is parked on,</li>
+      <li>client-side search over workflow ids and types, plus per-status counts on the filter chips,</li>
+      <li>a dialog to start a workflow directly from the browser (type, optional id, input),</li>
+      <li>a detail view with the full step timeline rendered as woven weft picks — kinds, statuses,
+        attempt counts, per-step errors and outputs, and which signal a step is parked on,</li>
       <li>actions to send a signal to, or terminate, a live workflow.</li>
     </ul>
     <p>It is plain HTML, CSS and vanilla JS — no build step, no npm, nothing to bundle.</p>
@@ -759,7 +787,8 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
     <ul>
       <li><strong>Single node.</strong> No replication or failover yet — Raft is Phase 4. The data
         directory is a single point of failure; back it up.</li>
-      <li><strong>No authentication or TLS</strong> on any port. Keep them private.</li>
+      <li><strong>No TLS</strong> on any port, and auth (when enabled) is a single shared bearer
+        token on the JSON API only — gRPC and metrics are unauthenticated. Keep ports private.</li>
       <li><strong>Go workflows must be compiled into the engine binary</strong> (Go's
         <code>internal/</code> rule). Workflows in TypeScript, Python and Java run out of
         process via the <a href="#polyglot">SDK protocol</a> and have no such constraint; an
@@ -831,7 +860,7 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
 </div>
 
 <footer>
-  <div class="wrap footer-inner">
+  <div class="footer-inner">
     <div>
       <strong>◆ workflowd</strong> — durable workflow engine for Go<br>
       <span style="font-size:13px">Apache-2.0 · pre-alpha</span>

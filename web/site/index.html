@@ -3,69 +3,138 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>workflowd — durable workflow engine for Go</title>
+<title>workflowd — durable workflows, woven to last</title>
 <meta name="description" content="A single-binary, zero-dependency durable workflow engine for Go. Write ordinary functions; the engine makes them crash-proof and resumable. No Kubernetes, no external database.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='7' fill='%23F3ECDF'/%3E%3Crect x='4' y='4' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='13' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='22' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='13' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='22' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='4' y='4' width='6' height='6' fill='%233F5089'/%3E%3Crect x='22' y='4' width='6' height='6' fill='%233F5089'/%3E%3Crect x='13' y='13' width='6' height='6' fill='%233F5089'/%3E%3Crect x='4' y='22' width='6' height='6' fill='%233F5089'/%3E%3Crect x='22' y='22' width='6' height='6' fill='%233F5089'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
 </head>
 <body>
 
 <nav class="nav">
   <div class="nav-inner">
-    <a class="nav-brand" href="./index.html"><span class="mark">◆</span> workflowd</a>
+    <a class="nav-brand" href="./index.html" aria-label="workflowd home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="29" height="7" rx="2.5" class="mk-weft"/><rect x="1.5" y="12.5" width="29" height="7" rx="2.5" class="mk-weft"/><rect x="1.5" y="23.5" width="29" height="7" rx="2.5" class="mk-weft"/>
+        <rect x="1.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/><rect x="12.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/><rect x="23.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/>
+        <rect x="1.5" y="1.5" width="7" height="7" class="mk-weft"/><rect x="23.5" y="1.5" width="7" height="7" class="mk-weft"/><rect x="12.5" y="12.5" width="7" height="7" class="mk-weft"/><rect x="1.5" y="23.5" width="7" height="7" class="mk-weft"/><rect x="23.5" y="23.5" width="7" height="7" class="mk-weft"/>
+      </svg>
+      workflowd
+    </a>
     <div class="nav-links">
       <a href="#how" class="hide-sm">How it works</a>
+      <a href="#patterns" class="hide-sm">Use cases</a>
       <a href="#compare" class="hide-sm">Compare</a>
       <a href="#status">Status</a>
       <a href="./docs.html">Docs</a>
-      <a href="https://github.com/olayanju-1234/durable-workflow-engine">GitHub</a>
+      <a class="nav-cta" href="https://github.com/olayanju-1234/durable-workflow-engine">GitHub</a>
     </div>
   </div>
 </nav>
 
 <header class="hero">
-  <div class="wrap">
-    <span class="pill">Pre-alpha · Weeks 1–10 of 17</span>
-    <h1>Durable execution<br>without the <span class="grad">infrastructure tax</span></h1>
-    <p class="sub">
-      Write ordinary functions in Go, TypeScript or Python. The engine makes them crash-proof,
-      resumable and observable — one binary, no external database, no Kubernetes, no ops team.
-    </p>
-    <div class="hero-actions">
-      <a class="btn btn-primary" href="./docs.html#quickstart">Get started</a>
-      <a class="btn btn-ghost" href="https://github.com/olayanju-1234/durable-workflow-engine">View source</a>
-    </div>
-    <p class="hero-note">Apache-2.0 · Go 1.26+ · zero runtime dependencies</p>
-
-    <div class="code-card">
-      <div class="code-head">
-        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-        <span style="margin-left:6px">order_workflow.go</span>
+  <div class="wrap hero-grid">
+    <div>
+      <span class="pill">Pre-alpha · weeks 1–10 of 17</span>
+      <h1>Durable execution,<br><em>woven to last.</em></h1>
+      <p class="sub">
+        Write ordinary functions in Go, TypeScript or Python. The engine makes them
+        crash-proof, resumable and observable — one binary, no external database,
+        no Kubernetes, no ops team.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="./docs.html#quickstart">Get started</a>
+        <a class="btn btn-ghost" href="https://github.com/olayanju-1234/durable-workflow-engine">View source</a>
       </div>
-      <pre data-lang="go"><code>// An ordinary Go function. Kill the process at any line —
-// on restart it resumes exactly here, no work repeated.
-func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
-	reserved, err := ctx.ExecuteActivity("reserve", input)
-	if err != nil {
-		return nil, err
-	}
-
-	ctx.Sleep("settle", 2*time.Second) // survives restarts
-
-	if _, err := ctx.ExecuteActivity("charge", reserved); err != nil {
-		ctx.ExecuteActivity("release", reserved) // compensate (Saga)
-		return nil, fmt.Errorf("charge failed, released: %w", err)
-	}
-
-	return ctx.ExecuteActivity("ship", reserved)
-}</code></pre>
+      <p class="hero-note">Apache-2.0 · Go 1.26+ · zero runtime dependencies</p>
     </div>
+
+    <figure class="hero-art" style="margin:0">
+      <!-- The engine as a loom: warps held under tension, weft picks recorded
+           one by one, and the history hanging off the beam as punched cards. -->
+      <svg viewBox="0 0 560 430" role="img" aria-label="A loom weaving a cloth while a chain of punched cards — the workflow history — hangs from the beam">
+        <!-- ground -->
+        <line x1="30" y1="404" x2="530" y2="404" class="wl-ground"/>
+
+        <!-- frame -->
+        <rect x="60"  y="48" width="16" height="352" rx="4" class="wl-wood"/>
+        <rect x="484" y="48" width="16" height="352" rx="4" class="wl-wood"/>
+        <rect x="52"  y="38" width="456" height="15" rx="4" class="wl-wood-dark"/>
+        <rect x="52"  y="370" width="456" height="13" rx="4" class="wl-wood-dark"/>
+
+        <!-- warp threads -->
+        <g class="wl-thread">
+          <line x1="104" y1="53" x2="104" y2="370"/><line x1="129" y1="53" x2="129" y2="370"/>
+          <line x1="154" y1="53" x2="154" y2="370"/><line x1="179" y1="53" x2="179" y2="370"/>
+          <line x1="204" y1="53" x2="204" y2="370"/><line x1="229" y1="53" x2="229" y2="370"/>
+          <line x1="254" y1="53" x2="254" y2="370"/><line x1="279" y1="53" x2="279" y2="370"/>
+          <line x1="304" y1="53" x2="304" y2="370"/><line x1="329" y1="53" x2="329" y2="370"/>
+          <line x1="354" y1="53" x2="354" y2="370"/><line x1="379" y1="53" x2="379" y2="370"/>
+          <line x1="404" y1="53" x2="404" y2="370"/><line x1="429" y1="53" x2="429" y2="370"/>
+          <line x1="454" y1="53" x2="454" y2="370"/>
+        </g>
+
+        <!-- heddle bar -->
+        <rect x="92" y="168" width="376" height="10" rx="3" class="wl-wood"/>
+
+        <!-- the cloth: recorded picks -->
+        <g>
+          <rect x="98" y="306" width="364" height="9" rx="4.5" class="wl-pick-indigo"/>
+          <rect x="98" y="318" width="364" height="9" rx="4.5" class="wl-pick-leaf"/>
+          <rect x="98" y="330" width="364" height="9" rx="4.5" class="wl-pick-indigo"/>
+          <rect x="98" y="342" width="364" height="9" rx="4.5" class="wl-pick-ochre"/>
+          <rect x="98" y="354" width="364" height="9" rx="4.5" class="wl-pick-indigo"/>
+          <!-- the pick in progress -->
+          <rect x="98" y="293" width="364" height="9" rx="4.5" class="wl-pick-current"/>
+        </g>
+
+        <!-- shuttle riding the current pick -->
+        <g class="shuttle-track" transform="translate(150,297)">
+          <path d="M-26 0 Q0 -10 26 0 Q0 10 -26 0 Z" class="wl-shuttle"/>
+          <circle cx="0" cy="0" r="2.4" class="wl-shuttle-eye"/>
+        </g>
+
+        <!-- finished cloth rolled on the front beam -->
+        <rect x="98" y="366" width="330" height="17" rx="8.5" class="wl-roll"/>
+
+        <!-- the card chain: append-only history -->
+        <line x1="240" y1="53" x2="240" y2="64" class="wl-string"/>
+        <g>
+          <rect x="196" y="64" width="88" height="54" rx="6" class="wl-card"/>
+          <g class="wl-hole">
+            <circle cx="212" cy="80" r="2.6"/><circle cx="228" cy="80" r="2.6"/><circle cx="244" cy="80" r="2.6"/><circle cx="260" cy="80" r="2.6"/><circle cx="276" cy="80" r="2.6"/>
+            <circle cx="212" cy="92" r="2.6"/><circle cx="228" cy="92" r="2.6"/><circle cx="260" cy="92" r="2.6"/><circle cx="276" cy="92" r="2.6"/>
+          </g>
+          <text x="240" y="111" text-anchor="middle" class="wl-label">STARTED</text>
+
+          <rect x="236" y="118" width="8" height="12" rx="2" class="wl-link"/>
+          <rect x="196" y="130" width="88" height="54" rx="6" class="wl-card"/>
+          <g class="wl-hole">
+            <circle cx="212" cy="146" r="2.6"/><circle cx="244" cy="146" r="2.6"/><circle cx="276" cy="146" r="2.6"/>
+            <circle cx="212" cy="158" r="2.6"/><circle cx="228" cy="158" r="2.6"/><circle cx="260" cy="158" r="2.6"/>
+          </g>
+          <text x="240" y="177" text-anchor="middle" class="wl-label">RESERVE · DONE</text>
+
+          <rect x="236" y="184" width="8" height="12" rx="2" class="wl-link"/>
+          <rect x="196" y="196" width="88" height="54" rx="6" class="wl-card wl-card-live"/>
+          <g class="wl-hole">
+            <circle cx="212" cy="212" r="2.6"/><circle cx="228" cy="212" r="2.6"/><circle cx="260" cy="212" r="2.6"/>
+            <circle cx="228" cy="224" r="2.6"/><circle cx="244" cy="224" r="2.6"/><circle cx="276" cy="224" r="2.6"/>
+          </g>
+          <text x="240" y="243" text-anchor="middle" class="wl-label wl-label-live">SETTLE · WAIT</text>
+        </g>
+      </svg>
+      <figcaption class="hero-caption">
+        Fig. 1 — the engine at work. The cards are the history: appended, never rewritten.
+        Stop the loom for a second or a year; it resumes on the exact pick it stopped at.
+      </figcaption>
+    </figure>
   </div>
 </header>
 
 <section class="section-alt" id="why">
   <div class="wrap">
     <div class="section-head">
+      <span class="kicker">The problem</span>
       <h2>Every team rebuilds this badly</h2>
       <p>
         Payment flows, onboarding sequences, billing cycles, approval chains. They all need
@@ -74,16 +143,16 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
       </p>
     </div>
     <div class="grid grid-2">
-      <div class="card">
-        <div class="icon">✗</div>
+      <div class="card card-x">
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 8 L24 24 M24 8 L8 24"/></svg></div>
         <h3>The DIY version breaks</h3>
         <p>
           Queues plus status flags lose state on crashes, can't replay, and breed idempotency
           bugs. "Did the charge go through before the pod died?" has no answer in your data.
         </p>
       </div>
-      <div class="card">
-        <div class="icon">✗</div>
+      <div class="card card-x">
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 8 L24 24 M24 8 L8 24"/></svg></div>
         <h3>The robust version is enormous</h3>
         <p>
           Temporal and Cadence solve it properly — and ask for Cassandra or MySQL, several
@@ -102,20 +171,37 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
 <section id="how">
   <div class="wrap">
     <div class="section-head">
-      <h2>One idea, all the way down</h2>
+      <span class="kicker">One idea, all the way down</span>
+      <h2>The whole engine is one pass of the shuttle</h2>
       <p>Every workflow is an append-only sequence of events. The engine is a loop over it.</p>
     </div>
 
-    <div class="code-card" style="max-width:700px">
-      <div class="code-head"><span style="margin-left:0">the entire engine</span></div>
-      <pre><code>read history → replay to find current position
-             → schedule next step → record result
-             → repeat until terminal</code></pre>
+    <div class="loop" role="list">
+      <div class="loop-node" role="listitem">
+        <span class="loop-no">i.</span>
+        <h3>Read the cards</h3>
+        <p>Load the workflow's history — CRC-framed records, fsync'd on every append.</p>
+      </div>
+      <div class="loop-node" role="listitem">
+        <span class="loop-no">ii.</span>
+        <h3>Replay</h3>
+        <p>Re-run your function against it to find the exact position.</p>
+      </div>
+      <div class="loop-node" role="listitem">
+        <span class="loop-no">iii.</span>
+        <h3>Schedule the next pick</h3>
+        <p>Dispatch the next activity, arm the timer, or wait on a signal.</p>
+      </div>
+      <div class="loop-node" role="listitem">
+        <span class="loop-no">iv.</span>
+        <h3>Record the result</h3>
+        <p>Append one durable event. Then do it again, until the cloth is cut.</p>
+      </div>
     </div>
 
-    <div class="grid grid-3" style="margin-top:38px">
+    <div class="grid grid-3" style="margin-top:42px">
       <div class="card">
-        <div class="icon">▤</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7 h20 M6 13 h20 M6 19 h20 M6 25 h20"/><path d="M11 4 v26 M21 4 v26" stroke-dasharray="0.1 5"/></svg></div>
         <h3>Append-only history</h3>
         <p>
           Each workflow gets a file of length-prefixed, CRC32C-checksummed protobuf records,
@@ -123,7 +209,7 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
         </p>
       </div>
       <div class="card">
-        <div class="icon">↻</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M26 16 a10 10 0 1 1 -4 -8"/><path d="M22 3 v6 h6"/><circle cx="16" cy="16" r="1.6" fill="currentColor" stroke="none"/></svg></div>
         <h3>Deterministic replay</h3>
         <p>
           To resume, the engine re-runs your function from the top. Completed steps return
@@ -131,7 +217,7 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
         </p>
       </div>
       <div class="card">
-        <div class="icon">⚑</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 27 V5"/><path d="M5 27 c8 0 8 -8 16 -8"/><path d="M17 13 l6 6 M23 13 l-6 6" stroke-dasharray="2 3"/></svg></div>
         <h3>Crash = a no-op</h3>
         <p>
           Recovery isn't a special code path — it's the same decision loop, run against the
@@ -142,45 +228,214 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
   </div>
 </section>
 
-<section class="section-alt">
+<section class="section-alt" id="patterns">
   <div class="wrap">
     <div class="section-head">
+      <span class="kicker">The pattern book</span>
+      <h2>Proven weaves, ready to run</h2>
+      <p>
+        Four workflows almost every team needs, written against the real SDKs.
+        Each one leans on a different guarantee — pick the thread that matches your problem.
+      </p>
+    </div>
+
+    <div class="ptabs" role="tablist" aria-label="Use cases">
+      <button class="ptab" id="tab-saga"   role="tab" aria-selected="true"  aria-controls="panel-saga">Payments &amp; orders</button>
+      <button class="ptab" id="tab-drip"   role="tab" aria-selected="false" aria-controls="panel-drip" tabindex="-1">Onboarding &amp; lifecycle</button>
+      <button class="ptab" id="tab-capture" role="tab" aria-selected="false" aria-controls="panel-capture" tabindex="-1">Webhooks &amp; integrations</button>
+      <button class="ptab" id="tab-trial"  role="tab" aria-selected="false" aria-controls="panel-trial" tabindex="-1">Trials &amp; billing</button>
+    </div>
+
+    <article class="pattern-panel" id="panel-saga" role="tabpanel" aria-labelledby="tab-saga">
+      <div class="pattern-story">
+        <h3>The saga — charge, ship, never half-do it</h3>
+        <p>
+          Reserve stock, charge the card, ship. If the process dies between
+          "charged" and "shipped", a queue-plus-flags build has no answer — the
+          money moved and nothing else did.
+        </p>
+        <p class="loom-note">
+          On the loom: every step lands on the card chain before it runs. A crash
+          mid-saga replays to the exact pick; exhausted retries hand you an
+          ordinary <code>error</code>, so compensation is just an if-statement.
+        </p>
+        <div class="feat-chips"><span>Saga compensation</span><span>Retries with backoff</span><span>Durable history</span></div>
+      </div>
+      <div class="code-card">
+        <div class="code-head"><span class="card-tag">Go</span><span>order_workflow.go</span></div>
+        <pre data-lang="go"><code>func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
+	reserved, err := ctx.ExecuteActivity("reserve", input)
+	if err != nil {
+		return nil, err // failed before any money moved
+	}
+
+	// Retries are engine policy (SetRetryPolicy); this error only
+	// surfaces once every attempt is exhausted.
+	if _, err := ctx.ExecuteActivity("charge", reserved); err != nil {
+		ctx.ExecuteActivity("release", reserved) // compensate
+		return nil, fmt.Errorf("charge failed, released: %w", err)
+	}
+
+	ctx.Sleep("settle", 2*time.Second) // durable across restarts
+
+	return ctx.ExecuteActivity("ship", reserved)
+}</code></pre>
+      </div>
+    </article>
+
+    <article class="pattern-panel" id="panel-drip" role="tabpanel" aria-labelledby="tab-drip" hidden>
+      <div class="pattern-story">
+        <h3>The drip — onboarding that remembers where it was</h3>
+        <p>
+          Welcome email today, nudge on day 3, last call on day 7, close the
+          account if they never activated. Cron jobs plus a <code>stage</code>
+          column forget which user was where the first time you deploy.
+        </p>
+        <p class="loom-note">
+          On the loom: the waits are durable timers with deadlines on disk.
+          Redeploy, restart, upgrade the engine — each user's sequence resumes
+          exactly where it stood, days or weeks later.
+        </p>
+        <div class="feat-chips"><span>Durable timers</span><span>Weeks-scale waits</span><span>TypeScript SDK</span></div>
+      </div>
+      <div class="code-card">
+        <div class="code-head"><span class="card-tag">TypeScript</span><span>onboarding.mjs</span></div>
+        <pre data-lang="js"><code>const DAY = 24 * 60 * 60 * 1000;
+
+worker.workflow('Onboarding', async (ctx) => {
+  await ctx.activity('send-welcome', ctx.input);
+
+  await ctx.sleep('day-3', 3 * DAY);            // deadline is on disk
+  if (await ctx.activity('is-active', ctx.input)) return 'active';
+
+  await ctx.activity('send-nudge', ctx.input);
+
+  await ctx.sleep('day-7', 4 * DAY);
+  if (await ctx.activity('is-active', ctx.input)) return 'active';
+
+  await ctx.activity('close-account', ctx.input);
+  return 'dormant';
+});
+
+worker.activity('send-nudge', async (email) => {
+  await postmark.send({ to: email, template: 'nudge' });
+});</code></pre>
+      </div>
+    </article>
+
+    <article class="pattern-panel" id="panel-capture" role="tabpanel" aria-labelledby="tab-capture" hidden>
+      <div class="pattern-story">
+        <h3>The relay — park until the outside world answers</h3>
+        <p>
+          Authorize now; the processor's webhook decides what happens next. It
+          might arrive in 200ms or after a bank-holiday weekend. Holding a
+          process open for that shouldn't require holding <em>anything</em> in memory.
+        </p>
+        <p class="loom-note">
+          On the loom: the workflow parks on a signal at zero cost. A webhook
+          that arrives before the wait is buffered on the card chain, never
+          lost — delivery becomes at-least-once instead of "hopefully".
+        </p>
+        <div class="feat-chips"><span>Signals</span><span>Buffered early events</span><span>Python SDK</span></div>
+      </div>
+      <div class="code-card">
+        <div class="code-head"><span class="card-tag">Python</span><span>capture.py</span></div>
+        <pre data-lang="py"><code>@worker.workflow("Capture")
+def capture(ctx):
+    auth = ctx.activity("authorize", ctx.input)      # hold the funds
+
+    # Park until the PSP calls back. Costs nothing while parked;
+    # signals sent before this line are buffered, not dropped.
+    event = ctx.wait_for_signal("psp", "webhook")
+
+    if "approved" in event:
+        return ctx.activity("fulfill", auth)
+
+    ctx.activity("void", auth)
+    raise WorkflowFailure(f"declined: {event}")
+
+# your webhook endpoint, one line of glue:
+#   engine.signal_workflow(f"capture-{order_id}", "psp", body)</code></pre>
+      </div>
+    </article>
+
+    <article class="pattern-panel" id="panel-trial" role="tabpanel" aria-labelledby="tab-trial" hidden>
+      <div class="pattern-story">
+        <h3>The clock — trials that survive everything</h3>
+        <p>
+          A 14-day trial, a check, one last nudge, then archive. Three weeks of
+          wall-clock time lived inside one function — through deploys, restarts,
+          and engine upgrades — without a single row of scheduling state.
+        </p>
+        <p class="loom-note">
+          On the loom: the trial deadline is recorded as an absolute time. If
+          the engine is down when it passes, the timer fires immediately on
+          recovery. Late is impossible; lost is impossible.
+        </p>
+        <div class="feat-chips"><span>Durable timers</span><span>Crash recovery</span><span>Zero infrastructure</span></div>
+      </div>
+      <div class="code-card">
+        <div class="code-head"><span class="card-tag">Go</span><span>trial.go</span></div>
+        <pre data-lang="go"><code>func TrialToPaid(ctx sdk.Context, user []byte) ([]byte, error) {
+	// 14 days. The deadline is on disk: deploys, restarts and even
+	// engine upgrades don't reset the clock.
+	ctx.Sleep("trial", 14*24*time.Hour)
+
+	paid, err := ctx.ExecuteActivity("check-subscription", user)
+	if err == nil && string(paid) == "yes" {
+		return ctx.ExecuteActivity("grant-pro", user)
+	}
+
+	ctx.ExecuteActivity("send-last-call", user)
+	ctx.Sleep("final-window", 72*time.Hour)
+
+	return ctx.ExecuteActivity("archive-workspace", user)
+}</code></pre>
+      </div>
+    </article>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <span class="kicker">On the bench today</span>
       <h2>What you get today</h2>
       <p>Everything below is implemented and covered by tests running under <code>-race</code>.</p>
     </div>
     <div class="grid grid-3">
       <div class="card">
-        <div class="icon">⏱</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="16" cy="17" r="10"/><path d="M16 11 v6 l4.5 3"/><path d="M12 3.5 h8"/></svg></div>
         <h3>Durable timers</h3>
         <p><code>ctx.Sleep("cooldown", 24*time.Hour)</code> — the deadline is on disk, re-armed after a restart.</p>
       </div>
       <div class="card">
-        <div class="icon">⚡</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 29 V3"/><path d="M9 5 h16 l-5 5.5 L25 16 H9"/></svg></div>
         <h3>Signals</h3>
         <p>Park a workflow until an external event arrives. Signals sent early are buffered, not lost.</p>
       </div>
       <div class="card">
-        <div class="icon">⟳</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M27 16 a11 11 0 1 1 -3.5 -8"/><path d="M23.5 3.5 v5 h5"/><circle cx="16" cy="16" r="2.2"/></svg></div>
         <h3>Retries with backoff</h3>
         <p>Per-activity policies with exponential backoff. Retries survive restarts too.</p>
       </div>
       <div class="card">
-        <div class="icon">↩</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 8 h13 a6 6 0 0 1 0 12 H7"/><path d="M12 15 l-6 5 6 5"/></svg></div>
         <h3>Saga compensation</h3>
         <p>A failed activity returns an ordinary Go <code>error</code>. Handle it, undo the work, move on.</p>
       </div>
       <div class="card">
-        <div class="icon">⚿</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="16" cy="7" r="4"/><path d="M16 11 v14"/><path d="M7 19 a9 9 0 0 0 18 0"/><path d="M10 25 l-3 3 M22 25 l3 3"/></svg></div>
         <h3>Leases &amp; heartbeats</h3>
         <p>A worker that dies mid-task has its work reassigned. Zombie results are fenced out.</p>
       </div>
       <div class="card">
-        <div class="icon">◎</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 24 a12 12 0 0 1 22 0"/><path d="M16 24 L21 14"/><circle cx="16" cy="24" r="1.8" fill="currentColor" stroke="none"/><path d="M5 28 h22" stroke-dasharray="2 4"/></svg></div>
         <h3>Metrics &amp; dashboard</h3>
         <p>Prometheus <code>/metrics</code> and a built-in web dashboard — both compiled into the binary.</p>
       </div>
       <div class="card">
-        <div class="icon">⌘</div>
+        <div class="icon"><svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 10 c4 -6 8 6 12 0 s8 6 12 0"/><path d="M4 17 c4 -6 8 6 12 0 s8 6 12 0"/><path d="M4 24 c4 -6 8 6 12 0 s8 6 12 0"/></svg></div>
         <h3>Any language</h3>
         <p>
           Write workflows in TypeScript or Python as well as Go. The SDKs are dependency-free —
@@ -194,23 +449,23 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
 <section id="compare">
   <div class="wrap">
     <div class="section-head">
-      <h2>Where it sits</h2>
-      <p>Not a Temporal replacement at scale — a right-sized option below it.</p>
+      <span class="kicker">Where it sits</span>
+      <h2>Not a Temporal replacement — a right-sized option below it</h2>
     </div>
     <div class="table-wrap">
       <table class="cmp">
         <thead>
-          <tr><th>&nbsp;</th><th>Queue + DB flags</th><th>workflowd</th><th>Temporal</th></tr>
+          <tr><th>&nbsp;</th><th>Queue + DB flags</th><th class="col-us">workflowd</th><th>Temporal</th></tr>
         </thead>
         <tbody>
-          <tr><td>Survives a crash mid-flow</td><td class="no">✗ partial</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-          <tr><td>Resumes without re-running work</td><td class="no">✗</td><td class="yes">✓</td><td class="yes">✓</td></tr>
-          <tr><td>Infrastructure required</td><td>Redis + DB</td><td class="yes">none</td><td>DB cluster + services</td></tr>
-          <tr><td>Deploy artifact</td><td>your app</td><td class="yes">1 binary</td><td>several services</td></tr>
-          <tr><td>Time to first workflow</td><td>days of glue</td><td class="yes">minutes</td><td>a sprint</td></tr>
-          <tr><td>Horizontal HA</td><td>varies</td><td class="no">Phase 4 (Raft)</td><td class="yes">✓</td></tr>
-          <tr><td>Multi-language SDKs</td><td>n/a</td><td>Go, TS, Python (+Java ref)</td><td class="yes">✓</td></tr>
-          <tr><td>Battle-tested at scale</td><td>—</td><td class="no">✗ pre-alpha</td><td class="yes">✓</td></tr>
+          <tr><td>Survives a crash mid-flow</td><td class="no">✗ partial</td><td class="yes col-us">✓</td><td class="yes">✓</td></tr>
+          <tr><td>Resumes without re-running work</td><td class="no">✗</td><td class="yes col-us">✓</td><td class="yes">✓</td></tr>
+          <tr><td>Infrastructure required</td><td>Redis + DB</td><td class="yes col-us">none</td><td>DB cluster + services</td></tr>
+          <tr><td>Deploy artifact</td><td>your app</td><td class="yes col-us">1 binary</td><td>several services</td></tr>
+          <tr><td>Time to first workflow</td><td>days of glue</td><td class="yes col-us">minutes</td><td>a sprint</td></tr>
+          <tr><td>Horizontal HA</td><td>varies</td><td class="no col-us">Phase 4 (Raft)</td><td class="yes">✓</td></tr>
+          <tr><td>Multi-language SDKs</td><td>n/a</td><td class="col-us">Go, TS, Python (+Java ref)</td><td class="yes">✓</td></tr>
+          <tr><td>Battle-tested at scale</td><td>—</td><td class="no col-us">✗ pre-alpha</td><td class="yes">✓</td></tr>
         </tbody>
       </table>
     </div>
@@ -224,13 +479,14 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
 <section class="section-alt" id="status">
   <div class="wrap">
     <div class="section-head">
-      <h2>Honest status</h2>
+      <span class="kicker">Honest status</span>
+      <h2>The pattern, section by section</h2>
       <p>
         This is a build-in-public engineering project, currently <strong>pre-alpha</strong>.
         Weeks 1–10 of a 17-week plan are done. Don't put payroll on it yet.
       </p>
     </div>
-    <div class="phases" style="max-width:760px;margin:0 auto">
+    <div class="phases">
       <div class="phase done">
         <span class="state">✓</span>
         <div><div class="label">Phase 1 — Persistence &amp; the core loop</div>
@@ -262,9 +518,10 @@ func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
 
 <section>
   <div class="wrap" style="text-align:center">
-    <h2 style="font-size:clamp(24px,3.4vw,32px);letter-spacing:-0.02em;margin:0 0 12px">Run it in five minutes</h2>
-    <div class="code-card" style="max-width:640px;margin-top:26px">
-      <div class="code-head"><span style="margin-left:0">terminal</span></div>
+    <span class="kicker">Five minutes, start to finish</span>
+    <h2 style="font-size:clamp(26px,3.6vw,36px)">Thread the needle</h2>
+    <div class="code-card" style="max-width:660px;margin:30px auto 0;text-align:left">
+      <div class="code-head"><span class="card-tag">terminal</span><span>— three ports, one process</span></div>
       <pre data-lang="sh"><code>git clone https://github.com/olayanju-1234/durable-workflow-engine
 cd durable-workflow-engine
 make build
@@ -276,14 +533,14 @@ make build
 # → dashboard :8233
 # → metrics   :9090/metrics</code></pre>
     </div>
-    <div class="hero-actions" style="margin-top:30px">
+    <div class="hero-actions" style="margin-top:30px;justify-content:center">
       <a class="btn btn-primary" href="./docs.html#quickstart">Read the docs</a>
     </div>
   </div>
 </section>
 
 <footer>
-  <div class="wrap footer-inner">
+  <div class="footer-inner">
     <div>
       <strong>◆ workflowd</strong> — durable workflow engine for Go<br>
       <span style="font-size:13px">Apache-2.0. Open core: the engine is free forever.</span>
