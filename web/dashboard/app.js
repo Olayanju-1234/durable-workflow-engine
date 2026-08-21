@@ -7,6 +7,7 @@ const REFRESH_MS = 2000;
 
 const state = {
   filter: '',
+  q: '',
   selected: null,   // workflow id shown in the drawer
   autoRefresh: true,
   timer: null,
@@ -63,6 +64,40 @@ function setConn(stateName, text) {
   $('conn-text').textContent = text;
 }
 
+/* ---------- inline SVG assets ---------- */
+
+const MARK_SVG = `
+<svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+  <rect x="1.5" y="1.5" width="29" height="7" rx="2.5" class="mk-weft"/>
+  <rect x="1.5" y="12.5" width="29" height="7" rx="2.5" class="mk-weft"/>
+  <rect x="1.5" y="23.5" width="29" height="7" rx="2.5" class="mk-weft"/>
+  <rect x="1.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/>
+  <rect x="12.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/>
+  <rect x="23.5" y="1.5" width="7" height="29" rx="2.5" class="mk-warp"/>
+  <rect x="1.5" y="1.5" width="7" height="7" class="mk-weft"/>
+  <rect x="23.5" y="1.5" width="7" height="7" class="mk-weft"/>
+  <rect x="12.5" y="12.5" width="7" height="7" class="mk-weft"/>
+  <rect x="1.5" y="23.5" width="7" height="7" class="mk-weft"/>
+  <rect x="23.5" y="23.5" width="7" height="7" class="mk-weft"/>
+</svg>`;
+
+// Step-kind glyphs, drawn as thread-work.
+const GLYPHS = {
+  ACTIVITY: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M1.5 8 Q8 2.5 14.5 8 Q8 13.5 1.5 8 Z"/><circle cx="8" cy="8" r="1.4"/></svg>`,
+  TIMER: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M8 4.5 V8 L10.5 10"/></svg>`,
+  SIGNAL: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 14.5 V1.5"/><path d="M3.5 2.5 H12.5 L10 5.25 L12.5 8 H3.5"/></svg>`,
+};
+
+const EMPTY_LOOM = `
+<svg viewBox="0 0 220 90" width="220" height="90" aria-hidden="true" style="display:block;margin:0 auto 14px;opacity:.55">
+  <g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+    <path d="M30 12 V78 M190 12 V78"/>
+    <path d="M22 12 H198 M22 66 H198" />
+    <path d="M52 20 V64 M76 20 V64 M100 20 V64 M124 20 V64 M148 20 V64 M172 20 V64" stroke-dasharray="1 6" opacity=".9"/>
+    <path d="M40 84 H180" stroke-dasharray="2 7" opacity=".55"/>
+  </g>
+</svg>`;
+
 /* ---------- list + stats ---------- */
 
 async function refresh() {
@@ -75,6 +110,7 @@ async function refresh() {
     ]);
     const everything = (all || filtered).workflows || [];
     renderStats(everything);
+    renderChipCounts(everything);
     renderRows(filtered.workflows || []);
     setConn('ok', 'connected');
     if (state.selected) await loadDetail(state.selected, true);
@@ -92,21 +128,45 @@ function renderStats(list) {
   $('stat-failed').textContent = count('FAILED', 'TERMINATED', 'TIMED_OUT', 'UNKNOWN');
 }
 
+function renderChipCounts(list) {
+  const counts = {
+    '': list.length,
+    RUNNING: list.filter((w) => w.status === 'RUNNING').length,
+    WAITING: list.filter((w) => w.status === 'WAITING').length,
+    COMPLETED: list.filter((w) => w.status === 'COMPLETED').length,
+    FAILED: list.filter((w) => w.status === 'FAILED').length,
+    TERMINATED: list.filter((w) => w.status === 'TERMINATED').length,
+  };
+  for (const el of document.querySelectorAll('.chip-count')) {
+    el.textContent = counts[el.dataset.count] ?? '';
+  }
+}
+
+function matchesSearch(w) {
+  if (!state.q) return true;
+  const hay = `${w.workflow_id} ${w.workflow_type || ''}`.toLowerCase();
+  return hay.includes(state.q);
+}
+
 function renderEmpty(msg) {
   $('rows').innerHTML = `<tr class="empty"><td colspan="6">${msg}</td></tr>`;
 }
 
 function renderRows(list) {
-  if (!list.length) {
-    renderEmpty(state.filter
-      ? `No workflows with status ${esc(state.filter)}.`
-      : 'No workflows yet. Start one to see it here.');
+  const visible = list.filter(matchesSearch);
+  if (!visible.length) {
+    renderEmpty(state.q
+      ? `Nothing on the floor matches “${esc(state.q)}”.`
+      : state.filter
+        ? `No workflows with status ${esc(state.filter)}.`
+        : `${EMPTY_LOOM}Nothing on the loom yet. Mount a warp to begin.`);
     return;
   }
-  $('rows').innerHTML = list.map((w) => `
-    <tr data-id="${esc(w.workflow_id)}">
+  $('rows').innerHTML = visible.map((w) => `
+    <tr data-id="${esc(w.workflow_id)}" data-s="${esc(w.status)}" tabindex="0" role="button"
+        aria-label="Inspect ${esc(w.workflow_id)}">
       <td class="wf-id">${esc(w.workflow_id)}</td>
-      <td>${esc(w.workflow_type) || '<span class="muted">—</span>'}</td>
+      <td class="wf-type">${esc(w.workflow_type) || '<span class="muted">—</span>'}</td>
       <td><span class="badge" data-s="${esc(w.status)}">${esc(w.status)}</span></td>
       <td class="num">${esc(w.history_length)}</td>
       <td class="muted">${esc(fmtTime(w.started_at))}</td>
@@ -115,6 +175,9 @@ function renderRows(list) {
 
   for (const tr of $('rows').querySelectorAll('tr[data-id]')) {
     tr.addEventListener('click', () => openDrawer(tr.dataset.id));
+    tr.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDrawer(tr.dataset.id); }
+    });
   }
 }
 
@@ -160,7 +223,7 @@ function renderDetail(w) {
   const steps = w.steps || [];
   $('d-steps').innerHTML = steps.length
     ? steps.map(renderStep).join('')
-    : '<li class="muted" style="border-left-color:transparent">No steps scheduled yet.</li>';
+    : `<li class="pick"><div class="pick-rail"></div><div class="pick-body muted" style="font-style:italic;font-family:var(--serif)">The loom is threaded but no picks have been made yet.</div></li>`;
 
   // Only a live workflow can be signalled or terminated.
   const live = w.status === 'RUNNING' || w.status === 'WAITING';
@@ -171,22 +234,30 @@ function renderStep(s) {
   const retried = s.attempts > 1
     ? `<span class="tag retry">${esc(s.attempts)} attempts</span>` : '';
   const waitingFor = s.signal_name
-    ? `<span class="step-meta">waiting for “${esc(s.signal_name)}”</span>` : '';
+    ? `<span class="step-meta">parked until “${esc(s.signal_name)}” arrives</span>` : '';
   const fireAt = s.fire_at
-    ? `<span class="step-meta">fires ${esc(fmtTime(s.fire_at))}</span>` : '';
+    ? `<span class="step-meta">pick fires ${esc(fmtTime(s.fire_at))}</span>` : '';
   const err = s.error ? `<div class="step-body"><pre class="err">${esc(s.error)}</pre></div>` : '';
   const out = (!s.error && s.output)
     ? `<div class="step-body"><pre class="io">${esc(s.output)}</pre></div>` : '';
+  const glyph = GLYPHS[s.kind] || '';
 
   return `
-    <li data-s="${esc(s.status)}">
-      <div class="step-head">
-        <span class="step-name">${esc(s.sequence)}. ${esc(s.step_name)}</span>
-        <span class="tag">${esc(s.kind)}</span>
-        <span class="badge" data-s="${esc(s.status)}">${esc(s.status)}</span>
-        ${retried}
+    <li class="pick" data-s="${esc(s.status)}">
+      <div class="pick-rail">
+        <span class="pick-no">${esc(s.sequence)}</span>
+        <span class="pick-glyph" title="${esc(s.kind)}">${glyph}</span>
       </div>
-      ${waitingFor}${fireAt}${err}${out}
+      <div class="pick-body">
+        <div class="pick-thread" aria-hidden="true"></div>
+        <div class="pick-head">
+          <span class="pick-name">${esc(s.step_name)}</span>
+          <span class="tag">${esc(s.kind)}</span>
+          <span class="badge" data-s="${esc(s.status)}">${esc(s.status)}</span>
+          ${retried}
+        </div>
+        ${waitingFor}${fireAt}${err}${out}
+      </div>
     </li>`;
 }
 
@@ -195,13 +266,13 @@ function renderStep(s) {
 async function terminate() {
   const id = state.selected;
   if (!id) return;
-  if (!confirm(`Terminate ${id}? This durably fails the workflow and cannot be undone.`)) return;
+  if (!confirm(`Cut the warp on ${id}? This durably fails the workflow and cannot be undone.`)) return;
   try {
     await api(`/api/workflows/${encodeURIComponent(id)}/terminate`, {
       method: 'POST',
       body: JSON.stringify({ reason: $('term-reason').value }),
     });
-    toast('Workflow terminated');
+    toast('Warp cut — workflow terminated');
     $('term-reason').value = '';
     await refresh();
   } catch (err) {
@@ -218,12 +289,45 @@ async function sendSignal() {
       method: 'POST',
       body: JSON.stringify({ name, payload: $('sig-payload').value }),
     });
-    toast(`Signal “${name}” delivered`);
+    toast(`Shuttle passed — “${name}” delivered`);
     $('sig-name').value = ''; $('sig-payload').value = '';
     await refresh();
   } catch (err) {
     toast(err.message, 'error');
   }
+}
+
+async function startWorkflow(e) {
+  e.preventDefault();
+  const type = $('s-type').value.trim();
+  if (!type) { toast('Workflow type is required', 'error'); return; }
+  const payload = { type };
+  const id = $('s-id').value.trim();
+  if (id) payload.workflow_id = id;
+  const input = $('s-input').value;
+  if (input !== '') payload.input = input;
+  try {
+    const res = await api('/api/workflows', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    toast(`Warp mounted — ${res.workflow_id}`, 'success');
+    closeStartModal();
+    await refresh();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function openStartModal() {
+  $('start-modal').hidden = false;
+  $('modal-scrim').hidden = false;
+  $('s-type').focus();
+}
+
+function closeStartModal() {
+  $('start-modal').hidden = true;
+  $('modal-scrim').hidden = true;
 }
 
 /* ---------- wiring ---------- */
@@ -233,22 +337,30 @@ function scheduleRefresh() {
   if (state.autoRefresh) state.timer = setInterval(refresh, REFRESH_MS);
 }
 
+const THEME_ORDER = ['auto', 'light', 'dark'];
+const THEME_LABEL = { auto: '◐ auto', light: '○ light', dark: '● dark' };
+
 function initTheme() {
   const saved = localStorage.getItem('workflowd-theme') || 'auto';
   document.documentElement.dataset.theme = saved;
+  $('theme').textContent = THEME_LABEL[saved] || THEME_LABEL.auto;
   $('theme').addEventListener('click', () => {
-    const order = ['auto', 'light', 'dark'];
-    const next = order[(order.indexOf(document.documentElement.dataset.theme) + 1) % 3];
+    const cur = document.documentElement.dataset.theme;
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
     document.documentElement.dataset.theme = next;
     localStorage.setItem('workflowd-theme', next);
+    $('theme').textContent = THEME_LABEL[next];
     toast(`Theme: ${next}`);
   });
 }
 
 function init() {
+  $('brand-mark').innerHTML = MARK_SVG;
+  $('drawer-mark').innerHTML = MARK_SVG;
   initTheme();
 
   for (const chip of $('filters').querySelectorAll('.chip')) {
+    chip.querySelector('.chip-count').dataset.count = chip.dataset.status;
     chip.addEventListener('click', () => {
       $('filters').querySelector('.is-active')?.classList.remove('is-active');
       chip.classList.add('is-active');
@@ -257,12 +369,31 @@ function init() {
     });
   }
 
+  let searchTimer = null;
+  $('q').addEventListener('input', (e) => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.q = e.target.value.trim().toLowerCase();
+      refresh();
+    }, 160);
+  });
+
   $('refresh').addEventListener('click', refresh);
+  $('new-wf').addEventListener('click', openStartModal);
+  $('s-cancel').addEventListener('click', closeStartModal);
+  $('modal-scrim').addEventListener('click', closeStartModal);
+  $('start-form').addEventListener('submit', startWorkflow);
+
   $('d-close').addEventListener('click', closeDrawer);
   $('scrim').addEventListener('click', closeDrawer);
-  $('d-terminate').addEventListener('click', terminate);
-  $('d-signal').addEventListener('click', sendSignal);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  $('signal-form').addEventListener('submit', (e) => { e.preventDefault(); sendSignal(); });
+  $('terminate-form').addEventListener('submit', (e) => { e.preventDefault(); terminate(); });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!$('start-modal').hidden) { closeStartModal(); return; }
+    closeDrawer();
+  });
 
   $('autorefresh').addEventListener('change', (e) => {
     state.autoRefresh = e.target.checked;
