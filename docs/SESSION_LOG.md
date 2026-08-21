@@ -5,6 +5,53 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-08-21 — Session 14: UI revamp ("The Loom") + backend hardening
+
+**Done (UI):**
+- Full redesign of `web/dashboard` + `web/site` around one concept: the Jacquard
+  loom (first programmable machine; punch-card chain = append-only history,
+  picks = steps, crash = weaver stepping away). Concept documented in `web/README.md`.
+- Palette: natural dyes on linen (indigo/madder/ochre/leaf/walnut on `#F3ECDF`);
+  dark mode = warm umber "dye vat", never blue-black. System font stacks only.
+- Custom inline-SVG assets: 3×3 over-under weave mark (+ favicon), hero loom with
+  animated shuttle and punch cards labelled with real event names, step-kind glyphs,
+  line-art empty-state loom. No webfonts/images/icon fonts — zero-dep promise holds.
+- Dashboard: stat tiles with thread rails, filter chips with live counts, client-side
+  id/type search, start-workflow dialog ("mount a warp"), detail drawer with steps
+  rendered as woven weft picks, signal/terminate as forms.
+- Site: hero split layout + loom illustration, loop diagram, **Pattern Book use-case
+  tabs** (saga/Go, onboarding drip/TS, webhook capture/Python, trial clock/Go) with
+  per-language syntax highlighting in site.js.
+
+**Done (backend audit + fixes):**
+- Error classification: new sentinels `ErrAlreadyExists`, `ErrUnknownType`,
+  `ErrInvalidArgument`. HTTP start → 409 duplicate / 400 unknown type / 500 I/O;
+  signal → 404 unknown / 409 terminal / 400 empty name; gRPC mirrors
+  (`AlreadyExists`, `NotFound`, `InvalidArgument`, `Internal`).
+- Empty signal names rejected before they can be durably recorded.
+- Callback resilience: timer/retry/lease/decision callbacks re-arm after transient
+  I/O errors instead of stranding the workflow; new `advanceRetries` service retries
+  a decision loop that failed mid-advance; lease-expiry append failure re-enqueues
+  the task (history still shows the attempt scheduled, so this is consistent).
+- `--auth-token` flag: constant-time bearer auth on mutating `/api` routes;
+  health + static assets exempt; startup warning when disabled.
+- List endpoint: `q` substring search + `limit`/`offset` pagination + `total`.
+- Health endpoint enriched: version, uptime_seconds, active workflows, queue depths.
+- Request logging middleware (Info for mutations, Debug for reads).
+- New tests: `httpapi_auth_test.go` (auth matrix, duplicate 409, pagination/search,
+  health shape); updated `TestHTTPAPIErrors` to the corrected codes.
+- Verified live: 401/201 token flow, 409 dup, 400 empty signal, 404 unknown signal,
+  enriched health JSON; full `-race` suite green.
+
+**Next:** Phase 4 / Week 11 — Raft (unchanged).
+
+**Gotchas:** dashboard CSS uses `color-mix()` — evergreen browsers only, by design.
+Chip counts are computed client-side from the unfiltered list; TIMED_OUT/UNKNOWN have
+no chip and count into the Failed stat only, but still appear under All with a slate rail.
+Auth covers only the JSON API by design (gRPC/metrics unauthenticated) — documented.
+
+---
+
 ## 2026-08-05 — Session 13: Polyglot workflows — TypeScript, Python & Java SDKs
 
 **Roadmap change.** Started Week 11 (Raft), then the user redirected: workflows

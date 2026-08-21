@@ -3,7 +3,7 @@
 17 weeks, 5 phases, distilled from the blueprint. Check items off as they land. The
 **Status** line below is the single source of truth for "where are we."
 
-> **Status:** Phase 3 COMPLETE (Weeks 1–10), plus an **unplanned polyglot milestone** (Session 13): workflows can now be written in TypeScript and Python as well as Go, via a `PollWorkflowTask`/`CompleteWorkflowTask` protocol built on the existing `Planner` seam. Week 10 delivered the `go:embed` dashboard + JSON HTTP API; Week 9 delivered observability. Next: **Phase 4 / Week 11 — Raft** (started then parked for polyglot; `proto/raft.proto` exists as groundwork). Open backlog: no auth/TLS on any port, Java SDK unverified, O(n) visibility full-scan, O(n²) global-lock ceiling, `CronSchedule` (deferred from Wk5).
+> **Status:** Phase 3 COMPLETE (Weeks 1–10), plus an **unplanned polyglot milestone** (Session 13): workflows can now be written in TypeScript and Python as well as Go, via a `PollWorkflowTask`/`CompleteWorkflowTask` protocol built on the existing `Planner` seam. Week 10 delivered the `go:embed` dashboard + JSON HTTP API; Week 9 delivered observability. Session 14: **full UI revamp — "The Loom" design language** (dashboard + site + Pattern Book use cases) and a **backend hardening pass**: correct HTTP/gRPC error codes, transient-I/O retry for timer callbacks, optional `--auth-token` bearer auth, list pagination+search, enriched health endpoint. Next: **Phase 4 / Week 11 — Raft** (started then parked for polyglot; `proto/raft.proto` exists as groundwork). Open backlog: no TLS, gRPC/metrics unauthenticated, Java SDK unverified, O(n) visibility full-scan, O(n²) global-lock ceiling, `CronSchedule` (deferred from Wk5).
 
 Legend: ✅ done · 🚧 in progress · ⬜ not started
 
