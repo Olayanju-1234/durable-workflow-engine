@@ -1,5 +1,6 @@
 # Compiled binaries
 /bin/
+/workflowd
 *.exe
 *.out
 
