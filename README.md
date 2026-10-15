@@ -4,6 +4,8 @@
 > Go, TypeScript or Python — and the engine makes them crash-proof, resumable, and
 > observable. No Kubernetes, no external database, no DevOps team.
 
+![workflowd's embedded dashboard: nine OrderSaga workflows completed and two TypeScript-SDK workflows waiting on a signal](docs/assets/dashboard.png)
+
 **Status:** 🚧 Pre-alpha — weeks 1–10 of 17 complete. Phases 1–3 are done: durable history,
 deterministic replay of real Go workflows, timers, signals, retries, Saga compensation, worker
 leases, Prometheus metrics, a visibility API and an embedded dashboard. Next up: Raft
