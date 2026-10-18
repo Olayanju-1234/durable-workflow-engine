@@ -4,14 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>workflowd</title>
-<meta name="description" content="workflowd: a single-binary durable workflow engine in Go. Workflows in Go, TypeScript or Python survive crashes and resume where they stopped.">
-<meta name="robots" content="noindex">
+<meta name="description" content="A single-binary durable workflow engine in Go. Workflows in Go, TypeScript or Python survive crashes and resume where they stopped.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://olayanju-1234.github.io/durable-workflow-engine/">
 <meta property="og:title" content="workflowd">
 <meta property="og:description" content="A single-binary durable workflow engine in Go. Workflows in Go, TypeScript or Python survive crashes and resume where they stopped.">
 <meta property="og:image" content="https://olayanju-1234.github.io/durable-workflow-engine/og.png">
-<meta http-equiv="refresh" content="0; url=https://durable.ojusentinel.com/">
+<meta name="twitter:card" content="summary_large_image">
 <script>
-  // Keep the path after /durable-workflow-engine, so /durable-workflow-engine/docs.html lands on /docs.html; /demo opens the live dashboard.
+  // JS only on purpose: link-preview crawlers don't run it, so they keep this address and the tags above.
+  // Keeps the path, so /durable-workflow-engine/docs.html lands on /docs.html; /demo opens the live dashboard.
   var rest = location.pathname.replace(/^\/durable-workflow-engine\/?/, '/');
   var demo = rest.match(/^\/demo(\/.*)?$/);
   location.replace(demo ? 'https://demo.durable.ojusentinel.com' + (demo[1] || '/') + location.search + location.hash
