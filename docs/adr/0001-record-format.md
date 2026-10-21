@@ -38,6 +38,7 @@ Records are length-prefixed and checksummed:
 - **Follow-ups:** Phase 4 batches writes to amortize fsync. If file count or read amplification
   becomes a problem, migrate to an LSM-backed store (BadgerDB) behind the same
   `Append`/`ReadAll` interface — the format is an implementation detail, not API.
+  (Revisited with measurements in [ADR-0006](0006-keep-file-per-workflow-store.md): not needed.)
 
 ## Alternatives considered
 

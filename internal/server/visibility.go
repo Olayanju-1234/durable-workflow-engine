@@ -3,7 +3,6 @@ package server
 import (
 	"errors"
 	"fmt"
-	"sort"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
@@ -30,32 +29,15 @@ var (
 	ErrInvalidCommand = errors.New("server: invalid workflow command")
 )
 
-// ListWorkflows summarizes every workflow in the store, sorted by id. When
-// filter is not UNSPECIFIED only matching workflows are returned.
-//
-// This is a full scan — read and replay every history file — which is fine at
-// Phase-3 scale and honest about the storage model: the data dir *is* the
-// index. A dedicated visibility store lands if/when this becomes the
-// bottleneck (same upgrade path as ADR-0001).
+// ListWorkflows summarizes every workflow, sorted by id. When filter is not
+// UNSPECIFIED only matching workflows are returned. It reads the in-memory
+// visibility index (index.go), not the history files. A workflow whose history
+// cannot be read or replayed is listed with UNSPECIFIED status and the reason:
+// a broken log is surfaced, never hidden.
 func (e *Engine) ListWorkflows(filter WorkflowStatus) ([]*WorkflowSummary, error) {
-	ids, err := e.store.ListWorkflows()
-	if err != nil {
-		return nil, fmt.Errorf("server: list workflows: %w", err)
-	}
-	sort.Strings(ids)
-
-	summaries := make([]*WorkflowSummary, 0, len(ids))
-	for _, id := range ids {
-		sum := e.summarize(id)
-		if sum.GetHistoryLength() == 0 && sum.GetError() == "" {
-			continue // purged by retention between the directory scan and the read
-		}
-		if filter != WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED && sum.GetStatus() != filter {
-			continue
-		}
-		summaries = append(summaries, sum)
-	}
-	return summaries, nil
+	return e.indexed(func(s *WorkflowSummary) bool {
+		return filter == WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED || s.GetStatus() == filter
+	})
 }
 
 // GetWorkflow returns one workflow in full reconstructed detail: its summary
@@ -137,24 +119,6 @@ func (e *Engine) TerminateWorkflow(workflowID, reason string) error {
 	e.metrics.workflowsActive.Dec()
 	e.log.Warn("workflow terminated", "workflow_id", workflowID, "reason", reason)
 	return nil
-}
-
-// summarize builds the list-view row for one workflow. A workflow whose
-// history cannot be read or replayed is reported with UNSPECIFIED status and
-// the failure in Error — an operator must see a broken log, not a shorter list.
-func (e *Engine) summarize(workflowID string) *WorkflowSummary {
-	sum := &WorkflowSummary{WorkflowId: workflowID}
-	events, err := e.store.ReadAll(workflowID)
-	if err != nil {
-		sum.Error = fmt.Sprintf("history unreadable: %v", err)
-		return sum
-	}
-	st, err := state.Reconstruct(events)
-	if err != nil {
-		sum.Error = fmt.Sprintf("history invalid: %v", err)
-		return sum
-	}
-	return summaryFrom(workflowID, events, st)
 }
 
 func summaryFrom(workflowID string, events []*history.HistoryEvent, st *state.State) *WorkflowSummary {
