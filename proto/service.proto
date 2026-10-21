@@ -132,6 +132,15 @@ message AwaitSignalCommand {
   bytes input = 4;
 }
 
+// RecordMarkerCommand: record a version choice or a side effect's result. The
+// marker step completes immediately and the engine asks for the next decision.
+message RecordMarkerCommand {
+  string step_name = 1;
+  int64 sequence = 2;
+  string marker = 3;
+  bytes data = 4;
+}
+
 message CompleteWorkflowCommand {
   bytes output = 1;
 }
@@ -147,6 +156,7 @@ message WorkflowCommand {
     AwaitSignalCommand await_signal = 3;
     CompleteWorkflowCommand complete_workflow = 4;
     FailWorkflowCommand fail_workflow = 5;
+    RecordMarkerCommand record_marker = 6;
   }
 }
 
@@ -286,7 +296,7 @@ message GetWorkflowRequest {
 message StepInfo {
   string step_name = 1;
   int64 sequence = 2;
-  // "ACTIVITY", "TIMER", or "SIGNAL".
+  // "ACTIVITY", "TIMER", "SIGNAL", or "MARKER".
   string kind = 3;
   // "SCHEDULED", "COMPLETED", or "FAILED".
   string status = 4;

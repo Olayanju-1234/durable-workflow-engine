@@ -492,7 +492,7 @@ func (e *Engine) tryDeliverSignalLocked(workflowID string) error {
 	if err != nil {
 		return fmt.Errorf("server: reconstruct %s: %w", workflowID, err)
 	}
-	payload, ok := deliverableSignal(st)
+	payload, ok := st.DeliverableSignal()
 	if !ok {
 		return nil // not waiting on a signal, or none has matched yet
 	}
@@ -505,37 +505,6 @@ func (e *Engine) tryDeliverSignalLocked(workflowID string) error {
 	}
 	e.log.Info("signal delivered", "workflow_id", workflowID, "step", tail.Name, "sequence", tail.Sequence)
 	return e.advanceIfRegisteredLocked(workflowID, st.WorkflowType)
-}
-
-// deliverableSignal reports the payload that satisfies the in-flight step, if that
-// step is a signal wait and a matching buffered signal is available. Matching is by
-// arrival order: the k-th wait for signal S consumes the k-th received S, so a
-// signal that arrived before the wait is delivered correctly (buffering).
-func deliverableSignal(st *state.State) ([]byte, bool) {
-	tail := st.Tail()
-	if tail == nil || tail.Status != state.StepScheduled || tail.Kind != state.KindSignal {
-		return nil, false // no signal wait in flight
-	}
-
-	// Count already-completed waits for this signal name: that many matching signals
-	// are spoken for. The next matching signal (if any) satisfies this wait.
-	consumed := 0
-	for i := 0; i < len(st.Steps)-1; i++ {
-		s := st.Steps[i]
-		if s.Kind == state.KindSignal && s.Signal == tail.Signal && s.Status == state.StepCompleted {
-			consumed++
-		}
-	}
-	seen := 0
-	for _, sig := range st.Signals {
-		if sig.Name == tail.Signal {
-			if seen == consumed {
-				return sig.Payload, true
-			}
-			seen++
-		}
-	}
-	return nil, false
 }
 
 // onTimerFired is the timer service's callback: when a timer's deadline passes, the
@@ -672,6 +641,30 @@ func (e *Engine) applyDecisionLocked(workflowID string, decision state.Decision,
 		e.log.Info("awaiting signal", "workflow_id", workflowID, "step", decision.StepName,
 			"sequence", decision.Sequence, "signal", decision.Signal)
 		return e.tryDeliverSignalLocked(workflowID)
+
+	case state.DecideRecordMarker:
+		// A marker completes as it is recorded, so the workflow is RUNNING again
+		// and owes another decision straight away.
+		marker := &history.HistoryEvent{Attributes: &history.HistoryEvent_MarkerRecorded{
+			MarkerRecorded: &history.MarkerRecordedEvent{
+				StepName: decision.StepName, Sequence: decision.Sequence,
+				Marker: decision.Marker, Data: decision.Output,
+			},
+		}}
+		if err := e.appendLocked(workflowID, marker, nextID); err != nil {
+			return err
+		}
+		e.log.Info("marker recorded", "workflow_id", workflowID, "step", decision.StepName,
+			"sequence", decision.Sequence, "marker", decision.Marker)
+		events, err := e.store.ReadAll(workflowID)
+		if err != nil {
+			return fmt.Errorf("server: read history %s: %w", workflowID, err)
+		}
+		st, err := state.Reconstruct(events)
+		if err != nil {
+			return fmt.Errorf("server: reconstruct %s: %w", workflowID, err)
+		}
+		return e.advanceIfRegisteredLocked(workflowID, st.WorkflowType)
 
 	case state.DecideCompleteWorkflow:
 		done := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowCompleted{

@@ -31,6 +31,7 @@ message HistoryEvent {
     TimerStartedEvent timer_started = 16;
     TimerFiredEvent timer_fired = 17;
     SignalReceivedEvent signal_received = 18;
+    MarkerRecordedEvent marker_recorded = 19;
   }
 }
 
@@ -99,4 +100,20 @@ message TimerFiredEvent {
 message SignalReceivedEvent {
   string signal_name = 1;
   bytes payload = 2;
+}
+
+// MarkerRecordedEvent records a value workflow code must see identically on
+// every replay: which version of changed code an execution runs
+// (workflow.GetVersion), or the result of a non-deterministic call
+// (workflow.SideEffect). It is a step that completes as it is recorded: it
+// takes a sequence number but involves no worker. Added in Phase 5; binaries
+// built before it cannot read a history that contains one.
+message MarkerRecordedEvent {
+  // The change id (version markers) or the caller's name (side effects).
+  string step_name = 1;
+  int64 sequence = 2;
+  // "version" or "side_effect".
+  string marker = 3;
+  // Version markers: the version as a decimal string. Side effects: the result.
+  bytes data = 4;
 }

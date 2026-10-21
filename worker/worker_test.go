@@ -320,3 +320,78 @@ func TestWorkerReregistersAfterEngineRestart(t *testing.T) {
 		t.Fatalf("after restart: %q %v", out, err)
 	}
 }
+
+// A deploy that changes workflow code mid-flight: v1 parks an execution on a
+// signal, v2 (which inserts a fraud check before the signal, behind GetVersion)
+// replaces the worker. The parked execution finishes on the old branch; a new
+// one takes the new branch.
+func TestVersionedDeploy(t *testing.T) {
+	srv := startEmbedded(t, embedded.Options{})
+	c := srv.Client()
+	ctx := testCtx(t)
+	activities := func(w *worker.Worker) {
+		for _, name := range []string{"reserve", "fraud-check", "charge"} {
+			w.RegisterActivity(name, func(_ context.Context, in []byte) ([]byte, error) { return append(in, '+'), nil })
+		}
+	}
+	v1 := func(ctx workflow.Context, in []byte) ([]byte, error) {
+		r, _ := ctx.ExecuteActivity("reserve", in)
+		ctx.WaitForSignal("approval", "approve")
+		return ctx.ExecuteActivity("charge", r)
+	}
+	v2 := func(ctx workflow.Context, in []byte) ([]byte, error) {
+		r, _ := ctx.ExecuteActivity("reserve", in)
+		if ctx.GetVersion("fraud-check", workflow.DefaultVersion, 1) == 1 {
+			r, _ = ctx.ExecuteActivity("fraud-check", r)
+		}
+		ctx.WaitForSignal("approval", "approve")
+		return ctx.ExecuteActivity("charge", r)
+	}
+
+	w1 := worker.New(c, worker.Options{Logger: quiet})
+	w1.RegisterWorkflow("Pay", v1)
+	activities(w1)
+	if err := w1.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	old, err := c.StartWorkflow(ctx, "Pay", []byte("old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		d, err := c.DescribeWorkflow(ctx, old)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Status == client.StatusWaiting && len(d.Steps) == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	w1.Stop()
+
+	w2 := worker.New(c, worker.Options{Logger: quiet})
+	w2.RegisterWorkflow("Pay", v2)
+	activities(w2)
+	run(t, w2)
+	fresh, err := c.StartWorkflow(ctx, "Pay", []byte("new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{old, fresh} {
+		if err := c.SignalWorkflow(ctx, id, "approve", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for id, want := range map[string]string{old: "old++", fresh: "new+++"} {
+		out, err := c.WaitForResult(ctx, id)
+		if err != nil || string(out) != want {
+			t.Fatalf("%s: %q %v, want %q", id, out, err, want)
+		}
+	}
+	d, _ := c.DescribeWorkflow(ctx, fresh)
+	if d.Steps[1].Kind != "MARKER" || d.Steps[1].Name != "fraud-check" || string(d.Steps[1].Output) != "1" {
+		t.Fatalf("new execution step 2 = %+v, want the version marker", d.Steps[1])
+	}
+}

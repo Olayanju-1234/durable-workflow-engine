@@ -12,12 +12,14 @@ import (
 //	KindActivity → dispatch to a worker and wait for its result (the Phase-1 default).
 //	KindTimer    → pause durably until a deadline (a Sleep); no worker involved.
 //	KindSignal   → pause until a matching external signal arrives (a WaitForEvent).
+//	KindMarker   → a recorded value (version choice, side effect); complete on arrival.
 type StepKind int
 
 const (
 	KindActivity StepKind = iota
 	KindTimer
 	KindSignal
+	KindMarker
 )
 
 func (k StepKind) String() string {
@@ -28,10 +30,18 @@ func (k StepKind) String() string {
 		return "TIMER"
 	case KindSignal:
 		return "SIGNAL"
+	case KindMarker:
+		return "MARKER"
 	default:
 		return fmt.Sprintf("StepKind(%d)", int(k))
 	}
 }
+
+// Marker kinds a KindMarker step can record.
+const (
+	MarkerVersion    = "version"     // workflow.GetVersion: the version an execution runs
+	MarkerSideEffect = "side_effect" // workflow.SideEffect: a recorded result
+)
 
 // StepDef is one planned step in a WorkflowDefinition. The zero value is an
 // activity, so a plain list of names still describes a linear activity pipeline.
@@ -88,6 +98,7 @@ const (
 	DecideAwaitSignal                          // park the workflow until a signal arrives
 	DecideCompleteWorkflow                     // all steps done: record success
 	DecideFailWorkflow                         // a step failed: record failure
+	DecideRecordMarker                         // record a marker step, then decide again
 )
 
 func (d DecisionType) String() string {
@@ -104,6 +115,8 @@ func (d DecisionType) String() string {
 		return "COMPLETE_WORKFLOW"
 	case DecideFailWorkflow:
 		return "FAIL_WORKFLOW"
+	case DecideRecordMarker:
+		return "RECORD_MARKER"
 	default:
 		return fmt.Sprintf("DecisionType(%d)", int(d))
 	}
@@ -116,7 +129,8 @@ func (d DecisionType) String() string {
 type Decision struct {
 	Type DecisionType
 
-	// Set when Type is DecideScheduleStep, DecideStartTimer, or DecideAwaitSignal.
+	// Set when Type is DecideScheduleStep, DecideStartTimer, DecideAwaitSignal or
+	// DecideRecordMarker.
 	StepName string
 	Sequence int64
 	Input    []byte
@@ -129,7 +143,11 @@ type Decision struct {
 	// Set when Type == DecideAwaitSignal: the signal name the step waits for.
 	Signal string
 
-	// Set when Type == DecideCompleteWorkflow.
+	// Set when Type == DecideRecordMarker: the marker kind ("version" or
+	// "side_effect"); its data rides in Output.
+	Marker string
+
+	// Set when Type == DecideCompleteWorkflow or DecideRecordMarker.
 	Output []byte
 
 	// Set when Type == DecideFailWorkflow.

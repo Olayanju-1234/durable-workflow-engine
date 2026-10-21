@@ -84,6 +84,7 @@ type Step struct {
 	Error    string // set once Status == StepFailed
 	FireAt   int64  // timer steps only: unix-nanos deadline (from TimerStarted), for recovery re-arm
 	Signal   string // signal steps only: the awaited signal name
+	Marker   string // marker steps only: "version" or "side_effect"
 	Attempts int    // activity steps: how many times scheduled (>1 means it was retried)
 }
 
@@ -214,6 +215,28 @@ func Reconstruct(events []*history.HistoryEvent) (*State, error) {
 			openIdx = len(st.Steps) - 1
 			lastSeq = seq
 
+		case *history.HistoryEvent_MarkerRecorded:
+			mr := attr.MarkerRecorded
+			if st.Status == StatusNotStarted {
+				return nil, fmt.Errorf("state: MarkerRecorded at position %d before WorkflowStarted", i)
+			}
+			if openIdx != -1 {
+				return nil, fmt.Errorf("state: MarkerRecorded %q at position %d while step %q is still in flight",
+					mr.GetStepName(), i, st.Steps[openIdx].Name)
+			}
+			if seq := mr.GetSequence(); seq != lastSeq+1 {
+				return nil, fmt.Errorf("state: MarkerRecorded at position %d has sequence %d, want %d", i, seq, lastSeq+1)
+			}
+			st.Steps = append(st.Steps, Step{
+				Name:     mr.GetStepName(),
+				Sequence: mr.GetSequence(),
+				Kind:     KindMarker,
+				Status:   StepCompleted,
+				Output:   mr.GetData(),
+				Marker:   mr.GetMarker(),
+			})
+			lastSeq = mr.GetSequence()
+
 		case *history.HistoryEvent_StepCompleted:
 			if err := checkOpenStep(st, openIdx, i, attr.StepCompleted.GetStepName(), attr.StepCompleted.GetSequence()); err != nil {
 				return nil, err
@@ -294,4 +317,31 @@ func checkOpenStep(st *State, openIdx, pos int, name string, seq int64) error {
 		return fmt.Errorf("state: step result at position %d names %q, in-flight step is %q", pos, name, open.Name)
 	}
 	return nil
+}
+
+// DeliverableSignal reports the payload that satisfies the in-flight step, if
+// that step is a signal wait and a matching buffered signal has arrived.
+// Matching is by arrival order: the k-th wait for signal S consumes the k-th
+// received S, so a signal that arrived before the wait is delivered correctly.
+func (s *State) DeliverableSignal() ([]byte, bool) {
+	tail := s.Tail()
+	if tail == nil || tail.Status != StepScheduled || tail.Kind != KindSignal {
+		return nil, false
+	}
+	consumed := 0
+	for i := 0; i < len(s.Steps)-1; i++ {
+		if st := s.Steps[i]; st.Kind == KindSignal && st.Signal == tail.Signal && st.Status == StepCompleted {
+			consumed++
+		}
+	}
+	seen := 0
+	for _, sig := range s.Signals {
+		if sig.Name == tail.Signal {
+			if seen == consumed {
+				return sig.Payload, true
+			}
+			seen++
+		}
+	}
+	return nil, false
 }

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"time"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
@@ -69,6 +70,7 @@ type replayContext struct {
 	now        int64
 	next       int64
 	logger     *slog.Logger
+	versions   map[string]workflow.Version // changeID -> version, fixed by the first GetVersion call
 
 	suspended bool
 	decision  state.Decision
@@ -81,6 +83,7 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 		info:       workflow.Info{WorkflowID: events[0].GetWorkflowStarted().GetWorkflowId(), WorkflowType: st.WorkflowType},
 		resolvedAt: make(map[int64]int64),
 		now:        events[0].GetTimestamp(),
+		versions:   make(map[string]workflow.Version),
 	}
 	for _, ev := range events {
 		var seq int64
@@ -91,6 +94,8 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 			seq = a.StepFailed.GetSequence()
 		case *history.HistoryEvent_TimerFired:
 			seq = a.TimerFired.GetSequence()
+		case *history.HistoryEvent_MarkerRecorded:
+			seq = a.MarkerRecorded.GetSequence()
 		default:
 			continue
 		}
@@ -159,7 +164,7 @@ func (c *replayContext) Logger() *slog.Logger {
 
 func (c *replayContext) Now() time.Time {
 	c.live()
-	return time.Unix(0, c.now)
+	return time.Unix(0, c.now).UTC() // UTC: workers in other time zones must replay the same value
 }
 
 func (c *replayContext) ExecuteActivity(name string, input []byte) ([]byte, error) {
@@ -175,6 +180,60 @@ func (c *replayContext) WaitForSignal(name, signal string) []byte {
 	return out
 }
 
+func (c *replayContext) GetVersion(changeID string, minSupported, maxSupported workflow.Version) workflow.Version {
+	c.live()
+	v, ok := c.versions[changeID]
+	if !ok {
+		v = c.version(changeID, maxSupported)
+		c.versions[changeID] = v
+	}
+	if v < minSupported || v > maxSupported {
+		c.suspend(state.Decision{}, fmt.Errorf("%w: execution recorded version %d of %q, but the code supports %d..%d",
+			ErrNondeterminism, v, changeID, minSupported, maxSupported))
+	}
+	return v
+}
+
+// version reads the version an execution chose for changeID, or records max.
+// It consumes a sequence number only when a version marker is (or will be)
+// there, so code that predates the GetVersion call still lines up.
+func (c *replayContext) version(changeID string, max workflow.Version) workflow.Version {
+	seq := c.next + 1
+	if int(seq) > len(c.st.Steps) {
+		c.next = seq
+		c.suspend(state.Decision{
+			Type: state.DecideRecordMarker, StepName: changeID, Sequence: seq,
+			Marker: state.MarkerVersion, Output: []byte(strconv.Itoa(int(max))),
+		}, nil)
+	}
+	rec := c.st.Steps[seq-1]
+	if rec.Kind != state.KindMarker || rec.Marker != state.MarkerVersion || rec.Name != changeID {
+		return workflow.DefaultVersion // this execution ran past here before the change
+	}
+	c.next = seq
+	c.now = c.resolvedAt[seq]
+	v, err := strconv.Atoi(string(rec.Output))
+	if err != nil {
+		c.suspend(state.Decision{}, fmt.Errorf("replay: version marker %q at step %d holds %q: %w", changeID, seq, rec.Output, err))
+	}
+	return workflow.Version(v)
+}
+
+func (c *replayContext) SideEffect(name string, fn func() []byte) []byte {
+	c.live()
+	seq := c.next + 1
+	if int(seq) > len(c.st.Steps) {
+		c.next = seq
+		data := fn()
+		c.suspend(state.Decision{
+			Type: state.DecideRecordMarker, StepName: name, Sequence: seq,
+			Marker: state.MarkerSideEffect, Output: data,
+		}, nil)
+	}
+	out, _ := c.command(state.KindMarker, name, "", nil, 0)
+	return out
+}
+
 // command is the heart of replay. For the next step in call order it returns
 // the recorded result, waits (noop) if the step is still in flight, or suspends
 // with the decision that creates the step if history has none yet.
@@ -185,7 +244,7 @@ func (c *replayContext) command(kind state.StepKind, name, signal string, input 
 
 	if int(seq) <= len(c.st.Steps) {
 		rec := c.st.Steps[seq-1]
-		if rec.Kind != kind || rec.Name != name {
+		if rec.Kind != kind || rec.Name != name || (kind == state.KindMarker && rec.Marker != state.MarkerSideEffect) {
 			c.suspend(state.Decision{}, fmt.Errorf("%w at step %d: workflow issued %s %q but history has %s %q",
 				ErrNondeterminism, seq, kind, name, rec.Kind, rec.Name))
 		}

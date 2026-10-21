@@ -17,6 +17,7 @@ func TestCommandRoundTrip(t *testing.T) {
 		{Type: state.DecideAwaitSignal, StepName: "gate", Sequence: 4, Signal: "approved"},
 		{Type: state.DecideCompleteWorkflow, Output: []byte("out")},
 		{Type: state.DecideFailWorkflow, Error: "boom"},
+		{Type: state.DecideRecordMarker, StepName: "v1-fix", Sequence: 5, Marker: state.MarkerVersion, Output: []byte("2")},
 		{Type: state.DecideNoop},
 	} {
 		got, err := decisionFromCommand(CommandFromDecision(d))

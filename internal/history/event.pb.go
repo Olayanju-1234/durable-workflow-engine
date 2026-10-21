@@ -48,6 +48,7 @@ type HistoryEvent struct {
 	//	*HistoryEvent_TimerStarted
 	//	*HistoryEvent_TimerFired
 	//	*HistoryEvent_SignalReceived
+	//	*HistoryEvent_MarkerRecorded
 	Attributes    isHistoryEvent_Attributes `protobuf_oneof:"attributes"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -192,6 +193,15 @@ func (x *HistoryEvent) GetSignalReceived() *SignalReceivedEvent {
 	return nil
 }
 
+func (x *HistoryEvent) GetMarkerRecorded() *MarkerRecordedEvent {
+	if x != nil {
+		if x, ok := x.Attributes.(*HistoryEvent_MarkerRecorded); ok {
+			return x.MarkerRecorded
+		}
+	}
+	return nil
+}
+
 type isHistoryEvent_Attributes interface {
 	isHistoryEvent_Attributes()
 }
@@ -232,6 +242,10 @@ type HistoryEvent_SignalReceived struct {
 	SignalReceived *SignalReceivedEvent `protobuf:"bytes,18,opt,name=signal_received,json=signalReceived,proto3,oneof"`
 }
 
+type HistoryEvent_MarkerRecorded struct {
+	MarkerRecorded *MarkerRecordedEvent `protobuf:"bytes,19,opt,name=marker_recorded,json=markerRecorded,proto3,oneof"`
+}
+
 func (*HistoryEvent_WorkflowStarted) isHistoryEvent_Attributes() {}
 
 func (*HistoryEvent_StepScheduled) isHistoryEvent_Attributes() {}
@@ -249,6 +263,8 @@ func (*HistoryEvent_TimerStarted) isHistoryEvent_Attributes() {}
 func (*HistoryEvent_TimerFired) isHistoryEvent_Attributes() {}
 
 func (*HistoryEvent_SignalReceived) isHistoryEvent_Attributes() {}
+
+func (*HistoryEvent_MarkerRecorded) isHistoryEvent_Attributes() {}
 
 type WorkflowStartedEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -796,12 +812,89 @@ func (x *SignalReceivedEvent) GetPayload() []byte {
 	return nil
 }
 
+// MarkerRecordedEvent records a value workflow code must see identically on
+// every replay: which version of changed code an execution runs
+// (workflow.GetVersion), or the result of a non-deterministic call
+// (workflow.SideEffect). It is a step that completes as it is recorded: it
+// takes a sequence number but involves no worker. Added in Phase 5; binaries
+// built before it cannot read a history that contains one.
+type MarkerRecordedEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The change id (version markers) or the caller's name (side effects).
+	StepName string `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
+	Sequence int64  `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	// "version" or "side_effect".
+	Marker string `protobuf:"bytes,3,opt,name=marker,proto3" json:"marker,omitempty"`
+	// Version markers: the version as a decimal string. Side effects: the result.
+	Data          []byte `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MarkerRecordedEvent) Reset() {
+	*x = MarkerRecordedEvent{}
+	mi := &file_event_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MarkerRecordedEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MarkerRecordedEvent) ProtoMessage() {}
+
+func (x *MarkerRecordedEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_event_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MarkerRecordedEvent.ProtoReflect.Descriptor instead.
+func (*MarkerRecordedEvent) Descriptor() ([]byte, []int) {
+	return file_event_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *MarkerRecordedEvent) GetStepName() string {
+	if x != nil {
+		return x.StepName
+	}
+	return ""
+}
+
+func (x *MarkerRecordedEvent) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *MarkerRecordedEvent) GetMarker() string {
+	if x != nil {
+		return x.Marker
+	}
+	return ""
+}
+
+func (x *MarkerRecordedEvent) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
 var File_event_proto protoreflect.FileDescriptor
 
 const file_event_proto_rawDesc = "" +
 	"\n" +
 	"\vevent.proto\x12\n" +
-	"history.v1\"\x88\x06\n" +
+	"history.v1\"\xd4\x06\n" +
 	"\fHistoryEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\x03R\aeventId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x1d\n" +
@@ -818,7 +911,8 @@ const file_event_proto_rawDesc = "" +
 	"\rtimer_started\x18\x10 \x01(\v2\x1d.history.v1.TimerStartedEventH\x00R\ftimerStarted\x12>\n" +
 	"\vtimer_fired\x18\x11 \x01(\v2\x1b.history.v1.TimerFiredEventH\x00R\n" +
 	"timerFired\x12J\n" +
-	"\x0fsignal_received\x18\x12 \x01(\v2\x1f.history.v1.SignalReceivedEventH\x00R\x0esignalReceivedB\f\n" +
+	"\x0fsignal_received\x18\x12 \x01(\v2\x1f.history.v1.SignalReceivedEventH\x00R\x0esignalReceived\x12J\n" +
+	"\x0fmarker_recorded\x18\x13 \x01(\v2\x1f.history.v1.MarkerRecordedEventH\x00R\x0emarkerRecordedB\f\n" +
 	"\n" +
 	"attributes\"r\n" +
 	"\x14WorkflowStartedEvent\x12\x1f\n" +
@@ -861,7 +955,12 @@ const file_event_proto_rawDesc = "" +
 	"\x13SignalReceivedEvent\x12\x1f\n" +
 	"\vsignal_name\x18\x01 \x01(\tR\n" +
 	"signalName\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayloadBKZIgithub.com/olayanju-1234/durable-workflow-engine/internal/history;historyb\x06proto3"
+	"\apayload\x18\x02 \x01(\fR\apayload\"z\n" +
+	"\x13MarkerRecordedEvent\x12\x1b\n" +
+	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
+	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x16\n" +
+	"\x06marker\x18\x03 \x01(\tR\x06marker\x12\x12\n" +
+	"\x04data\x18\x04 \x01(\fR\x04dataBKZIgithub.com/olayanju-1234/durable-workflow-engine/internal/history;historyb\x06proto3"
 
 var (
 	file_event_proto_rawDescOnce sync.Once
@@ -875,7 +974,7 @@ func file_event_proto_rawDescGZIP() []byte {
 	return file_event_proto_rawDescData
 }
 
-var file_event_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_event_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_event_proto_goTypes = []any{
 	(*HistoryEvent)(nil),           // 0: history.v1.HistoryEvent
 	(*WorkflowStartedEvent)(nil),   // 1: history.v1.WorkflowStartedEvent
@@ -887,22 +986,24 @@ var file_event_proto_goTypes = []any{
 	(*TimerStartedEvent)(nil),      // 7: history.v1.TimerStartedEvent
 	(*TimerFiredEvent)(nil),        // 8: history.v1.TimerFiredEvent
 	(*SignalReceivedEvent)(nil),    // 9: history.v1.SignalReceivedEvent
+	(*MarkerRecordedEvent)(nil),    // 10: history.v1.MarkerRecordedEvent
 }
 var file_event_proto_depIdxs = []int32{
-	1, // 0: history.v1.HistoryEvent.workflow_started:type_name -> history.v1.WorkflowStartedEvent
-	2, // 1: history.v1.HistoryEvent.step_scheduled:type_name -> history.v1.StepScheduledEvent
-	3, // 2: history.v1.HistoryEvent.step_completed:type_name -> history.v1.StepCompletedEvent
-	4, // 3: history.v1.HistoryEvent.step_failed:type_name -> history.v1.StepFailedEvent
-	5, // 4: history.v1.HistoryEvent.workflow_completed:type_name -> history.v1.WorkflowCompletedEvent
-	6, // 5: history.v1.HistoryEvent.workflow_failed:type_name -> history.v1.WorkflowFailedEvent
-	7, // 6: history.v1.HistoryEvent.timer_started:type_name -> history.v1.TimerStartedEvent
-	8, // 7: history.v1.HistoryEvent.timer_fired:type_name -> history.v1.TimerFiredEvent
-	9, // 8: history.v1.HistoryEvent.signal_received:type_name -> history.v1.SignalReceivedEvent
-	9, // [9:9] is the sub-list for method output_type
-	9, // [9:9] is the sub-list for method input_type
-	9, // [9:9] is the sub-list for extension type_name
-	9, // [9:9] is the sub-list for extension extendee
-	0, // [0:9] is the sub-list for field type_name
+	1,  // 0: history.v1.HistoryEvent.workflow_started:type_name -> history.v1.WorkflowStartedEvent
+	2,  // 1: history.v1.HistoryEvent.step_scheduled:type_name -> history.v1.StepScheduledEvent
+	3,  // 2: history.v1.HistoryEvent.step_completed:type_name -> history.v1.StepCompletedEvent
+	4,  // 3: history.v1.HistoryEvent.step_failed:type_name -> history.v1.StepFailedEvent
+	5,  // 4: history.v1.HistoryEvent.workflow_completed:type_name -> history.v1.WorkflowCompletedEvent
+	6,  // 5: history.v1.HistoryEvent.workflow_failed:type_name -> history.v1.WorkflowFailedEvent
+	7,  // 6: history.v1.HistoryEvent.timer_started:type_name -> history.v1.TimerStartedEvent
+	8,  // 7: history.v1.HistoryEvent.timer_fired:type_name -> history.v1.TimerFiredEvent
+	9,  // 8: history.v1.HistoryEvent.signal_received:type_name -> history.v1.SignalReceivedEvent
+	10, // 9: history.v1.HistoryEvent.marker_recorded:type_name -> history.v1.MarkerRecordedEvent
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_event_proto_init() }
@@ -920,6 +1021,7 @@ func file_event_proto_init() {
 		(*HistoryEvent_TimerStarted)(nil),
 		(*HistoryEvent_TimerFired)(nil),
 		(*HistoryEvent_SignalReceived)(nil),
+		(*HistoryEvent_MarkerRecorded)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -927,7 +1029,7 @@ func file_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_event_proto_rawDesc), len(file_event_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

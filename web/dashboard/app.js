@@ -86,6 +86,7 @@ const GLYPHS = {
   ACTIVITY: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M1.5 8 Q8 2.5 14.5 8 Q8 13.5 1.5 8 Z"/><circle cx="8" cy="8" r="1.4"/></svg>`,
   TIMER: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M8 4.5 V8 L10.5 10"/></svg>`,
   SIGNAL: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 14.5 V1.5"/><path d="M3.5 2.5 H12.5 L10 5.25 L12.5 8 H3.5"/></svg>`,
+  MARKER: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4 1.5 H12 V14.5 L8 11 L4 14.5 Z"/></svg>`,
 };
 
 const EMPTY_LOOM = `

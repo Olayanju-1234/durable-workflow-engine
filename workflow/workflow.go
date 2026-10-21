@@ -64,8 +64,9 @@ type Context interface {
 	Input() []byte
 
 	// Now is the workflow's deterministic clock: the time of the latest history
-	// event the code has observed (the start, then each step's result). It moves
-	// forward only when a step resolves and reads the same on every replay.
+	// event the code has observed (the start, then each step's result), in UTC.
+	// It moves forward only when a step resolves and reads the same on every
+	// replay, on any worker.
 	Now() time.Time
 
 	// Info describes the running workflow.
@@ -74,7 +75,35 @@ type Context interface {
 	// Logger logs from workflow code without repeating itself: records are
 	// dropped while the function replays steps it has already run.
 	Logger() *slog.Logger
+
+	// GetVersion lets you change workflow code while executions are in flight.
+	// Wrap the change in a branch on the returned version:
+	//
+	//	if ctx.GetVersion("add-fraud-check", workflow.DefaultVersion, 1) == 1 {
+	//		ctx.ExecuteActivity("fraud-check", order)
+	//	}
+	//
+	// An execution that reaches this point for the first time records
+	// maxSupported in its history and gets it on every replay. One that already
+	// ran past this point under the old code has no record of it and gets
+	// DefaultVersion, so it replays the old branch. Repeated calls with the same
+	// changeID return the same version. Once no execution can still need the
+	// old branch, raise minSupported and delete it; a recorded version outside
+	// [minSupported, maxSupported] fails the execution as non-deterministic.
+	GetVersion(changeID string, minSupported, maxSupported Version) Version
+
+	// SideEffect runs fn once, records its result in history, and returns the
+	// recorded result on every replay. Use it for small non-deterministic values
+	// such as a random id. It must not fail or do I/O; use an activity for that.
+	SideEffect(name string, fn func() []byte) []byte
 }
+
+// Version identifies one variant of changed workflow code; see GetVersion.
+type Version int
+
+// DefaultVersion is the version of code that ran before a GetVersion call was
+// added.
+const DefaultVersion Version = -1
 
 // Info identifies a workflow execution. WorkflowID is stable for the life of the
 // execution, which makes it a good basis for idempotency keys.
