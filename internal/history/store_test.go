@@ -236,6 +236,50 @@ func TestCorruptRecordDetected(t *testing.T) {
 	}
 }
 
+// TestReleaseThenAppend proves Release closes the cached handle without
+// touching the log, and that a later Append transparently reopens it.
+func TestReleaseThenAppend(t *testing.T) {
+	s, err := NewHistoryStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	events := sampleEvents()
+	if err := s.Append("wf-1", events[0]); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if n := s.OpenHandles(); n != 1 {
+		t.Fatalf("open handles after append = %d, want 1", n)
+	}
+	if err := s.Release("wf-1"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if n := s.OpenHandles(); n != 0 {
+		t.Fatalf("open handles after release = %d, want 0", n)
+	}
+	if err := s.Release("wf-1"); err != nil {
+		t.Errorf("second release: %v", err)
+	}
+	if err := s.Release("never-opened"); err != nil {
+		t.Errorf("release of unknown workflow: %v", err)
+	}
+
+	if err := s.Append("wf-1", events[1]); err != nil {
+		t.Fatalf("append after release: %v", err)
+	}
+	got, err := s.ReadAll("wf-1")
+	if err != nil {
+		t.Fatalf("read all: %v", err)
+	}
+	if len(got) != 2 || !proto.Equal(events[0], got[0]) || !proto.Equal(events[1], got[1]) {
+		t.Fatalf("history after release+append = %v, want first two sample events", got)
+	}
+	if n := s.OpenHandles(); n != 1 {
+		t.Errorf("open handles after reopen = %d, want 1", n)
+	}
+}
+
 // TestDelete proves a deleted history is gone from reads and listings, that the
 // cached append handle is released (a later append starts a fresh log), and
 // that deleting a missing workflow is not an error.

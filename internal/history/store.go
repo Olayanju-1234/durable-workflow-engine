@@ -182,6 +182,30 @@ func (s *HistoryStore) Close() error {
 	return firstErr
 }
 
+// Release closes and forgets the workflow's cached append handle, leaving its
+// file untouched; a later Append reopens it. Call it once a workflow is finished
+// so a long-running server doesn't hold one descriptor per workflow ever run.
+func (s *HistoryStore) Release(workflowID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, ok := s.files[workflowID]
+	if !ok {
+		return nil
+	}
+	delete(s.files, workflowID)
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("history: release %s: %w", workflowID, err)
+	}
+	return nil
+}
+
+// OpenHandles reports how many append handles are cached, i.e. open descriptors.
+func (s *HistoryStore) OpenHandles() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.files)
+}
+
 // Delete removes a workflow's history for good, closing its cached append
 // handle and fsyncing the directory so the removal survives a crash. It exists
 // for retention of finished workflows; deleting a live workflow loses it.
