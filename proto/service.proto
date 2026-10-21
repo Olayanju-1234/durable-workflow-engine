@@ -159,9 +159,10 @@ message PollWorkflowTaskResponse {
 
 // ---- Commands the SDK can return ----
 //
-// Exactly one per task: the engine drives one step at a time, so replay stops
-// at the first command the history has no record of. (Batched commands arrive
-// with parallel steps.)
+// A task's answer is every new command the workflow code issued before it
+// blocked: several activities and timers can be in flight at once. Commands
+// that open a step take consecutive sequence numbers; a complete or fail
+// command, if any, comes last.
 
 // ScheduleActivityCommand: run a named activity on a worker.
 message ScheduleActivityCommand {
@@ -228,6 +229,10 @@ message CompleteWorkflowTaskRequest {
   // longer matches the recorded run (non-determinism). The engine records this
   // as a workflow failure rather than looping on a task it can never complete.
   string replay_error = 4;
+  // Several commands at once, applied in order (parallel steps). Use either
+  // this or command; SDKs send a single command in command so engines that
+  // predate this field still understand them.
+  repeated WorkflowCommand commands = 5;
 }
 
 message CompleteWorkflowTaskResponse {}

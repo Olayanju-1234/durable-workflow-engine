@@ -64,6 +64,8 @@ type Env struct {
 	logger     *slog.Logger
 	events     []*history.HistoryEvent
 	executed   bool
+	agenda     []happening
+	order      int
 }
 
 // NewEnv returns an environment whose virtual clock starts at
@@ -109,6 +111,11 @@ func (e *Env) Elapsed() time.Duration { return e.now.Sub(e.start) }
 // fails returns an error matching ErrWorkflowFailed. Other errors mean the test
 // setup or the workflow code is broken: an unregistered activity, a signal that
 // never comes (ErrBlocked), non-determinism, or a panic.
+//
+// Activities, timers, retries and signals happen in virtual time order, so
+// parallel steps (the Async calls) interleave the way they would on a server:
+// activities started together run at the same virtual instant, in the order
+// they were started.
 func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 	if e.executed {
 		return nil, errors.New("testsuite: an Env runs one workflow; create another")
@@ -117,120 +124,209 @@ func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
 		WorkflowStarted: &history.WorkflowStartedEvent{WorkflowId: WorkflowID, WorkflowType: "test", Input: input},
 	}})
+	for _, sig := range e.signals {
+		e.push(happening{at: sig.at, signal: &sig})
+	}
 
+	decide := true
 	for range maxDecisions {
-		e.deliverSignalsUntil(e.now)
-		d, err := replay.Decide(fn, e.events, e.logger)
-		if err != nil {
-			return nil, fmt.Errorf("testsuite: %w", err)
+		if decide {
+			ds, err := replay.DecideAll(fn, e.events, e.logger)
+			if err != nil {
+				return nil, fmt.Errorf("testsuite: %w", err)
+			}
+			for _, d := range ds {
+				switch d.Type {
+				case state.DecideScheduleStep:
+					if _, ok := e.activities[d.StepName]; !ok {
+						return nil, fmt.Errorf("testsuite: activity %q is not registered; call RegisterActivity", d.StepName)
+					}
+					e.scheduleAttempt(d)
+				case state.DecideStartTimer:
+					fireAt := e.now.Add(d.Delay)
+					e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_TimerStarted{
+						TimerStarted: &history.TimerStartedEvent{StepName: d.StepName, Sequence: d.Sequence, FireAt: fireAt.UnixNano(), Input: d.Input},
+					}})
+					e.push(happening{at: fireAt, timer: &d})
+				case state.DecideAwaitSignal:
+					e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
+						StepScheduled: &history.StepScheduledEvent{StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, AwaitsSignal: true, SignalName: d.Signal},
+					}})
+				case state.DecideRecordMarker:
+					e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_MarkerRecorded{
+						MarkerRecorded: &history.MarkerRecordedEvent{StepName: d.StepName, Sequence: d.Sequence, Marker: d.Marker, Data: d.Output},
+					}})
+				case state.DecideCompleteWorkflow:
+					return d.Output, nil
+				case state.DecideFailWorkflow:
+					return nil, fmt.Errorf("%w: %s", ErrWorkflowFailed, d.Error)
+				}
+			}
+			decide = false
+			st, err := e.state()
+			if err != nil {
+				return nil, err
+			}
+			// A new wait may take a signal sent earlier; with nothing in flight
+			// (only markers recorded) the code has more to do at once.
+			if e.deliverSignals(st) || (st.Status == state.StatusRunning && !isNoop(ds)) {
+				decide = true
+				continue
+			}
 		}
-		switch d.Type {
-		case state.DecideScheduleStep:
-			if err := e.runActivity(d); err != nil {
+
+		h, ok := e.pop()
+		if !ok {
+			return nil, e.blocked()
+		}
+		if h.at.After(e.now) {
+			e.now = h.at
+		}
+		switch {
+		case h.attempt != nil:
+			resolved, err := e.runAttempt(*h.attempt)
+			if err != nil {
 				return nil, err
 			}
-		case state.DecideStartTimer:
-			fireAt := e.now.Add(d.Delay)
-			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_TimerStarted{
-				TimerStarted: &history.TimerStartedEvent{StepName: d.StepName, Sequence: d.Sequence, FireAt: fireAt.UnixNano(), Input: d.Input},
-			}})
-			e.deliverSignalsUntil(fireAt)
-			e.now = fireAt
+			decide = resolved
+		case h.retry != nil:
+			e.scheduleAttempt(*h.retry)
+		case h.timer != nil:
 			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_TimerFired{
-				TimerFired: &history.TimerFiredEvent{StepName: d.StepName, Sequence: d.Sequence},
+				TimerFired: &history.TimerFiredEvent{StepName: h.timer.StepName, Sequence: h.timer.Sequence},
 			}})
-		case state.DecideAwaitSignal:
-			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
-				StepScheduled: &history.StepScheduledEvent{StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, AwaitsSignal: true, SignalName: d.Signal},
+			decide = true
+		case h.signal != nil:
+			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
+				SignalReceived: &history.SignalReceivedEvent{SignalName: h.signal.name, Payload: h.signal.payload},
 			}})
-			if err := e.awaitSignal(d); err != nil {
+			st, err := e.state()
+			if err != nil {
 				return nil, err
 			}
-		case state.DecideRecordMarker:
-			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_MarkerRecorded{
-				MarkerRecorded: &history.MarkerRecordedEvent{StepName: d.StepName, Sequence: d.Sequence, Marker: d.Marker, Data: d.Output},
-			}})
-		case state.DecideCompleteWorkflow:
-			return d.Output, nil
-		case state.DecideFailWorkflow:
-			return nil, fmt.Errorf("%w: %s", ErrWorkflowFailed, d.Error)
-		default:
-			return nil, fmt.Errorf("testsuite: unexpected decision %s", d.Type)
+			decide = e.deliverSignals(st)
 		}
 	}
 	return nil, fmt.Errorf("testsuite: workflow made %d decisions without finishing", maxDecisions)
 }
 
-func (e *Env) runActivity(d state.Decision) error {
-	fn, ok := e.activities[d.StepName]
-	if !ok {
-		return fmt.Errorf("testsuite: activity %q is not registered; call RegisterActivity", d.StepName)
+func isNoop(ds []state.Decision) bool {
+	return len(ds) == 0 || (len(ds) == 1 && ds[0].Type == state.DecideNoop)
+}
+
+// happening is something the environment does at a virtual time: run an
+// activity attempt, schedule a retry, fire a timer or deliver a signal.
+type happening struct {
+	at      time.Time
+	order   int // ties break in the order things were planned
+	attempt *state.Decision
+	retry   *state.Decision
+	timer   *state.Decision
+	signal  *scheduledSignal
+}
+
+func (e *Env) push(h happening) {
+	e.order++
+	h.order = e.order
+	e.agenda = append(e.agenda, h)
+}
+
+func (e *Env) pop() (happening, bool) {
+	if len(e.agenda) == 0 {
+		return happening{}, false
+	}
+	best := 0
+	for i, h := range e.agenda {
+		if h.at.Before(e.agenda[best].at) || (h.at.Equal(e.agenda[best].at) && h.order < e.agenda[best].order) {
+			best = i
+		}
+	}
+	h := e.agenda[best]
+	e.agenda = slices.Delete(e.agenda, best, best+1)
+	return h, true
+}
+
+// scheduleAttempt records an attempt of an activity and plans to run it now.
+func (e *Env) scheduleAttempt(d state.Decision) {
+	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
+		StepScheduled: &history.StepScheduledEvent{StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, RetryPolicy: d.Retry.ToProto()},
+	}})
+	e.push(happening{at: e.now, attempt: &d})
+}
+
+// runAttempt runs one activity attempt and reports whether the step now has a
+// result (rather than a retry planned).
+func (e *Env) runAttempt(d state.Decision) (bool, error) {
+	st, err := e.state()
+	if err != nil {
+		return false, err
+	}
+	attempt := st.Step(d.Sequence).Attempts
+	ctx := context.WithValue(context.Background(), sdkctx.ActivityInfoKey{}, worker.ActivityInfo{
+		WorkflowID: WorkflowID, StepName: d.StepName, Sequence: d.Sequence,
+	})
+	out, err := e.activities[d.StepName](ctx, d.Input)
+	if err == nil {
+		e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
+			StepCompleted: &history.StepCompletedEvent{StepName: d.StepName, Sequence: d.Sequence, Output: out},
+		}})
+		return true, nil
 	}
 	policy := state.RetryPolicy{MaxAttempts: 1}
 	if d.Retry != nil {
 		policy = *d.Retry
 	}
-	ctx := context.WithValue(context.Background(), sdkctx.ActivityInfoKey{}, worker.ActivityInfo{
-		WorkflowID: WorkflowID, StepName: d.StepName, Sequence: d.Sequence,
-	})
-	for attempt := 1; ; attempt++ {
-		e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
-			StepScheduled: &history.StepScheduledEvent{StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, RetryPolicy: d.Retry.ToProto()},
-		}})
-		out, err := fn(ctx, d.Input)
-		if err == nil {
-			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
-				StepCompleted: &history.StepCompletedEvent{StepName: d.StepName, Sequence: d.Sequence, Output: out},
-			}})
-			return nil
-		}
-		e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
-			StepFailed: &history.StepFailedEvent{StepName: d.StepName, Sequence: d.Sequence, Error: err.Error(), RetryCount: int32(attempt)},
-		}})
-		if attempt >= policy.MaxAttempts {
-			return nil
-		}
-		next := e.now.Add(policy.Delay(attempt))
-		e.deliverSignalsUntil(next)
-		e.now = next
+	willRetry := attempt < policy.MaxAttempts
+	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
+		StepFailed: &history.StepFailedEvent{StepName: d.StepName, Sequence: d.Sequence, Error: err.Error(), RetryCount: int32(attempt), WillRetry: willRetry},
+	}})
+	if willRetry {
+		e.push(happening{at: e.now.Add(policy.Delay(attempt)), retry: &d})
 	}
+	return !willRetry, nil
 }
 
-// awaitSignal advances virtual time to the next scheduled signal until one
-// satisfies the wait, the way the engine matches buffered signals.
-func (e *Env) awaitSignal(d state.Decision) error {
+// deliverSignals completes every signal wait a buffered signal satisfies, the
+// way the engine matches them, and reports whether it completed any.
+func (e *Env) deliverSignals(st *state.State) bool {
+	delivered := false
 	for {
-		st, err := state.Reconstruct(e.events)
-		if err != nil {
-			return fmt.Errorf("testsuite: %w", err)
+		wait, payload, ok := st.NextSignalDelivery()
+		if !ok {
+			return delivered
 		}
-		if payload, ok := st.DeliverableSignal(); ok {
-			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
-				StepCompleted: &history.StepCompletedEvent{StepName: d.StepName, Sequence: d.Sequence, Output: payload},
-			}})
-			return nil
+		e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
+			StepCompleted: &history.StepCompletedEvent{StepName: wait.Name, Sequence: wait.Sequence, Output: payload},
+		}})
+		delivered = true
+		var err error
+		if st, err = e.state(); err != nil {
+			return delivered
 		}
-		if len(e.signals) == 0 {
-			return fmt.Errorf("%w: waiting for signal %q at step %q, and none is scheduled; use SignalAfter",
-				ErrBlocked, d.Signal, d.StepName)
-		}
-		e.now = e.signals[0].at
-		e.deliverSignalsUntil(e.now)
 	}
 }
 
-// deliverSignalsUntil records every scheduled signal due by t, in time order.
-func (e *Env) deliverSignalsUntil(t time.Time) {
-	for len(e.signals) > 0 && !e.signals[0].at.After(t) {
-		sig := e.signals[0]
-		e.signals = e.signals[1:]
-		if sig.at.After(e.now) {
-			e.now = sig.at
-		}
-		e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
-			SignalReceived: &history.SignalReceivedEvent{SignalName: sig.name, Payload: sig.payload},
-		}})
+// blocked explains why the workflow can make no progress.
+func (e *Env) blocked() error {
+	st, err := e.state()
+	if err != nil {
+		return err
 	}
+	for _, step := range st.Steps {
+		if step.Kind == state.KindSignal && step.Status == state.StepScheduled {
+			return fmt.Errorf("%w: waiting for signal %q at step %q, and none is scheduled; use SignalAfter",
+				ErrBlocked, step.Signal, step.Name)
+		}
+	}
+	return fmt.Errorf("%w: nothing left to happen, but the workflow has not finished", ErrBlocked)
+}
+
+func (e *Env) state() (*state.State, error) {
+	st, err := state.Reconstruct(e.events)
+	if err != nil {
+		return nil, fmt.Errorf("testsuite: %w", err)
+	}
+	return st, nil
 }
 
 func (e *Env) append(ev *history.HistoryEvent) {

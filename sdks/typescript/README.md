@@ -25,6 +25,25 @@ worker.activity('reserve', async (input) => `reserved(${input})`);
 await worker.run();
 ```
 
+More of the API:
+
+```js
+// Run activities in parallel; race a signal against a deadline.
+const [stock, price] = await Promise.all([ctx.activity('stock', sku), ctx.activity('price', sku)]);
+const late = (await ctx.waitAny([ctx.waitForSignal('reply', 'approved'), ctx.sleep('sla', 3_600_000)])) === 1;
+
+// Retry a failed attempt before the workflow sees the error; JSON and bytes payloads.
+const receipt = await ctx.activity('charge', { amount: 42 }, { retry: { maxAttempts: 3, initialBackoffMs: 500 }, as: 'json' });
+
+// Change code safely while executions are in flight; record a non-deterministic value once.
+if ((await ctx.getVersion('fraud-check', DEFAULT_VERSION, 1)) === 1) await ctx.activity('fraud-check', receipt);
+const id = await ctx.sideEffect('id', () => crypto.randomUUID());
+```
+
+A cluster: `new Worker({ addresses: ['http://n1:8233', 'http://n2:8233', 'http://n3:8233'] })`
+follows the leader. Activities longer than the lease heartbeat automatically; `task.signal`
+(the second argument) aborts if the lease is lost.
+
 For an engine with auth and TLS: `new Worker({ address: 'https://…:8233', token })`, and
 `NODE_EXTRA_CA_CERTS=/path/ca.pem` for a private CA.
 

@@ -89,7 +89,9 @@ You need four things:
 3. **Replay** — walk your workflow function, matching each durable call against
    `steps[]` in order. Return the recorded output, stay suspended if the step is
    still `SCHEDULED`, or emit a command for the first step not in history.
-4. **Complete** — `POST /api/workflow-tasks/complete` with one command.
+4. **Complete** — `POST /api/workflow-tasks/complete` with the commands: `"command"`
+   for one, `"commands": [...]` for several (send a single command in `"command"`, so
+   engines that predate batches still understand it).
 
 Commands are a flat tagged union:
 
@@ -113,6 +115,42 @@ Commands are a flat tagged union:
   marker consumes a sequence only when it is there: an execution that predates
   the `getVersion` call has no marker at that position and gets the default
   version (-1) without moving the sequence, so its old history still lines up.
+
+### Parallel steps
+
+Workflow code can start several steps before waiting on any of them. Replay then
+collects every new command the code issues until it blocks on a step with no result,
+and returns them as one batch:
+
+```json
+{"commands": [
+  {"type": "schedule_activity", "step_name": "charge", "sequence": 3},
+  {"type": "schedule_activity", "step_name": "email",  "sequence": 4},
+  {"type": "start_timer",       "step_name": "sla",    "sequence": 5, "delay_ms": 60000}]}
+```
+
+- Steps the batch opens take consecutive sequences after the last one in `steps[]`.
+  A `complete_workflow` / `fail_workflow`, if any, comes last; `noop` can't be in a
+  batch. A malformed batch is refused whole and the task stays pending.
+- The engine asks for a decision after **every** step result, even while other steps
+  are in flight, so code waiting on one result continues as soon as it lands.
+- A step whose attempt failed and will be retried is sent as `SCHEDULED`: it has no
+  result yet, and workflow code must keep waiting on it.
+- Each resolved step carries `resolved_event_id`. "Wait for whichever finishes first"
+  must pick the step with the lowest one, not the first in code order: the order of
+  results is fixed in history, so every replay makes the same choice. (A plain
+  `Promise.race` would pick by call order once both are resolved, which breaks on
+  replay; the SDKs offer `ctx.waitAny` / `ctx.wait_any` instead.)
+- Workflow code may finish while steps are still in flight (a lost race); the engine
+  abandons them and turns their workers away.
+
+| | TypeScript | Python | Go |
+|---|---|---|---|
+| start without waiting | `ctx.activity(...)` (don't `await` yet), `ctx.sleep`, `ctx.waitForSignal` | `ctx.activity_async`, `sleep_async`, `wait_for_signal_async` | `ExecuteActivityAsync`, `NewTimer`, `WaitForSignalAsync` |
+| wait for all | `Promise.all([...])` | `ctx.wait_all(*futures)` | `f.Get()` on each |
+| wait for the first | `ctx.waitAny([...])` | `ctx.wait_any(*futures)` | `ctx.WaitAny(futures...)` |
+
+The Java SDK still issues one command per task, which the engine accepts unchanged.
 
 ### Payloads
 

@@ -114,7 +114,6 @@ func (e *Engine) TerminateWorkflow(workflowID, reason string) error {
 	if err := e.appendLocked(w, failedEv, int64(len(events)+1)); err != nil {
 		return err
 	}
-	e.dropLease(workflowID)
 	e.metrics.workflowsFinished.With("terminated").Inc()
 	e.metrics.workflowsActive.Dec()
 	e.log.Warn("workflow terminated", "workflow_id", workflowID, "reason", reason)

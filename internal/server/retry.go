@@ -67,12 +67,15 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 		}
 		return
 	}
-	tail := st.Tail()
-	// Only fire if the target step is still failed and awaiting its retry.
-	if tail == nil || tail.Sequence != tm.Sequence || tail.Name != tm.StepName || tail.Status != state.StepFailed {
+	// Only fire if the target step is still failed and awaiting its retry: a
+	// failure recorded as will_retry, or (histories from before that flag) the
+	// latest step's failure with nothing else in flight.
+	target := st.Step(tm.Sequence)
+	if st.Status.IsTerminal() || target == nil || target.Name != tm.StepName || target.Status != state.StepFailed ||
+		!(target.Retrying || (target == st.Tail() && st.Status == state.StatusRunning)) {
 		return
 	}
-	step := *tail
+	step := *target
 	retry := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
 		StepScheduled: &history.StepScheduledEvent{
 			StepName: step.Name, Sequence: step.Sequence, Input: step.Input,

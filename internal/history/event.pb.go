@@ -541,11 +541,14 @@ func (x *StepCompletedEvent) GetSequence() int64 {
 }
 
 type StepFailedEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StepName      string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
-	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	Sequence      int64                  `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	RetryCount    int32                  `protobuf:"varint,4,opt,name=retry_count,json=retryCount,proto3" json:"retry_count,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	StepName   string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
+	Error      string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Sequence   int64                  `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	RetryCount int32                  `protobuf:"varint,4,opt,name=retry_count,json=retryCount,proto3" json:"retry_count,omitempty"`
+	// The engine will retry this step: the failure is not the step's result and
+	// workflow code must not see it. Older binaries ignore it.
+	WillRetry     bool `protobuf:"varint,5,opt,name=will_retry,json=willRetry,proto3" json:"will_retry,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -606,6 +609,13 @@ func (x *StepFailedEvent) GetRetryCount() int32 {
 		return x.RetryCount
 	}
 	return 0
+}
+
+func (x *StepFailedEvent) GetWillRetry() bool {
+	if x != nil {
+		return x.WillRetry
+	}
+	return false
 }
 
 type WorkflowCompletedEvent struct {
@@ -1010,13 +1020,15 @@ const file_event_proto_rawDesc = "" +
 	"\x12StepCompletedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x16\n" +
 	"\x06output\x18\x02 \x01(\fR\x06output\x12\x1a\n" +
-	"\bsequence\x18\x03 \x01(\x03R\bsequence\"\x81\x01\n" +
+	"\bsequence\x18\x03 \x01(\x03R\bsequence\"\xa0\x01\n" +
 	"\x0fStepFailedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1a\n" +
 	"\bsequence\x18\x03 \x01(\x03R\bsequence\x12\x1f\n" +
 	"\vretry_count\x18\x04 \x01(\x05R\n" +
-	"retryCount\"0\n" +
+	"retryCount\x12\x1d\n" +
+	"\n" +
+	"will_retry\x18\x05 \x01(\bR\twillRetry\"0\n" +
 	"\x16WorkflowCompletedEvent\x12\x16\n" +
 	"\x06output\x18\x01 \x01(\fR\x06output\"K\n" +
 	"\x13WorkflowFailedEvent\x12\x14\n" +

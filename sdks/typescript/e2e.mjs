@@ -29,6 +29,22 @@ worker.workflow('TsE2E', async (ctx) => {
   const sig = await ctx.waitForSignal('wait', 'go', { as: 'json' });
   return { v, id, flaky, bin: [...bin], slow, sig };
 });
+// Three activities at once (each waits until all three are running, so this
+// hangs unless they really run in parallel), then a signal raced against a
+// deadline that wins.
+worker.workflow('TsParallel', async (ctx) => {
+  const parts = await Promise.all([1, 2, 3].map((n) => ctx.activity('ts-part', n, { as: 'json' })));
+  const reply = ctx.waitForSignal('reply', 'never-sent');
+  const deadline = ctx.sleep('deadline', 200);
+  const winner = await ctx.waitAny([reply, deadline]);
+  return { parts, winner };
+});
+let partsRunning = 0;
+worker.activity('ts-part', async (n) => {
+  partsRunning++;
+  while (partsRunning < 3) await new Promise((r) => setTimeout(r, 5));
+  return n * 10;
+}, { as: 'json' });
 worker.workflow('TsAfterRestart', async (ctx) => ctx.activity('ts-flaky', { n: 41 }, { as: 'json' }));
 
 worker.activity('ts-flaky', async (order) => {
@@ -72,6 +88,9 @@ const flakyStep = wf.steps.find((s) => s.step_name === 'ts-flaky');
 if (flakyStep.attempts !== 3) fail(`ts-flaky attempts ${flakyStep.attempts}, want 3`);
 const slowStep = wf.steps.find((s) => s.step_name === 'ts-slow');
 if (slowStep.attempts !== 1) fail(`ts-slow attempts ${slowStep.attempts}, want 1 (heartbeats kept the lease)`);
+
+const par = await waitDone(await worker.startWorkflow('TsParallel'));
+if (par.output !== '{"parts":[10,20,30],"winner":1}') fail(`parallel: output ${par.output}`);
 
 // A restarted engine has forgotten every registration: the worker must notice
 // and register again before this workflow can be dispatched.

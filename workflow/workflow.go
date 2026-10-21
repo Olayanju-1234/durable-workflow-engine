@@ -40,7 +40,8 @@ import (
 type Func func(ctx Context, input []byte) ([]byte, error)
 
 // Context is the durable API a workflow function calls. Every durable call
-// (ExecuteActivity, Sleep, WaitForSignal) is one step in the workflow's history,
+// (ExecuteActivity, Sleep, WaitForSignal and their Async forms) is one step in
+// the workflow's history,
 // named by its first argument; names make the dashboard and history readable and
 // are how replay checks that the code still matches the recorded run.
 //
@@ -60,6 +61,33 @@ type Context interface {
 	// and returns its payload. A signal sent before the workflow waits is
 	// buffered: the k-th wait for a signal receives the k-th one sent.
 	WaitForSignal(name, signal string) []byte
+
+	// ExecuteActivityAsync starts an activity and returns at once, so several
+	// can run in parallel; Future.Get waits for the result.
+	//
+	//	charge := ctx.ExecuteActivityAsync("charge", order)
+	//	email := ctx.ExecuteActivityAsync("email", order)
+	//	if _, err := charge.Get(); err != nil { ... }
+	//	email.Get()
+	ExecuteActivityAsync(name string, input []byte, opts ...ActivityOption) Future
+
+	// NewTimer starts a durable timer and returns at once; Get returns when it
+	// fires. Sleep is NewTimer(...).Get().
+	NewTimer(name string, d time.Duration) Future
+
+	// WaitForSignalAsync starts waiting for a signal and returns at once; Get
+	// returns its payload.
+	WaitForSignalAsync(name, signal string) Future
+
+	// WaitAny blocks until one of the futures has a result and returns its
+	// index. When several have one, it picks the step whose result history
+	// recorded first, so the choice is the same on every replay. Use it for
+	// races such as a reply against a deadline:
+	//
+	//	reply := ctx.WaitForSignalAsync("reply", "approved")
+	//	deadline := ctx.NewTimer("deadline", 48*time.Hour)
+	//	if ctx.WaitAny(reply, deadline) == 1 { ... timed out ... }
+	WaitAny(futures ...Future) int
 
 	// Input is the workflow's start input.
 	Input() []byte
@@ -97,6 +125,15 @@ type Context interface {
 	// recorded result on every replay. Use it for small non-deterministic values
 	// such as a random id. It must not fail or do I/O; use an activity for that.
 	SideEffect(name string, fn func() []byte) []byte
+}
+
+// Future is the result of a durable call started without waiting for it. Get
+// blocks the workflow until the step has a result and returns it (for a timer,
+// nil; for a signal wait, the payload). A future must only be used with the
+// Context that created it. There is deliberately no non-blocking "is it done
+// yet": that would depend on when a replay happens, not on history.
+type Future interface {
+	Get() ([]byte, error)
 }
 
 // RetryPolicy retries a failed activity before the workflow sees its error.

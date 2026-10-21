@@ -77,6 +77,9 @@ message StepFailedEvent {
   string error = 2;
   int64 sequence = 3;
   int32 retry_count = 4;
+  // The engine will retry this step: the failure is not the step's result and
+  // workflow code must not see it. Older binaries ignore it.
+  bool will_retry = 5;
 }
 
 message WorkflowCompletedEvent {

@@ -215,8 +215,8 @@ func (e *Engine) onDecisionTimeout(tm timer.Timer) {
 	e.mu.Lock()
 	delete(e.pendingDecisions, tm.WorkflowID) // force a fresh dispatch below
 	e.mu.Unlock()
-	if err != nil || st.Status != state.StatusRunning {
-		return // moved on; nothing to decide
+	if err != nil || st.Status.IsTerminal() {
+		return // finished; nothing to decide
 	}
 	e.metrics.workflowTaskTimeouts.Inc()
 	e.log.Warn("workflow task timed out; re-dispatching",
@@ -245,12 +245,12 @@ func (e *Engine) PollWorkflowTask(ctx context.Context, workerID string, workflow
 	return task, nil
 }
 
-// CompleteWorkflowTask applies the command an SDK worker decided on. A nil
-// command means "nothing to do yet" (the workflow is blocked on a step already
-// in flight). A non-empty replayError fails the workflow durably — an SDK that
-// cannot replay its own history will never succeed on a retry, so looping would
-// be worse than surfacing it.
-func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *WorkflowCommand, replayError string) error {
+// CompleteWorkflowTask applies the commands an SDK worker decided on, in order.
+// No commands (or a single noop) means "nothing to do yet": every step the
+// workflow waits on is in flight. A non-empty replayError fails the workflow
+// durably — an SDK that cannot replay its own history will never succeed on a
+// retry, so looping would be worse than surfacing it.
+func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmds []*WorkflowCommand, replayError string) error {
 	if err := validateID(workflowID); err != nil {
 		return err
 	}
@@ -272,14 +272,15 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 		return err
 	}
 	// The fence: the decision was computed from a snapshot of history. If a
-	// signal landed since, the command may be based on a stale view, so reject
-	// it. A signal that satisfies no wait dispatches nothing, so if the
-	// workflow still needs a decision, hand out a fresh task here.
+	// signal or a step result landed since, the commands may be based on a
+	// stale view, so reject them, and hand out a fresh task for the new
+	// position (nothing else would: a signal that satisfies no wait dispatches
+	// nothing).
 	if int64(len(events)) != pending.historyLength {
 		e.dropDecision(workflowID)
 		stale := fmt.Errorf("%w: history for %q advanced from %d to %d events while the task was outstanding",
 			ErrStaleDecision, workflowID, pending.historyLength, len(events))
-		if st.Status == state.StatusRunning {
+		if !st.Status.IsTerminal() {
 			if err := e.dispatchWorkflowTaskLocked(w, st.WorkflowType, events); err != nil {
 				return errors.Join(stale, err)
 			}
@@ -292,10 +293,10 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 		dropWorkflow(e.workflowQueue, workflowID)
 		e.metrics.workflowTaskReplayErrors.Inc()
 		e.log.Error("sdk replay failed", "workflow_id", workflowID, "err", replayError)
-		return e.applyDecisionLocked(w, state.Decision{
+		return e.applyDecisionsLocked(w, []state.Decision{{
 			Type:  state.DecideFailWorkflow,
 			Error: "workflow replay failed in SDK: " + replayError,
-		}, int64(len(events)+1))
+		}})
 	}
 
 	// A malformed command deliberately LEAVES the decision pending. Clearing it
@@ -303,21 +304,25 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 	// re-dispatch it. Instead the decision timer re-offers the task, so a fixed
 	// or redeployed SDK heals the workflow on its own, and a persistently buggy
 	// one merely spins slowly and visibly (workflow_task_timeouts_total).
-	decision, err := decisionFromCommand(cmd)
-	if err != nil {
-		return err
+	decisions := make([]state.Decision, 0, len(cmds))
+	for _, cmd := range cmds {
+		d, err := decisionFromCommand(cmd)
+		if err != nil {
+			return err
+		}
+		decisions = append(decisions, d)
 	}
-	if err := validateDecision(st, decision); err != nil {
+	if err := validateDecisions(st, decisions); err != nil {
 		return err
 	}
 
 	e.dropDecision(workflowID)
 	dropWorkflow(e.workflowQueue, workflowID)
-	if decision.Type == state.DecideNoop {
+	if len(decisions) == 0 || (len(decisions) == 1 && decisions[0].Type == state.DecideNoop) {
 		return nil // SDK says the workflow is blocked; nothing to record
 	}
 	e.metrics.workflowTasksCompleted.Inc()
-	return e.applyDecisionLocked(w, decision, int64(len(events)+1))
+	return e.applyDecisionsLocked(w, decisions)
 }
 
 // dropDecision forgets the workflow's outstanding decision.
@@ -414,27 +419,40 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 	}
 }
 
-// validateDecision rejects a malformed command before it reaches the log. The
+// validateDecisions rejects malformed commands before any reaches the log. The
 // engine must never trust an SDK to number its own steps correctly: a bad
 // sequence would produce a history that Reconstruct later refuses to read,
-// turning a client bug into an unreadable workflow.
-func validateDecision(st *state.State, d state.Decision) error {
-	switch d.Type {
-	case state.DecideCompleteWorkflow, state.DecideFailWorkflow, state.DecideNoop:
-		return nil // terminal commands carry no step; noop carries nothing at all
-	}
-	if want := int64(len(st.Steps) + 1); d.Sequence != want {
-		return fmt.Errorf("%w: command has sequence %d, expected %d — the SDK's replay is out of step with history",
-			ErrInvalidCommand, d.Sequence, want)
-	}
-	if d.StepName == "" {
-		return fmt.Errorf("%w: command has an empty step name", ErrInvalidCommand)
-	}
-	if d.Type == state.DecideAwaitSignal && d.Signal == "" {
-		return fmt.Errorf("%w: await-signal command has an empty signal name", ErrInvalidCommand)
-	}
-	if d.Type == state.DecideRecordMarker && d.Marker != state.MarkerVersion && d.Marker != state.MarkerSideEffect {
-		return fmt.Errorf("%w: unknown marker kind %q", ErrInvalidCommand, d.Marker)
+// turning a client bug into an unreadable workflow. Steps the batch opens take
+// consecutive sequences after the history's; a terminal command comes last.
+func validateDecisions(st *state.State, ds []state.Decision) error {
+	want := int64(len(st.Steps) + 1)
+	for i, d := range ds {
+		switch d.Type {
+		case state.DecideNoop:
+			if len(ds) > 1 {
+				return fmt.Errorf("%w: a noop cannot be part of a batch of commands", ErrInvalidCommand)
+			}
+			continue
+		case state.DecideCompleteWorkflow, state.DecideFailWorkflow:
+			if i != len(ds)-1 {
+				return fmt.Errorf("%w: command %d ends the workflow but more commands follow it", ErrInvalidCommand, i+1)
+			}
+			continue
+		}
+		if d.Sequence != want {
+			return fmt.Errorf("%w: command %d has sequence %d, expected %d — the SDK's replay is out of step with history",
+				ErrInvalidCommand, i+1, d.Sequence, want)
+		}
+		want++
+		if d.StepName == "" {
+			return fmt.Errorf("%w: command has an empty step name", ErrInvalidCommand)
+		}
+		if d.Type == state.DecideAwaitSignal && d.Signal == "" {
+			return fmt.Errorf("%w: await-signal command has an empty signal name", ErrInvalidCommand)
+		}
+		if d.Type == state.DecideRecordMarker && d.Marker != state.MarkerVersion && d.Marker != state.MarkerSideEffect {
+			return fmt.Errorf("%w: unknown marker kind %q", ErrInvalidCommand, d.Marker)
+		}
 	}
 	return nil
 }

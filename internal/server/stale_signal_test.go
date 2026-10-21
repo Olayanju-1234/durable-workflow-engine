@@ -33,7 +33,7 @@ func TestStaleDecisionAfterEarlySignalIsRedispatched(t *testing.T) {
 	cmd := &WorkflowCommand{Command: &WorkflowCommand_AwaitSignal{AwaitSignal: &AwaitSignalCommand{
 		StepName: "approval", Sequence: 1, SignalName: "approve",
 	}}}
-	if err := e.CompleteWorkflowTask(id, task.GetTaskToken(), cmd, ""); !errors.Is(err, ErrStaleDecision) {
+	if err := e.CompleteWorkflowTask(id, task.GetTaskToken(), []*WorkflowCommand{cmd}, ""); !errors.Is(err, ErrStaleDecision) {
 		t.Fatalf("decision on the pre-signal history: got %v, want ErrStaleDecision", err)
 	}
 
@@ -44,7 +44,7 @@ func TestStaleDecisionAfterEarlySignalIsRedispatched(t *testing.T) {
 	if fresh.GetHistoryLength() != 2 {
 		t.Fatalf("fresh task covers %d events, want 2 (start + signal)", fresh.GetHistoryLength())
 	}
-	if err := e.CompleteWorkflowTask(id, fresh.GetTaskToken(), cmd, ""); err != nil {
+	if err := e.CompleteWorkflowTask(id, fresh.GetTaskToken(), []*WorkflowCommand{cmd}, ""); err != nil {
 		t.Fatal(err)
 	}
 	evs, _ := e.store.ReadAll(id)

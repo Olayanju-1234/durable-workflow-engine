@@ -168,3 +168,41 @@ func TestRetryPolicyInVirtualTime(t *testing.T) {
 		t.Fatalf("exhausted retries: %v, want ErrWorkflowFailed", err)
 	}
 }
+
+func TestParallelStepsInVirtualTime(t *testing.T) {
+	env := testsuite.NewEnv()
+	var order []string
+	for _, name := range []string{"a", "b", "c"} {
+		env.RegisterActivity(name, func(_ context.Context, in []byte) ([]byte, error) {
+			order = append(order, name)
+			if name == "b" {
+				return nil, errors.New("b failed")
+			}
+			return []byte(name), nil
+		})
+	}
+	env.SignalAfter(90*time.Minute, "late", nil)
+	out, err := env.ExecuteWorkflow(func(ctx workflow.Context, in []byte) ([]byte, error) {
+		a := ctx.ExecuteActivityAsync("a", nil)
+		b := ctx.ExecuteActivityAsync("b", nil, workflow.WithRetryPolicy(workflow.RetryPolicy{MaxAttempts: 2, InitialBackoff: time.Hour}))
+		c := ctx.ExecuteActivityAsync("c", nil)
+		sig := ctx.WaitForSignalAsync("late", "late")
+		deadline := ctx.NewTimer("deadline", 2*time.Hour)
+		if _, err := b.Get(); err == nil {
+			return nil, errors.New("b should fail after its retry")
+		}
+		first := ctx.WaitAny(sig, deadline)
+		ra, _ := a.Get()
+		rc, _ := c.Get()
+		return []byte(fmt.Sprintf("%s%s:%d", ra, rc, first)), nil
+	}, nil)
+	if err != nil || string(out) != "ac:0" {
+		t.Fatalf("got %q, %v; want ac:0 (the signal at 1h30 beats the 2h deadline)", out, err)
+	}
+	if strings.Join(order, "") != "abcb" {
+		t.Fatalf("activities ran in order %v, want a b c, then b's retry an hour later", order)
+	}
+	if env.Elapsed() != 90*time.Minute {
+		t.Fatalf("elapsed %s, want 1h30 (b's retry at 1h, then the signal)", env.Elapsed())
+	}
+}

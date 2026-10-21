@@ -52,6 +52,11 @@ export interface Context {
   activity<T = unknown>(name: string, input: Payload, opts: ActivityOptions & { as: 'json' }): Promise<T>;
   /** Pause durably for `ms` milliseconds. Survives engine restarts. */
   sleep(name: string, ms: number): Promise<unknown>;
+  /**
+   * Resolve to the index of the first of several ctx promises to settle, by the order history
+   * recorded their results, so every replay agrees. Use it instead of Promise.race.
+   */
+  waitAny(promises: Array<Promise<unknown>>): Promise<number>;
   /** Block until a matching external signal arrives; resolves to its payload. */
   waitForSignal(name: string, signalName: string, opts?: { as?: 'text' }): Promise<string>;
   waitForSignal(name: string, signalName: string, opts: { as: 'bytes' }): Promise<Uint8Array>;
@@ -99,6 +104,9 @@ export interface Command {
 
 /** The outcome of replaying a workflow function against one task. */
 export interface Decision {
+  /** Every new command, in order; empty when the workflow waits on steps in flight. */
+  commands?: Command[];
+  /** The single command, when there is exactly one. */
   command?: Command | null;
   replayError?: string;
 }

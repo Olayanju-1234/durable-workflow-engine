@@ -220,6 +220,9 @@ type stepDTO struct {
 	FireAt       string `json:"fire_at,omitempty"`
 	SignalName   string `json:"signal_name,omitempty"`
 	Marker       string `json:"marker,omitempty"`
+	// Workflow tasks: the id of the event that gave the step its result, which
+	// orders results for WaitAny.
+	ResolvedEventID int64 `json:"resolved_event_id,omitempty"`
 }
 
 type workflowDTO struct {

@@ -29,7 +29,10 @@ cluster.workflow('Typed', async (ctx) => {
     as: 'json',
   });
   const blob: Uint8Array = await ctx.activity('render', new Uint8Array([1, 2]), { as: 'bytes' });
+  const [a, b] = await Promise.all([ctx.activity('a', 1), ctx.activity('b', 2)]);
+  const timedOut: boolean = (await ctx.waitAny([ctx.waitForSignal('late', 'x'), ctx.sleep('deadline', 1000)])) === 1;
   const approved = await ctx.waitForSignal<{ yes: boolean }>('wait', 'approve', { as: 'json' });
+  void [a, b, timedOut];
   return { id, ok: receipt.ok && approved.yes, size: blob.length };
 });
 cluster.activity('render', (bytes: Uint8Array, task) => (task.signal.aborted ? bytes : bytes.reverse()), { as: 'bytes' });

@@ -28,7 +28,14 @@ type Planner interface {
 // statePlanner decides from replayed state the engine already holds, saving a
 // replay of the whole history per decision (state.WorkflowDefinition).
 type statePlanner interface {
+	Planner
 	DecideState(st *state.State) (state.Decision, error)
+}
+
+// batchPlanner returns every command the workflow code issued before it
+// blocked, so several steps can be in flight at once (replay.Planner).
+type batchPlanner interface {
+	DecideAll(events []*history.HistoryEvent) ([]state.Decision, error)
 }
 
 // HistoryLog is where the engine records history mutations. Single-node mode
@@ -84,7 +91,8 @@ type Engine struct {
 	mu               sync.Mutex
 	planners         map[string]Planner       // workflow type -> planner
 	policies         map[string]RetryPolicy   // activity step name -> retry policy
-	leases           map[string]*lease        // workflow id -> current task lease
+	leases           map[leaseKey]*lease      // in-flight step -> its task lease
+	leaseTokens      map[string]*lease        // lease token -> lease, for heartbeats
 	pendingDecisions map[string]*decisionTask // workflow id -> outstanding SDK decision
 }
 
@@ -132,7 +140,8 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 
 		planners:         make(map[string]Planner),
 		policies:         make(map[string]RetryPolicy),
-		leases:           make(map[string]*lease),
+		leases:           make(map[leaseKey]*lease),
+		leaseTokens:      make(map[string]*lease),
 		pendingDecisions: make(map[string]*decisionTask),
 	}
 	for _, opt := range opts {
@@ -304,71 +313,79 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	// died with the old process); advancing below may immediately retire one.
 	e.metrics.workflowsActive.Inc()
 
-	// Resuming an in-flight step needs no planner, only deciding what comes
-	// next does. SDK workers register after recovery, so a remote workflow's
-	// activity, timer or signal must not wait for them.
-	switch st.Status {
-	case state.StatusWaiting:
-		// The in-flight step's kind is reconstructed from history, so recovery
-		// needs no definition to know how to resume it.
-		tail := *st.Tail()
-		switch tail.Kind {
-		case state.KindTimer:
+	// Resuming in-flight steps needs no planner, only deciding what comes next
+	// does. SDK workers register after recovery, so a remote workflow's
+	// activities, timers and signals must not wait for them. Each step's kind
+	// is reconstructed from history, so no definition is needed either.
+	steps := append([]state.Step(nil), st.Steps...)
+	for i := range steps {
+		step := &steps[i]
+		switch {
+		case step.Retrying:
+			// The backoff timer was in memory: retry promptly, since the
+			// original window is unknown.
+			e.scheduleRetryLocked(id, step, 0)
+			c.rearmed++
+		case step.Status != state.StepScheduled:
+		case step.Kind == state.KindTimer:
 			// Re-arm against the durable deadline. If it already passed while we
 			// were down, the timer service fires it immediately.
 			e.timers.Add(timer.Timer{
-				WorkflowID: id, StepName: tail.Name,
-				Sequence: tail.Sequence, FireAt: time.Unix(0, tail.FireAt),
+				WorkflowID: id, StepName: step.Name,
+				Sequence: step.Sequence, FireAt: time.Unix(0, step.FireAt),
 			})
 			c.rearmed++
 			e.log.Info("recovery: re-armed timer", "workflow_id", id,
-				"step", tail.Name, "sequence", tail.Sequence, "fire_at", time.Unix(0, tail.FireAt))
-		case state.KindSignal:
-			// A signal may have been buffered before the crash but not yet
-			// delivered; try now. Otherwise the wait stands until a new signal.
-			if err := e.tryDeliverSignalLocked(w); err != nil {
-				return fmt.Errorf("server: recover deliver signal %s: %w", id, err)
-			}
-		default: // activity
+				"step", step.Name, "sequence", step.Sequence, "fire_at", time.Unix(0, step.FireAt))
+		case step.Kind == state.KindActivity:
 			e.queue.enqueue(&Task{
-				WorkflowId: id, StepName: tail.Name,
-				Sequence: tail.Sequence, Input: tail.Input,
+				WorkflowId: id, StepName: step.Name,
+				Sequence: step.Sequence, Input: step.Input,
 			})
 			c.requeued++
 			e.log.Info("recovery: re-enqueued in-flight step", "workflow_id", id,
-				"step", tail.Name, "sequence", tail.Sequence)
+				"step", step.Name, "sequence", step.Sequence)
 		}
-	case state.StatusRunning:
-		// A failed activity with retries left (the engine died during the backoff
-		// window) must retry, not fail. The backoff timer was in memory, so re-arm
-		// it — promptly, since the original window is unknown.
-		if tail := st.Tail(); tail != nil && tail.Status == state.StepFailed && tail.Kind == state.KindActivity {
-			if p := e.retryPolicy(tail); tail.Attempts < p.MaxAttempts {
-				e.scheduleRetryLocked(id, tail, 0)
-				c.rearmed++
-				return nil
-			}
-		}
-		planner, ok := e.planner(st.WorkflowType)
-		if !ok {
-			// Registering the type later resumes it (resumeType).
-			e.log.Warn("recovery: workflow type not registered yet; waiting for a worker",
-				"workflow_id", id, "type", st.WorkflowType)
+	}
+
+	// A failure recorded before will_retry existed: re-arm the retry if the
+	// policy allows one, rather than let the workflow see it.
+	if tail := st.Tail(); st.Status == state.StatusRunning && tail != nil && tail.Status == state.StepFailed &&
+		!tail.Retrying && tail.Kind == state.KindActivity {
+		if p := e.retryPolicy(tail); tail.Attempts < p.MaxAttempts {
+			e.scheduleRetryLocked(id, tail, 0)
+			c.rearmed++
 			return nil
 		}
-		if err := e.advanceLocked(w, planner); err != nil {
-			return fmt.Errorf("server: recover advance %s: %w", id, err)
-		}
-		c.advanced++
-		e.log.Info("recovery: advanced mid-decision workflow", "workflow_id", id)
 	}
+
+	// A signal may have been buffered before the crash but not yet delivered.
+	delivered, err := e.deliverSignalsLocked(w)
+	if err != nil {
+		return fmt.Errorf("server: recover deliver signal %s: %w", id, err)
+	}
+	if !delivered && !st.OwesDecision() {
+		return nil // waiting on steps in flight; their results will advance it
+	}
+	planner, ok := e.planner(st.WorkflowType)
+	if !ok {
+		// Registering the type later resumes it (resumeType).
+		e.log.Warn("recovery: workflow type not registered yet; waiting for a worker",
+			"workflow_id", id, "type", st.WorkflowType)
+		return nil
+	}
+	if err := e.advanceLocked(w, planner); err != nil {
+		return fmt.Errorf("server: recover advance %s: %w", id, err)
+	}
+	c.advanced++
+	e.log.Info("recovery: advanced mid-decision workflow", "workflow_id", id)
 	return nil
 }
 
-// CompleteTask records a worker's result for the in-flight step and advances the
-// workflow. failed selects StepFailed (error) over StepCompleted (output). It
-// rejects a result that does not match the step currently in flight, which makes
-// a duplicate or stale CompleteTask a clean error rather than a corrupt log.
+// CompleteTask records a worker's result for an activity in flight and advances
+// the workflow. failed selects StepFailed (error) over StepCompleted (output).
+// It rejects a result that does not match an activity in flight, which makes a
+// duplicate or stale CompleteTask a clean error rather than a corrupt log.
 // leaseToken must be the current lease on the task (from the dispatched Task):
 // a worker whose lease expired — its task reassigned — is turned away here, so
 // two workers can never both record a result for the same attempt.
@@ -380,10 +397,10 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 	defer e.unlockWorkflow(w)
 
 	e.mu.Lock()
-	err := e.checkLeaseLocked(workflowID, leaseToken)
+	le, err := e.checkLeaseLocked(workflowID, sequence, leaseToken)
 	var claimedAt time.Time
 	if err == nil {
-		claimedAt = e.leases[workflowID].claimedAt
+		claimedAt = le.claimedAt
 	}
 	e.mu.Unlock()
 	if err != nil {
@@ -394,36 +411,36 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 	if err != nil {
 		return err
 	}
-	if st.Status != state.StatusWaiting {
-		return fmt.Errorf("server: workflow %q has no step in flight (status %s)", workflowID, st.Status)
+	step := st.Step(sequence)
+	if st.Status.IsTerminal() || step == nil || step.Kind != state.KindActivity ||
+		step.Status != state.StepScheduled || step.Name != stepName {
+		return fmt.Errorf("server: result %s/seq%d does not match an activity in flight in workflow %q (status %s)",
+			stepName, sequence, workflowID, st.Status)
 	}
-	tail := *st.Tail()
+	attempt := *step
 	workflowType := st.WorkflowType
-	if tail.Sequence != sequence || tail.Name != stepName {
-		return fmt.Errorf("server: result %s/seq%d does not match in-flight step %s/seq%d",
-			stepName, sequence, tail.Name, tail.Sequence)
-	}
 	if failed {
+		// Retry transparently if attempts remain: the workflow sees the error
+		// only once the policy is exhausted, so the failure says which it is.
+		policy := e.retryPolicy(&attempt)
+		willRetry := attempt.Attempts < policy.MaxAttempts
 		failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 			StepFailed: &history.StepFailedEvent{
-				StepName: stepName, Sequence: sequence, Error: stepErr, RetryCount: int32(tail.Attempts),
+				StepName: stepName, Sequence: sequence, Error: stepErr,
+				RetryCount: int32(attempt.Attempts), WillRetry: willRetry,
 			},
 		}}
 		if err := e.appendLocked(w, failedEv, int64(len(events)+1)); err != nil {
 			return err
 		}
 		// The attempt is over; its lease is spent (a retry gets a fresh one).
-		e.dropLease(workflowID)
+		e.dropLease(workflowID, sequence)
 		e.metrics.taskResults.With("failed").Inc()
 		e.metrics.stepDuration.Observe(time.Since(claimedAt).Seconds())
 		e.log.Warn("step failed", "workflow_id", workflowID, "step", stepName,
-			"sequence", sequence, "error", stepErr, "attempt", tail.Attempts)
-
-		// Retry transparently if attempts remain (only activities retry); the
-		// workflow sees the error only once the policy is exhausted.
-		policy := e.retryPolicy(&tail)
-		if tail.Kind == state.KindActivity && tail.Attempts < policy.MaxAttempts {
-			e.scheduleRetryLocked(workflowID, &tail, policy.Delay(tail.Attempts))
+			"sequence", sequence, "error", stepErr, "attempt", attempt.Attempts, "will_retry", willRetry)
+		if willRetry {
+			e.scheduleRetryLocked(workflowID, &attempt, policy.Delay(attempt.Attempts))
 			return nil
 		}
 		return e.advanceIfRegisteredLocked(w, workflowType)
@@ -435,7 +452,7 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 	if err := e.appendLocked(w, completed, int64(len(events)+1)); err != nil {
 		return err
 	}
-	e.dropLease(workflowID)
+	e.dropLease(workflowID, sequence)
 	e.metrics.taskResults.With("completed").Inc()
 	e.metrics.stepDuration.Observe(time.Since(claimedAt).Seconds())
 	e.log.Info("step completed", "workflow_id", workflowID, "step", stepName, "sequence", sequence)
@@ -532,29 +549,48 @@ func (e *Engine) SignalWorkflow(workflowID, signalName string, payload []byte) e
 	return e.tryDeliverSignalLocked(w)
 }
 
-// tryDeliverSignalLocked completes the in-flight step if it is a signal wait with a
-// matching, not-yet-consumed buffered signal, then advances. It is a no-op when the
-// workflow isn't waiting on a signal or no matching signal has arrived. The caller
-// must hold w.mu. Called both when a signal arrives and when a wait is first reached
-// (in case the signal was buffered earlier).
+// tryDeliverSignalLocked delivers every buffered signal a waiting step can take,
+// then advances if any was delivered. It is a no-op when no wait matches. The
+// caller must hold w.mu. Called both when a signal arrives and when a wait is
+// first reached (in case the signal was buffered earlier).
 func (e *Engine) tryDeliverSignalLocked(w *wfState) error {
-	events, st, err := e.historyLocked(w)
+	delivered, err := e.deliverSignalsLocked(w)
+	if err != nil || !delivered {
+		return err
+	}
+	_, st, err := e.historyLocked(w)
 	if err != nil {
 		return err
 	}
-	payload, ok := st.DeliverableSignal()
-	if !ok {
-		return nil // not waiting on a signal, or none has matched yet
-	}
-	tail := *st.Tail()
-	completed := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
-		StepCompleted: &history.StepCompletedEvent{StepName: tail.Name, Sequence: tail.Sequence, Output: payload},
-	}}
-	if err := e.appendLocked(w, completed, int64(len(events)+1)); err != nil {
-		return err
-	}
-	e.log.Info("signal delivered", "workflow_id", w.id, "step", tail.Name, "sequence", tail.Sequence)
 	return e.advanceIfRegisteredLocked(w, st.WorkflowType)
+}
+
+// deliverSignalsLocked completes each signal wait a buffered signal satisfies,
+// without advancing. The caller must hold w.mu.
+func (e *Engine) deliverSignalsLocked(w *wfState) (bool, error) {
+	delivered := false
+	for {
+		events, st, err := e.historyLocked(w)
+		if err != nil {
+			return delivered, err
+		}
+		if st.Status.IsTerminal() {
+			return delivered, nil
+		}
+		wait, payload, ok := st.NextSignalDelivery()
+		if !ok {
+			return delivered, nil
+		}
+		name, seq := wait.Name, wait.Sequence
+		completed := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
+			StepCompleted: &history.StepCompletedEvent{StepName: name, Sequence: seq, Output: payload},
+		}}
+		if err := e.appendLocked(w, completed, int64(len(events)+1)); err != nil {
+			return delivered, err
+		}
+		delivered = true
+		e.log.Info("signal delivered", "workflow_id", w.id, "step", name, "sequence", seq)
+	}
 }
 
 // onTimerFired is the timer service's callback: when a timer's deadline passes, the
@@ -569,15 +605,17 @@ func (e *Engine) onTimerFired(tm timer.Timer) {
 	events, st, err := e.historyLocked(w)
 	if err != nil {
 		e.log.Error("timer fired", "workflow_id", tm.WorkflowID, "err", err)
-		if st == nil && events == nil {
+		if events == nil {
 			e.rearmCallback(e.timers, tm) // read failed: transient, retry
 		}
 		return
 	}
-	tail := st.Tail()
-	if st.Status != state.StatusWaiting || tail == nil || tail.Sequence != tm.Sequence || tail.Name != tm.StepName {
+	step := st.Step(tm.Sequence)
+	if st.Status.IsTerminal() || step == nil || step.Kind != state.KindTimer ||
+		step.Status != state.StepScheduled || step.Name != tm.StepName {
 		return // already resolved; nothing to do
 	}
+	workflowType := st.WorkflowType
 	fired := &history.HistoryEvent{Attributes: &history.HistoryEvent_TimerFired{
 		TimerFired: &history.TimerFiredEvent{StepName: tm.StepName, Sequence: tm.Sequence},
 	}}
@@ -588,38 +626,53 @@ func (e *Engine) onTimerFired(tm timer.Timer) {
 	}
 	e.metrics.timersFired.Inc()
 	e.log.Info("timer fired", "workflow_id", tm.WorkflowID, "step", tm.StepName, "sequence", tm.Sequence)
-	e.advanceOrRetry(w, st.WorkflowType)
+	e.advanceOrRetry(w, workflowType)
 }
 
-// advanceLocked runs one turn of the decision loop: replay history, Decide, and
-// apply the result. Phase-1 workflows are sequential, so each call yields exactly
-// one decision — schedule one step (then wait for a worker), or reach a terminal
-// state. The caller must hold w.mu.
+// advanceLocked runs one turn of the decision loop: ask the planner what the
+// workflow does next and apply it. It runs after anything that could unblock the
+// workflow code (a start, a step result), even with other steps still in flight,
+// since parallel code may continue as soon as one of them resolves. The caller
+// must hold w.mu.
 func (e *Engine) advanceLocked(w *wfState, planner Planner) error {
 	events, st, err := e.historyLocked(w)
 	if err != nil && events == nil {
 		return err
 	}
+	if st != nil && st.Status.IsTerminal() {
+		return nil
+	}
 	workflowID := w.id
 
 	// A remote (polyglot) planner can't be consulted inline: deciding means a
-	// network round-trip to an SDK worker, and e.mu is held here. Instead we
-	// hand the history out as a workflow task and apply the command when it
-	// comes back through CompleteWorkflowTask.
+	// network round-trip to an SDK worker, and the workflow's lock is held here.
+	// Instead we hand the history out as a workflow task and apply the commands
+	// when they come back through CompleteWorkflowTask.
 	if rp, ok := planner.(*remotePlanner); ok {
 		return e.dispatchWorkflowTaskLocked(w, rp.workflowType, events)
 	}
 
-	var decision state.Decision
-	if sp, ok := planner.(statePlanner); ok && st != nil {
-		decision, err = sp.DecideState(st)
-	} else {
-		decision, err = planner.Decide(events)
+	var decisions []state.Decision
+	switch p := planner.(type) {
+	case batchPlanner:
+		decisions, err = p.DecideAll(events)
+	case statePlanner:
+		if st == nil {
+			_, err = p.Decide(events) // reports why the history is invalid
+			break
+		}
+		var d state.Decision
+		d, err = p.DecideState(st)
+		decisions = []state.Decision{d}
+	default:
+		var d state.Decision
+		d, err = planner.Decide(events)
+		decisions = []state.Decision{d}
 	}
 	if err != nil {
 		return fmt.Errorf("server: decide %s: %w", workflowID, err)
 	}
-	return e.applyDecisionLocked(w, decision, int64(len(events)+1))
+	return e.applyDecisionsLocked(w, decisions)
 }
 
 // advanceIfRegisteredLocked advances the workflow if its type has a planner on
@@ -643,113 +696,131 @@ func (e *Engine) planner(workflowType string) (Planner, bool) {
 	return p, ok
 }
 
-// applyDecisionLocked records the event a decision implies and performs its side
-// effect (enqueue a task, arm a timer, ...). It is the single place a decision
-// becomes durable, shared by in-process planners and remote SDK workers alike —
-// so a TypeScript workflow and a Go workflow take exactly the same path through
-// the engine. The caller must hold w.mu.
-func (e *Engine) applyDecisionLocked(w *wfState, decision state.Decision, nextID int64) error {
+// applyDecisionsLocked records the events a batch of decisions implies, in
+// order, and performs their side effects (enqueue a task, arm a timer, ...). It
+// is the single place decisions become durable, shared by in-process planners
+// and remote SDK workers alike, so a TypeScript workflow and a Go workflow take
+// exactly the same path through the engine. The caller must hold w.mu.
+func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) error {
 	workflowID := w.id
-	switch decision.Type {
-	case state.DecideScheduleStep:
-		scheduled := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
-			StepScheduled: &history.StepScheduledEvent{
-				StepName: decision.StepName, Sequence: decision.Sequence, Input: decision.Input,
-				RetryPolicy: decision.Retry.ToProto(),
-			},
-		}}
-		if err := e.appendLocked(w, scheduled, nextID); err != nil {
-			return err
-		}
-		// Record-then-enqueue: the step is durable before any worker can see it,
-		// so a crash can never dispatch a task the history doesn't know about.
-		e.queue.enqueue(&Task{
-			WorkflowId: workflowID, StepName: decision.StepName,
-			Sequence: decision.Sequence, Input: decision.Input,
-		})
-		e.log.Info("step scheduled", "workflow_id", workflowID, "step", decision.StepName, "sequence", decision.Sequence)
+	recorded := false
+	for _, decision := range decisions {
+		nextID := int64(len(w.events) + 1)
+		switch decision.Type {
+		case state.DecideScheduleStep:
+			scheduled := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
+				StepScheduled: &history.StepScheduledEvent{
+					StepName: decision.StepName, Sequence: decision.Sequence, Input: decision.Input,
+					RetryPolicy: decision.Retry.ToProto(),
+				},
+			}}
+			if err := e.appendLocked(w, scheduled, nextID); err != nil {
+				return err
+			}
+			// Record-then-enqueue: the step is durable before any worker can see it,
+			// so a crash can never dispatch a task the history doesn't know about.
+			e.queue.enqueue(&Task{
+				WorkflowId: workflowID, StepName: decision.StepName,
+				Sequence: decision.Sequence, Input: decision.Input,
+			})
+			e.log.Info("step scheduled", "workflow_id", workflowID, "step", decision.StepName, "sequence", decision.Sequence)
 
-	case state.DecideStartTimer:
-		// The absolute deadline is computed here (not in pure Decide) and recorded,
-		// so recovery can re-arm the same deadline after a restart.
-		fireAt := time.Now().Add(decision.Delay)
-		timerStarted := &history.HistoryEvent{Attributes: &history.HistoryEvent_TimerStarted{
-			TimerStarted: &history.TimerStartedEvent{
-				StepName: decision.StepName, Sequence: decision.Sequence,
-				FireAt: fireAt.UnixNano(), Input: decision.Input,
-			},
-		}}
-		if err := e.appendLocked(w, timerStarted, nextID); err != nil {
-			return err
-		}
-		e.timers.Add(timer.Timer{
-			WorkflowID: workflowID, StepName: decision.StepName,
-			Sequence: decision.Sequence, FireAt: fireAt,
-		})
-		e.log.Info("timer started", "workflow_id", workflowID, "step", decision.StepName,
-			"sequence", decision.Sequence, "fire_at", fireAt)
+		case state.DecideStartTimer:
+			// The absolute deadline is computed here (not in pure Decide) and recorded,
+			// so recovery can re-arm the same deadline after a restart.
+			fireAt := time.Now().Add(decision.Delay)
+			timerStarted := &history.HistoryEvent{Attributes: &history.HistoryEvent_TimerStarted{
+				TimerStarted: &history.TimerStartedEvent{
+					StepName: decision.StepName, Sequence: decision.Sequence,
+					FireAt: fireAt.UnixNano(), Input: decision.Input,
+				},
+			}}
+			if err := e.appendLocked(w, timerStarted, nextID); err != nil {
+				return err
+			}
+			e.timers.Add(timer.Timer{
+				WorkflowID: workflowID, StepName: decision.StepName,
+				Sequence: decision.Sequence, FireAt: fireAt,
+			})
+			e.log.Info("timer started", "workflow_id", workflowID, "step", decision.StepName,
+				"sequence", decision.Sequence, "fire_at", fireAt)
 
-	case state.DecideAwaitSignal:
-		// A signal wait is a step with no worker task: record it as scheduled (so the
-		// workflow is WAITING) but dispatch nothing. It completes when SignalWorkflow
-		// delivers a matching signal — which may already be buffered, so try now.
-		awaiting := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
-			StepScheduled: &history.StepScheduledEvent{
-				StepName: decision.StepName, Sequence: decision.Sequence, Input: decision.Input,
-				AwaitsSignal: true, SignalName: decision.Signal,
-			},
-		}}
-		if err := e.appendLocked(w, awaiting, nextID); err != nil {
-			return err
-		}
-		e.log.Info("awaiting signal", "workflow_id", workflowID, "step", decision.StepName,
-			"sequence", decision.Sequence, "signal", decision.Signal)
-		return e.tryDeliverSignalLocked(w)
+		case state.DecideAwaitSignal:
+			// A signal wait is a step with no worker task: record it as scheduled (so the
+			// workflow is WAITING) but dispatch nothing. It completes when SignalWorkflow
+			// delivers a matching signal, which may already be buffered (see below).
+			awaiting := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
+				StepScheduled: &history.StepScheduledEvent{
+					StepName: decision.StepName, Sequence: decision.Sequence, Input: decision.Input,
+					AwaitsSignal: true, SignalName: decision.Signal,
+				},
+			}}
+			if err := e.appendLocked(w, awaiting, nextID); err != nil {
+				return err
+			}
+			e.log.Info("awaiting signal", "workflow_id", workflowID, "step", decision.StepName,
+				"sequence", decision.Sequence, "signal", decision.Signal)
 
-	case state.DecideRecordMarker:
-		// A marker completes as it is recorded, so the workflow is RUNNING again
-		// and owes another decision straight away.
-		marker := &history.HistoryEvent{Attributes: &history.HistoryEvent_MarkerRecorded{
-			MarkerRecorded: &history.MarkerRecordedEvent{
-				StepName: decision.StepName, Sequence: decision.Sequence,
-				Marker: decision.Marker, Data: decision.Output,
-			},
-		}}
-		if err := e.appendLocked(w, marker, nextID); err != nil {
-			return err
+		case state.DecideRecordMarker:
+			// A marker completes as it is recorded.
+			marker := &history.HistoryEvent{Attributes: &history.HistoryEvent_MarkerRecorded{
+				MarkerRecorded: &history.MarkerRecordedEvent{
+					StepName: decision.StepName, Sequence: decision.Sequence,
+					Marker: decision.Marker, Data: decision.Output,
+				},
+			}}
+			if err := e.appendLocked(w, marker, nextID); err != nil {
+				return err
+			}
+			e.log.Info("marker recorded", "workflow_id", workflowID, "step", decision.StepName,
+				"sequence", decision.Sequence, "marker", decision.Marker)
+
+		case state.DecideCompleteWorkflow:
+			done := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowCompleted{
+				WorkflowCompleted: &history.WorkflowCompletedEvent{Output: decision.Output},
+			}}
+			if err := e.appendLocked(w, done, nextID); err != nil {
+				return err
+			}
+			e.metrics.workflowsFinished.With("completed").Inc()
+			e.metrics.workflowsActive.Dec()
+			e.log.Info("workflow completed", "workflow_id", workflowID)
+			return nil
+
+		case state.DecideFailWorkflow:
+			failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowFailed{
+				WorkflowFailed: &history.WorkflowFailedEvent{Error: decision.Error},
+			}}
+			if err := e.appendLocked(w, failedEv, nextID); err != nil {
+				return err
+			}
+			e.metrics.workflowsFinished.With("failed").Inc()
+			e.metrics.workflowsActive.Dec()
+			e.log.Warn("workflow failed", "workflow_id", workflowID, "error", decision.Error)
+			return nil
+
+		case state.DecideNoop:
+			// Every step the code waits on is in flight.
+			continue
 		}
-		e.log.Info("marker recorded", "workflow_id", workflowID, "step", decision.StepName,
-			"sequence", decision.Sequence, "marker", decision.Marker)
-		_, st, err := e.historyLocked(w)
-		if err != nil {
-			return err
-		}
+		recorded = true
+	}
+	if !recorded {
+		return nil
+	}
+	// A new wait may match a signal that arrived earlier.
+	delivered, err := e.deliverSignalsLocked(w)
+	if err != nil {
+		return err
+	}
+	_, st, err := e.historyLocked(w)
+	if err != nil {
+		return err
+	}
+	if delivered || st.Status == state.StatusRunning {
+		// A wait was satisfied, or nothing is in flight (only markers were
+		// recorded): the workflow code has more to do.
 		return e.advanceIfRegisteredLocked(w, st.WorkflowType)
-
-	case state.DecideCompleteWorkflow:
-		done := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowCompleted{
-			WorkflowCompleted: &history.WorkflowCompletedEvent{Output: decision.Output},
-		}}
-		if err := e.appendLocked(w, done, nextID); err != nil {
-			return err
-		}
-		e.metrics.workflowsFinished.With("completed").Inc()
-		e.metrics.workflowsActive.Dec()
-		e.log.Info("workflow completed", "workflow_id", workflowID)
-
-	case state.DecideFailWorkflow:
-		failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowFailed{
-			WorkflowFailed: &history.WorkflowFailedEvent{Error: decision.Error},
-		}}
-		if err := e.appendLocked(w, failedEv, nextID); err != nil {
-			return err
-		}
-		e.metrics.workflowsFinished.With("failed").Inc()
-		e.metrics.workflowsActive.Dec()
-		e.log.Warn("workflow failed", "workflow_id", workflowID, "error", decision.Error)
-
-	case state.DecideNoop:
-		// A step is in flight (wait for the worker) or the workflow is terminal.
 	}
 	return nil
 }
@@ -760,6 +831,13 @@ func (e *Engine) applyDecisionLocked(w *wfState, decision state.Decision, nextID
 // this is where a finished workflow's append handle is released.
 func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int64) error {
 	workflowID := w.id
+	select {
+	case <-e.done:
+		// A closed engine (shut down, or a deposed leader's) must not write:
+		// another engine may already own this history.
+		return fmt.Errorf("server: append %s: %w", workflowID, ErrEngineClosed)
+	default:
+	}
 	ev.EventId = eventID
 	ev.Timestamp = time.Now().UnixNano()
 	if err := e.hlog.Append(workflowID, ev); err != nil {
@@ -775,6 +853,11 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 		if err := e.store.Release(workflowID); err != nil {
 			e.log.Warn("release history handle", "workflow_id", workflowID, "err", err)
 		}
+		// Steps still in flight are abandoned: their workers are turned away.
+		e.dropLeases(workflowID)
+		e.queue.dropWhere(func(t *Task) bool { return t.GetWorkflowId() == workflowID })
+		e.dropDecision(workflowID)
+		dropWorkflow(e.workflowQueue, workflowID)
 	}
 	return nil
 }

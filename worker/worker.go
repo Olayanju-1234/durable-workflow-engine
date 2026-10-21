@@ -284,14 +284,20 @@ func (w *Worker) decide(ctx context.Context, task *server.WorkflowTask) {
 	w.mu.Unlock()
 
 	req := &server.CompleteWorkflowTaskRequest{WorkflowId: task.GetWorkflowId(), TaskToken: task.GetTaskToken()}
-	decision, err := replay.Decide(fn, task.GetHistory(), w.opts.Logger)
-	if err != nil {
+	decisions, err := replay.DecideAll(fn, task.GetHistory(), w.opts.Logger)
+	switch {
+	case err != nil:
 		// Non-determinism or a panic: the code can never replay this history, so
 		// the engine fails the workflow instead of re-dispatching it forever.
 		log.Error("workflow replay failed", "err", err)
 		req.ReplayError = err.Error()
-	} else {
-		req.Command = server.CommandFromDecision(decision)
+	case len(decisions) == 1:
+		// One command travels in the field every engine version understands.
+		req.Command = server.CommandFromDecision(decisions[0])
+	default:
+		for _, d := range decisions {
+			req.Commands = append(req.Commands, server.CommandFromDecision(d))
+		}
 	}
 	cctx, cancel := completionContext(ctx)
 	defer cancel()

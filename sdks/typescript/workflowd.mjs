@@ -129,19 +129,29 @@ function retryPolicyDTO(retry) {
  * pass. (This is not hypothetical: it is exactly the bug the first version of
  * this SDK shipped with.)
  *
- * So instead of throwing, an unrecorded step records the command and returns a
- * promise that NEVER settles. The workflow function simply suspends at that
- * `await` and can never observe it, no matter how it handles errors. `decide`
- * races the function against a signal that fires when the command is recorded.
+ * So instead of throwing, a step with no result returns a promise that NEVER
+ * settles. The workflow function simply stops at that `await` and can never
+ * observe it, however it handles errors. A step history has no record of yet
+ * is also added to the commands to send. Because recorded results are already
+ * settled promises, the function runs as far as it can within one turn of the
+ * event loop; `decide` waits for that turn to end, and everything the code
+ * started by then (several activities, with Promise.all) is the decision.
  */
 const FOREVER = () => new Promise(() => {});
+
+/** A promise rejected with err that Node does not report as unhandled. */
+function rejected(err) {
+  const p = Promise.reject(err);
+  p.catch(() => {});
+  return p;
+}
 
 /**
  * Context is what a workflow function is given. Every method is durable: its
  * result is recorded in history and replayed on the next decision.
  */
 class Context {
-  constructor(task, onSuspend) {
+  constructor(task) {
     this.task = task;
     this.input = readPayload(task, 'input');
     this.workflowId = task.workflow_id;
@@ -149,7 +159,8 @@ class Context {
     this._signals = task.signals ?? [];
     this._next = 0; // how many durable calls this replay has issued
     this._versions = new Map();
-    this._onSuspend = onSuspend; // called once, with the outcome to report
+    this._pending = []; // new commands, in sequence order
+    this._replayError = null;
   }
 
   /** The start input decoded as 'text' (same as ctx.input), 'json' or 'bytes'. */
@@ -161,8 +172,11 @@ class Context {
    * Run a named activity on a worker and return its output.
    * opts.retry = { maxAttempts, initialBackoffMs, maxBackoffMs } retries a
    * failed attempt first (backoff doubles each time); opts.as decodes the result.
+   * Not awaiting it at once runs activities in parallel:
+   *
+   *   const [a, b] = await Promise.all([ctx.activity('a'), ctx.activity('b')]);
    */
-  async activity(name, input = '', opts = {}) {
+  activity(name, input = '', opts = {}) {
     const command = putPayload({ type: 'schedule_activity', step_name: name }, 'input', input);
     const retry = retryPolicyDTO(opts.retry);
     if (retry) command.retry_policy = retry;
@@ -170,7 +184,7 @@ class Context {
   }
 
   /** Pause durably for `ms` milliseconds. Survives engine restarts. */
-  async sleep(name, ms) {
+  sleep(name, ms) {
     return this._command('TIMER', name, {
       type: 'start_timer',
       step_name: name,
@@ -179,13 +193,38 @@ class Context {
   }
 
   /** Block until a matching external signal arrives; returns its payload. */
-  async waitForSignal(name, signalName, opts = {}) {
+  waitForSignal(name, signalName, opts = {}) {
     return this._command(
       'SIGNAL',
       name,
       { type: 'await_signal', step_name: name, signal_name: signalName },
       opts.as,
     );
+  }
+
+  /**
+   * Wait for the first of several ctx promises (activities, sleeps, signal
+   * waits) to settle, and resolve to its index. When several have results,
+   * the one history recorded first wins, so every replay agrees. Use this,
+   * not Promise.race: race picks by call order, which can change on replay.
+   *
+   *   const reply = ctx.waitForSignal('reply', 'approved');
+   *   const deadline = ctx.sleep('deadline', 48 * 3600 * 1000);
+   *   if ((await ctx.waitAny([reply, deadline])) === 1) { ... timed out ... }
+   */
+  waitAny(promises) {
+    let best = -1;
+    let bestId = 0;
+    promises.forEach((p, i) => {
+      if (typeof p?._seq !== 'number') throw new TypeError('waitAny takes promises returned by ctx calls');
+      const rec = this._steps[p._seq - 1];
+      const id = rec?.resolved_event_id ?? 0;
+      if (rec && (rec.status === 'COMPLETED' || rec.status === 'FAILED') && (best < 0 || id < bestId)) {
+        best = i;
+        bestId = id;
+      }
+    });
+    return best < 0 ? FOREVER() : Promise.resolve(best);
   }
 
   /**
@@ -205,18 +244,15 @@ class Context {
       const rec = this._steps[seq - 1];
       if (!rec) {
         this._next = seq;
-        this._onSuspend({
-          command: {
-            type: 'record_marker',
-            step_name: changeId,
-            sequence: seq,
-            marker: 'version',
-            data: String(maxSupported),
-          },
+        this._pending.push({
+          type: 'record_marker',
+          step_name: changeId,
+          sequence: seq,
+          marker: 'version',
+          data: String(maxSupported),
         });
-        return FOREVER();
-      }
-      if (rec.kind !== 'MARKER' || rec.marker !== 'version' || rec.step_name !== changeId) {
+        v = maxSupported;
+      } else if (rec.kind !== 'MARKER' || rec.marker !== 'version' || rec.step_name !== changeId) {
         v = DEFAULT_VERSION; // this execution ran past here before the change
       } else {
         this._next = seq;
@@ -225,11 +261,10 @@ class Context {
       this._versions.set(changeId, v);
     }
     if (v < minSupported || v > maxSupported) {
-      this._onSuspend({
-        replayError: `non-determinism: execution recorded version ${v} of "${changeId}", ` +
+      return this._nondeterminism(
+        `non-determinism: execution recorded version ${v} of "${changeId}", ` +
           `but the code supports ${minSupported}..${maxSupported}`,
-      });
-      return FOREVER();
+      );
     }
     return v;
   }
@@ -243,98 +278,100 @@ class Context {
     const seq = this._next + 1;
     if (!this._steps[seq - 1]) {
       this._next = seq;
-      const value = await fn();
-      this._onSuspend({
-        command: putPayload(
-          { type: 'record_marker', step_name: name, sequence: seq, marker: 'side_effect' },
-          'data',
-          value,
-        ),
-      });
-      return FOREVER();
+      const command = putPayload(
+        { type: 'record_marker', step_name: name, sequence: seq, marker: 'side_effect' },
+        'data',
+        await fn(),
+      );
+      this._pending.push(command);
+      return readPayload(command, 'data', opts.as); // what every replay will return
     }
     return this._command('MARKER', name, null, opts.as);
   }
 
+  _nondeterminism(message) {
+    this._replayError ??= message;
+    return FOREVER();
+  }
+
   /**
    * The heart of replay. For the next step in call order: return the recorded
-   * result, stay blocked, or yield the command that creates it.
+   * result, stay blocked, or start the step. The promise carries its sequence
+   * for waitAny.
    */
   _command(kind, name, command, as) {
     const seq = ++this._next;
-    const recorded = this._steps[seq - 1];
+    const p = this._result(seq, kind, name, command, as);
+    p._seq = seq;
+    return p;
+  }
 
-    if (recorded) {
-      // Determinism check: the call the code is making now must be the step
-      // history recorded at this position. A mismatch means the code changed
-      // in a way that diverges from the durable run. Reported through the
-      // suspend channel so workflow code cannot catch and hide it.
-      const markerMismatch = kind === 'MARKER' && recorded.marker !== 'side_effect';
-      if (recorded.kind !== kind || recorded.step_name !== name || markerMismatch) {
-        this._onSuspend({
-          replayError:
-            `non-determinism at step ${seq}: code issued ${kind} "${name}" ` +
-            `but history has ${recorded.kind} "${recorded.step_name}"`,
-        });
-        return FOREVER();
-      }
-      if (recorded.status === 'COMPLETED') {
-        try {
-          return Promise.resolve(readPayload(recorded, 'output', as));
-        } catch (err) {
-          return Promise.reject(err); // e.g. { as: 'json' } on a non-JSON result
-        }
-      }
-      if (recorded.status === 'FAILED') {
-        // A genuine, catchable error: this is how Saga compensation works.
-        return Promise.reject(new ActivityFailure(name, recorded.error || 'activity failed'));
-      }
-      // SCHEDULED: still in flight. Suspend with nothing to report.
-      this._onSuspend({ command: null });
+  _result(seq, kind, name, command, as) {
+    const recorded = this._steps[seq - 1];
+    if (!recorded) {
+      // No history for this step: start it, and wait for its result.
+      this._pending.push({ ...command, sequence: seq });
       return FOREVER();
     }
-
-    // No history for this step: this is what happens next.
-    this._onSuspend({ command: { ...command, sequence: seq } });
-    return FOREVER();
+    // Determinism check: the call the code is making now must be the step
+    // history recorded at this position. A mismatch means the code changed in
+    // a way that diverges from the durable run; it is reported in a way the
+    // workflow code cannot catch and hide.
+    const markerMismatch = kind === 'MARKER' && recorded.marker !== 'side_effect';
+    if (recorded.kind !== kind || recorded.step_name !== name || markerMismatch) {
+      return this._nondeterminism(
+        `non-determinism at step ${seq}: code issued ${kind} "${name}" ` +
+          `but history has ${recorded.kind} "${recorded.step_name}"`,
+      );
+    }
+    if (recorded.status === 'COMPLETED') {
+      try {
+        return Promise.resolve(readPayload(recorded, 'output', as));
+      } catch (err) {
+        return rejected(err); // e.g. { as: 'json' } on a non-JSON result
+      }
+    }
+    if (recorded.status === 'FAILED') {
+      // A genuine, catchable error: this is how Saga compensation works.
+      return rejected(new ActivityFailure(name, recorded.error || 'activity failed'));
+    }
+    return FOREVER(); // SCHEDULED: in flight (or being retried)
   }
 }
 
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+
 /**
- * Replay a workflow function against a task and produce the next command.
- * Pure: it performs no I/O and mutates nothing outside its own scope.
+ * Replay a workflow function against a task and produce what happens next:
+ * `{ commands: [...] }` (none means it is blocked on steps in flight) or
+ * `{ replayError }`. Pure: it performs no I/O and mutates nothing outside its
+ * own scope. (`command` is set too when there is exactly one.)
  */
 export async function decide(fn, task) {
-  // Fires the first time replay suspends. Later calls are ignored: once we know
-  // the next command, anything the (now-abandoned) function does is irrelevant.
-  let settle;
-  const suspended = new Promise((resolve) => {
-    settle = resolve;
-  });
-  let done = false;
-  const onSuspend = (outcome) => {
-    if (!done) {
-      done = true;
-      settle(outcome);
-    }
-  };
-
-  const ctx = new Context(task, onSuspend);
-
-  // Race the workflow function against its own suspension. Whichever happens
-  // first decides the outcome — and because suspension never settles the
-  // function's promise, these are genuinely exclusive.
-  const ran = fn(ctx).then(
-    (output) => ({ command: putPayload({ type: 'complete_workflow' }, 'output', output) }),
+  const ctx = new Context(task);
+  let settled = null;
+  fn(ctx).then(
+    (output) => {
+      settled = { type: 'complete_workflow', output };
+    },
     (err) => {
       // WorkflowFailure, an uncaught ActivityFailure, or a plain bug: all fail
       // the workflow, exactly like returning an error from a Go workflow.
-      if (done) return suspended; // already suspended; ignore late rejection
-      return { command: { type: 'fail_workflow', error: err?.message ?? String(err) } };
+      settled = { type: 'fail_workflow', error: err?.message ?? String(err) };
     },
   );
-
-  return Promise.race([ran, suspended]);
+  // Recorded results are settled promises, so the code runs as far as it can
+  // in microtasks; by the next turn of the event loop it has finished or is
+  // waiting on steps with no result.
+  await nextTurn();
+  if (ctx._replayError) return { replayError: ctx._replayError };
+  const commands = [...ctx._pending];
+  if (settled?.type === 'complete_workflow') {
+    commands.push(putPayload({ type: 'complete_workflow' }, 'output', settled.output));
+  } else if (settled) {
+    commands.push(settled);
+  }
+  return { commands, command: commands.length === 1 ? commands[0] : null };
 }
 
 class HTTPError extends Error {
@@ -542,18 +579,13 @@ export class Worker {
       const result = fn
         ? await decide(fn, task)
         : { replayError: `no workflow registered for type ${task.workflow_type}` };
+      const body = { workflow_id: task.workflow_id, task_token: task.task_token, replay_error: result.replayError ?? '' };
+      // One command travels in the field every engine version understands.
+      if ((result.commands?.length ?? 0) > 1) body.commands = result.commands;
+      else body.command = result.commands?.[0] ?? null;
 
       try {
-        await this.conn.request('/api/workflow-tasks/complete', {
-          method: 'POST',
-          body: {
-            workflow_id: task.workflow_id,
-            task_token: task.task_token,
-            command: result.command ?? null,
-            replay_error: result.replayError ?? '',
-          },
-          attempts: 3,
-        });
+        await this.conn.request('/api/workflow-tasks/complete', { method: 'POST', body, attempts: 3 });
       } catch (err) {
         // 409 means the decision went stale (the history moved on). Polling
         // again is the correct response, so this is not worth reporting.

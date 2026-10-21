@@ -65,6 +65,7 @@ from typing import Any, Callable, Dict, List, Optional
 __all__ = [
     "Worker",
     "Context",
+    "Future",
     "RetryPolicy",
     "WorkflowFailure",
     "ActivityFailure",
@@ -113,15 +114,15 @@ class RetryPolicy:
 
 
 class _Yield(BaseException):
-    """Internal control-flow signal: replay reached a step with no result yet.
+    """Internal control-flow signal: the code waits on a step with no result yet.
 
     Deliberately derived from BaseException, not Exception, so a workflow's
-    ``except Exception`` around an activity cannot accidentally swallow it.
+    ``except Exception`` around an activity cannot accidentally swallow it. The
+    commands to send are the ones the context collected before it was raised.
     """
 
-    def __init__(self, command: Optional[dict]):
+    def __init__(self):
         super().__init__("workflowd internal yield")
-        self.command = command
 
 
 class _NonDeterminism(BaseException):
@@ -163,6 +164,29 @@ def read_payload(obj: Optional[dict], field: str, decode: str = "text") -> Any:
     raise ValueError(f"unknown decode {decode!r}; use 'text', 'json' or 'bytes'")
 
 
+class Future:
+    """The result of a durable call started without waiting for it (the
+    ``*_async`` methods). ``result()`` returns it, or blocks the workflow until
+    the step has one."""
+
+    def __init__(self, ctx: "Context", seq: int, name: str, decode: str):
+        self._ctx, self._seq, self._name, self._decode = ctx, seq, name, decode
+
+    def _recorded(self) -> Optional[dict]:
+        rec = self._ctx._steps[self._seq - 1] if self._seq <= len(self._ctx._steps) else None
+        if rec is not None and rec.get("status") in ("COMPLETED", "FAILED"):
+            return rec
+        return None  # not started yet, in flight, or being retried
+
+    def result(self) -> Any:
+        rec = self._recorded()
+        if rec is None:
+            raise _Yield()
+        if rec.get("status") == "FAILED":
+            raise ActivityFailure(self._name, rec.get("error") or "activity failed")
+        return read_payload(rec, "output", self._decode)
+
+
 class Context:
     """What a workflow function receives. Every method is durable."""
 
@@ -174,6 +198,7 @@ class Context:
         self._signals: List[dict] = task.get("signals") or []
         self._next = 0
         self._versions: Dict[str, int] = {}
+        self._pending: List[dict] = []  # new commands, in sequence order
 
     def input_as(self, decode: str = "text") -> Any:
         """The start input decoded as "text" (same as ctx.input), "json" or "bytes"."""
@@ -188,27 +213,69 @@ class Context:
         decode: str = "text",
     ) -> Any:
         """Run a named activity on a worker and return its output."""
+        return self.activity_async(name, payload, retry=retry, decode=decode).result()
+
+    def activity_async(
+        self,
+        name: str,
+        payload: Any = "",
+        *,
+        retry: Optional[RetryPolicy] = None,
+        decode: str = "text",
+    ) -> Future:
+        """Start an activity and return at once, so several run in parallel::
+
+            charge = ctx.activity_async("charge", order)
+            email = ctx.activity_async("email", order)
+            ctx.wait_all(charge, email)
+        """
         command = _put_payload({"type": "schedule_activity", "step_name": name}, "input", payload)
         if retry is not None:
             command["retry_policy"] = retry.to_wire()
-        return self._command("ACTIVITY", name, command, decode)
+        return self._issue("ACTIVITY", name, command, decode)
 
     def sleep(self, name: str, seconds: float) -> str:
         """Pause durably. Survives engine restarts."""
-        return self._command(
-            "TIMER",
-            name,
-            {"type": "start_timer", "step_name": name, "delay_ms": max(0, int(seconds * 1000))},
+        return self.sleep_async(name, seconds).result()
+
+    def sleep_async(self, name: str, seconds: float) -> Future:
+        """Start a durable timer and return at once; result() returns when it fires."""
+        return self._issue(
+            "TIMER", name, {"type": "start_timer", "step_name": name, "delay_ms": max(0, int(seconds * 1000))}, "text"
         )
 
     def wait_for_signal(self, name: str, signal_name: str, *, decode: str = "text") -> Any:
         """Block until a matching external signal arrives; return its payload."""
-        return self._command(
-            "SIGNAL",
-            name,
-            {"type": "await_signal", "step_name": name, "signal_name": signal_name},
-            decode,
+        return self.wait_for_signal_async(name, signal_name, decode=decode).result()
+
+    def wait_for_signal_async(self, name: str, signal_name: str, *, decode: str = "text") -> Future:
+        """Start waiting for a signal and return at once."""
+        return self._issue(
+            "SIGNAL", name, {"type": "await_signal", "step_name": name, "signal_name": signal_name}, decode
         )
+
+    def wait_all(self, *futures: Future) -> List[Any]:
+        """Wait for every future and return their results, in order."""
+        return [f.result() for f in futures]
+
+    def wait_any(self, *futures: Future) -> int:
+        """Wait until one of the futures has a result and return its index. When
+        several have one, the step history recorded first wins, so every replay
+        agrees::
+
+            reply = ctx.wait_for_signal_async("reply", "approved")
+            deadline = ctx.sleep_async("deadline", 48 * 3600)
+            if ctx.wait_any(reply, deadline) == 1:
+                ...  # timed out
+        """
+        best, best_id = -1, 0
+        for i, f in enumerate(futures):
+            rec = f._recorded()
+            if rec is not None and (best < 0 or rec.get("resolved_event_id", 0) < best_id):
+                best, best_id = i, rec.get("resolved_event_id", 0)
+        if best < 0:
+            raise _Yield()
+        return best
 
     def get_version(self, change_id: str, min_supported: int, max_supported: int) -> int:
         """Change workflow code while executions are in flight::
@@ -227,7 +294,7 @@ class Context:
             rec = self._steps[seq - 1] if seq <= len(self._steps) else None
             if rec is None:
                 self._next = seq
-                raise _Yield(
+                self._pending.append(
                     {
                         "type": "record_marker",
                         "step_name": change_id,
@@ -236,7 +303,8 @@ class Context:
                         "data": str(max_supported),
                     }
                 )
-            if rec.get("kind") != "MARKER" or rec.get("marker") != "version" or rec.get("step_name") != change_id:
+                v = max_supported
+            elif rec.get("kind") != "MARKER" or rec.get("marker") != "version" or rec.get("step_name") != change_id:
                 v = DEFAULT_VERSION  # this execution ran past here before the change
             else:
                 self._next = seq
@@ -255,17 +323,24 @@ class Context:
         seq = self._next + 1
         if seq > len(self._steps):
             self._next = seq
-            command = {"type": "record_marker", "step_name": name, "sequence": seq, "marker": "side_effect"}
-            raise _Yield(_put_payload(command, "data", fn()))
-        return self._command("MARKER", name, None, decode)
+            command = _put_payload(
+                {"type": "record_marker", "step_name": name, "sequence": seq, "marker": "side_effect"}, "data", fn()
+            )
+            self._pending.append(command)
+            return read_payload(command, "data", decode)  # what every replay will return
+        return self._issue("MARKER", name, None, decode).result()
 
-    def _command(self, kind: str, name: str, command: Optional[dict], decode: str = "text") -> Any:
-        """Return the recorded result, stay blocked, or yield the next command."""
+    def _issue(self, kind: str, name: str, command: Optional[dict], decode: str) -> Future:
+        """Give the next durable call its sequence, check it against history,
+        and start the step if history has none yet."""
         self._next += 1
         seq = self._next
         recorded = self._steps[seq - 1] if seq <= len(self._steps) else None
-
-        if recorded is not None:
+        if recorded is None:
+            command = dict(command or {})
+            command["sequence"] = seq
+            self._pending.append(command)
+        else:
             # Determinism: the call being made now must be the step history
             # recorded at this position.
             marker_mismatch = kind == "MARKER" and recorded.get("marker") != "side_effect"
@@ -274,34 +349,25 @@ class Context:
                     f'non-determinism at step {seq}: code issued {kind} "{name}" but '
                     f'history has {recorded.get("kind")} "{recorded.get("step_name")}"'
                 )
-            status = recorded.get("status")
-            if status == "COMPLETED":
-                return read_payload(recorded, "output", decode)
-            if status == "FAILED":
-                raise ActivityFailure(name, recorded.get("error") or "activity failed")
-            raise _Yield(None)  # SCHEDULED: still in flight
-
-        command = dict(command or {})
-        command["sequence"] = seq
-        raise _Yield(command)
+        return Future(self, seq, name, decode)
 
 
 def decide(fn: Callable[[Context], Any], task: dict) -> dict:
-    """Replay a workflow function against a task and produce the next command.
+    """Replay a workflow function against a task and produce what happens next.
 
-    Pure: no I/O, no shared state. Returns ``{"command": ...}`` or
-    ``{"replay_error": ...}``.
+    Pure: no I/O, no shared state. Returns ``{"commands": [...]}`` (empty when
+    the workflow is blocked on steps in flight) or ``{"replay_error": ...}``.
     """
     ctx = Context(task)
     try:
         output = fn(ctx)
-        return {"command": _put_payload({"type": "complete_workflow"}, "output", output)}
-    except _Yield as y:
-        return {"command": y.command}  # None command == "blocked, nothing to do"
+        return {"commands": ctx._pending + [_put_payload({"type": "complete_workflow"}, "output", output)]}
+    except _Yield:
+        return {"commands": list(ctx._pending)}
     except _NonDeterminism as err:
         return {"replay_error": str(err)}
     except Exception as err:  # WorkflowFailure, uncaught ActivityFailure, bugs
-        return {"command": {"type": "fail_workflow", "error": str(err) or repr(err)}}
+        return {"commands": ctx._pending + [{"type": "fail_workflow", "error": str(err) or repr(err)}]}
 
 
 def _accepts_two_args(fn: Callable[..., Any]) -> bool:
@@ -518,18 +584,19 @@ class Worker:
             else:
                 result = decide(fn, task)
 
+            body = {
+                "workflow_id": task["workflow_id"],
+                "task_token": task["task_token"],
+                "replay_error": result.get("replay_error", ""),
+            }
+            commands = result.get("commands") or []
+            # One command travels in the field every engine version understands.
+            if len(commands) > 1:
+                body["commands"] = commands
+            else:
+                body["command"] = commands[0] if commands else None
             try:
-                self.conn.request(
-                    "POST",
-                    "/api/workflow-tasks/complete",
-                    {
-                        "workflow_id": task["workflow_id"],
-                        "task_token": task["task_token"],
-                        "command": result.get("command"),
-                        "replay_error": result.get("replay_error", ""),
-                    },
-                    attempts=3,
-                )
+                self.conn.request("POST", "/api/workflow-tasks/complete", body, attempts=3)
             except Exception as err:
                 # 409 = the decision went stale because history moved on.
                 # Polling again is the correct response, so stay quiet.
