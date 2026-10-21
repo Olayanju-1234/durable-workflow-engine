@@ -182,6 +182,25 @@ func (s *HistoryStore) Close() error {
 	return firstErr
 }
 
+// Delete removes a workflow's history for good, closing its cached append
+// handle and fsyncing the directory so the removal survives a crash. It exists
+// for retention of finished workflows; deleting a live workflow loses it.
+func (s *HistoryStore) Delete(workflowID string) error {
+	if err := validateWorkflowID(workflowID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f, ok := s.files[workflowID]; ok {
+		f.Close()
+		delete(s.files, workflowID)
+	}
+	if err := os.Remove(s.path(workflowID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("history: delete %s: %w", workflowID, err)
+	}
+	return s.syncDir()
+}
+
 // fileLocked returns a cached append handle for the workflow, opening one on
 // first use. On the first open of an existing file it recovers a torn tail; on
 // the first creation of a new file it fsyncs the parent directory. Callers must

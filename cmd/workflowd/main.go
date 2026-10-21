@@ -37,6 +37,7 @@ func main() {
 		httpAddr    = flag.String("http-addr", ":8233", "HTTP listen address for the dashboard + JSON API (serve mode; empty disables)")
 		authToken   = flag.String("auth-token", "", "require this bearer token on mutating /api routes (empty disables auth)")
 		demoWorker  = flag.Bool("demo-worker", false, "run an in-process worker for the built-in demo activities (reserve, charge, ship, release)")
+		retention   = flag.Duration("retention", 0, "delete finished workflows this long after their last event, e.g. 168h (0 keeps them forever)")
 	)
 	flag.Parse()
 
@@ -66,7 +67,7 @@ func main() {
 	if *serve {
 		cfg := serveConfig{
 			addr: *addr, metricsAddr: *metricsAddr, httpAddr: *httpAddr,
-			authToken: *authToken, demoWorker: *demoWorker,
+			authToken: *authToken, demoWorker: *demoWorker, retention: *retention,
 		}
 		if err := runServe(logger, store, cfg); err != nil {
 			logger.Error("server stopped", "err", err)
@@ -87,6 +88,7 @@ const shutdownGracePeriod = 10 * time.Second
 type serveConfig struct {
 	addr, metricsAddr, httpAddr, authToken string
 	demoWorker                             bool
+	retention                              time.Duration
 }
 
 // demoWorkerConcurrency is how many demo activities run at once.
@@ -97,6 +99,9 @@ const demoWorkerConcurrency = 4
 // GracefulStop. The engine is wired to the same store the daemon opened, and
 // the Phase-1 workflow types are registered up front.
 func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig) error {
+	if cfg.retention < 0 {
+		return fmt.Errorf("--retention must not be negative, got %s", cfg.retention)
+	}
 	engine := server.NewEngine(store, logger)
 	defer engine.Close()
 	registerDemoTypes(engine)
@@ -122,6 +127,15 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 			newDemoWorker(engine, logger).run(ctx, demoWorkerConcurrency)
 		}()
 		logger.Info("demo worker running", "steps", demoSteps, "concurrency", demoWorkerConcurrency)
+	}
+	if cfg.retention > 0 {
+		interval := min(max(cfg.retention/10, time.Minute), time.Hour)
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			engine.RunRetention(ctx, cfg.retention, interval)
+		}()
+		logger.Info("retention enabled", "keep", cfg.retention, "interval", interval)
 	}
 
 	// Two HTTP listeners, deliberately separate from each other and from gRPC:

@@ -571,6 +571,7 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--demo</code></td><td><code>false</code></td><td>Drive a sample workflow to completion against a real store, then exit.</td></tr>
         <tr><td><code>--auth-token</code></td><td>empty</td><td>Require this bearer token on mutating <code>/api</code> routes (<code>Authorization: Bearer &lt;token&gt;</code>). Empty disables auth. <code>/api/health</code> and the dashboard's static assets stay open.</td></tr>
         <tr><td><code>--demo-worker</code></td><td><code>false</code></td><td>Run an in-process worker for the built-in demo activities (<code>reserve</code>, <code>charge</code>, <code>ship</code>, <code>release</code>), so <code>OrderSaga</code> and <code>OrderWorkflow</code> run with no separate worker. An input containing <code>decline</code> makes <code>charge</code> fail for good, which shows the saga compensating.</td></tr>
+        <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated) this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
         <tr><td><code>--version</code></td><td>—</td><td>Print version and exit.</td></tr>
       </tbody>
     </table>

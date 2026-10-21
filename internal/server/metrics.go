@@ -17,6 +17,7 @@ type engineMetrics struct {
 	signalsReceived   *metrics.Counter
 	timersFired       *metrics.Counter
 	stepDuration      *metrics.Histogram // dispatch (lease grant) → worker result
+	workflowsPurged   *metrics.Counter   // finished histories deleted by retention
 
 	// Polyglot: workflow decisions made by external SDK workers.
 	workflowTasksDispatched  *metrics.Counter
@@ -51,6 +52,8 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func
 			"Durable timers that reached their deadline."),
 		stepDuration: reg.Histogram("workflowd_step_duration_seconds",
 			"Seconds from task dispatch to the worker's result.", nil),
+		workflowsPurged: reg.Counter("workflowd_workflows_purged_total",
+			"Finished workflow histories deleted by the retention policy."),
 		workflowTasksDispatched: reg.Counter("workflowd_workflow_tasks_dispatched_total",
 			"Workflow decisions handed to external SDK workers."),
 		workflowTasksCompleted: reg.Counter("workflowd_workflow_tasks_completed_total",

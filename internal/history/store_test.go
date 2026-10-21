@@ -235,3 +235,43 @@ func TestCorruptRecordDetected(t *testing.T) {
 		t.Fatalf("expected ErrCorruptRecord, got %v", err)
 	}
 }
+
+// TestDelete proves a deleted history is gone from reads and listings, that the
+// cached append handle is released (a later append starts a fresh log), and
+// that deleting a missing workflow is not an error.
+func TestDelete(t *testing.T) {
+	s, err := NewHistoryStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for _, ev := range sampleEvents() {
+		if err := s.Append("wf-1", ev); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	if err := s.Delete("wf-1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got, err := s.ReadAll("wf-1"); err != nil || len(got) != 0 {
+		t.Fatalf("ReadAll after delete = %d events, %v; want 0, nil", len(got), err)
+	}
+	if ids, _ := s.ListWorkflows(); len(ids) != 0 {
+		t.Fatalf("ListWorkflows after delete = %v, want none", ids)
+	}
+
+	if err := s.Append("wf-1", sampleEvents()[0]); err != nil {
+		t.Fatalf("append after delete: %v", err)
+	}
+	if got, _ := s.ReadAll("wf-1"); len(got) != 1 {
+		t.Fatalf("history after re-append = %d events, want 1", len(got))
+	}
+
+	if err := s.Delete("never-existed"); err != nil {
+		t.Errorf("delete missing: %v", err)
+	}
+	if err := s.Delete("../escape"); err == nil {
+		t.Error("delete with path separator: want error")
+	}
+}
