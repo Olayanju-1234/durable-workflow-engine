@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -16,10 +17,17 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/raft"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/tlsconfig"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/tlsconfig/tlstest"
 )
 
 var threeSteps = state.WorkflowDefinition{Type: "Three", Steps: state.Activities("a", "b", "c")}
@@ -36,6 +44,7 @@ type testCluster struct {
 	peers         map[string]string
 	members       map[string]*member
 	snapshotEvery uint64
+	peerTLS       *tls.Config
 	mu            sync.Mutex // guards each member's c, read by worker goroutines
 
 	// Set by serveGRPC: each member serves the client API on a real address.
@@ -73,7 +82,12 @@ func newTestCluster(t *testing.T, n int, snapshotEvery uint64) *testCluster {
 
 func newCluster(t *testing.T, n int, snapshotEvery uint64, serveGRPC bool) *testCluster {
 	t.Helper()
-	tc := &testCluster{t: t, peers: map[string]string{}, members: map[string]*member{}, snapshotEvery: snapshotEvery}
+	return newClusterTLS(t, n, snapshotEvery, serveGRPC, nil)
+}
+
+func newClusterTLS(t *testing.T, n int, snapshotEvery uint64, serveGRPC bool, peerTLS *tls.Config) *testCluster {
+	t.Helper()
+	tc := &testCluster{t: t, peers: map[string]string{}, members: map[string]*member{}, snapshotEvery: snapshotEvery, peerTLS: peerTLS}
 	if serveGRPC {
 		tc.grpcAddrs, tc.grpcServers = map[string]string{}, map[string]*grpc.Server{}
 	}
@@ -124,7 +138,7 @@ func (tc *testCluster) start(id string) {
 		NodeID: id, Peers: tc.peers, RaftAddr: tc.peers[id],
 		GRPCAddr: tc.grpcAddr(id), HTTPAddr: "http-" + id,
 		DataDir: m.dir, Store: store, Logger: logger,
-		TickInterval: 10 * time.Millisecond, ElectionTicks: 50, SnapshotEvery: tc.snapshotEvery,
+		TickInterval: 10 * time.Millisecond, ElectionTicks: 50, SnapshotEvery: tc.snapshotEvery, PeerTLS: tc.peerTLS,
 		NewEngine: func(l server.HistoryLog) *server.Engine {
 			e := server.NewEngine(store, logger, server.WithHistoryLog(l), server.WithLeaseDuration(time.Second))
 			e.Register(threeSteps)
@@ -309,6 +323,76 @@ func TestClusterRunsWorkflowOnLeaderAndReplicates(t *testing.T) {
 		if !errors.As(err, &nle) || nle.Leader.ID != lead.id || nle.Leader.GRPCAddr != "grpc-"+lead.id {
 			t.Fatalf("follower %s: %v, want a hint naming %s", id, err, lead.id)
 		}
+	}
+}
+
+// With PeerTLS the cluster runs as usual, and its Raft port refuses anyone
+// without a certificate from the cluster's CA.
+func TestClusterOverMutualTLS(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := tlstest.NewCA(dir, "cluster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := ca.Issue(dir, "peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerTLS, err := tlsconfig.Peer(peer.CertFile, peer.KeyFile, ca.CertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := newClusterTLS(t, 3, 0, false, peerTLS)
+	lead, e := tc.leader()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tc.worker(ctx, func(string) bool { return true })
+	if _, err := e.StartWorkflow("Three", []byte("order"), "wf-tls"); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, lead.c.Engine, "wf-tls", server.WorkflowStatus_WORKFLOW_STATUS_COMPLETED)
+	tc.waitIdentical("wf-tls", 8)
+
+	rogueCA, err := tlstest.NewCA(dir, "rogue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rogue, err := rogueCA.Issue(dir, "rogue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rogueCert, err := tls.LoadX509KeyPair(rogue.CertFile, rogue.KeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := tlsconfig.LoadCAs(ca.CertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(creds credentials.TransportCredentials) error {
+		conn, err := grpc.NewClient(tc.peers[lead.id], grpc.WithTransportCredentials(creds))
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		sctx, scancel := context.WithTimeout(ctx, 2*time.Second)
+		defer scancel()
+		// Addressed to a node that doesn't exist, so a call that gets through
+		// the handshake is refused by the handler with InvalidArgument.
+		_, err = raft.NewRaftServiceClient(conn).Send(sctx, &raft.Envelope{From: "x", To: "nobody"})
+		return err
+	}
+	for name, creds := range map[string]credentials.TransportCredentials{
+		"plaintext":                   insecure.NewCredentials(),
+		"no client certificate":       credentials.NewTLS(&tls.Config{RootCAs: pool}),
+		"certificate from another CA": credentials.NewTLS(&tls.Config{RootCAs: pool, Certificates: []tls.Certificate{rogueCert}}),
+	} {
+		if err := send(creds); err == nil || status.Code(err) == codes.InvalidArgument {
+			t.Errorf("%s: reached the Raft handler (%v)", name, err)
+		}
+	}
+	if err := send(credentials.NewTLS(peerTLS)); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("valid peer certificate: %v, want the handler's InvalidArgument", err)
 	}
 }
 

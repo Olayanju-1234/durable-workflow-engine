@@ -104,7 +104,7 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 	cl, err := cluster.Start(cluster.Config{
 		NodeID: cc.nodeID, Peers: cc.peers, RaftAddr: cc.raftAddr,
 		GRPCAddr: advertised(cfg.addr, selfHost), HTTPAddr: advertised(cfg.httpAddr, selfHost),
-		DataDir: dataDir, Store: store, Logger: logger, TickInterval: cc.tick,
+		DataDir: dataDir, Store: store, Logger: logger, TickInterval: cc.tick, PeerTLS: cfg.sec.peerTLS,
 		NewEngine: func(hl server.HistoryLog) *server.Engine {
 			e := server.NewEngine(store, logger, server.WithHistoryLog(hl))
 			registerDemoTypes(e)
@@ -124,29 +124,31 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 	logger.Info("cluster member running", "node_id", cc.nodeID, "raft_addr", cc.raftAddr, "version", version.Version)
 
 	var httpSrvs []*http.Server
+	cfg.sec.logPosture(logger, cfg.httpAddr != "")
+	if cfg.sec.peerTLS == nil {
+		logger.Warn("Raft peer traffic is plaintext and unauthenticated", "hint", "set --raft-tls-cert, --raft-tls-key and --raft-tls-ca")
+	}
 	if cfg.httpAddr != "" {
-		opts := []server.HTTPOption{
-			server.WithAuthToken(cfg.authToken), server.WithEngineSource(cl), server.WithClusterStatus(cl.StatusMap),
-		}
+		opts := append(cfg.sec.httpOptions(), server.WithEngineSource(cl), server.WithClusterStatus(cl.StatusMap))
 		if cfg.demoWorker {
 			opts = append(opts, server.WithDemoWorker())
 		}
 		api := server.NewHTTPAPI(nil, logger, opts...)
 		mux := api.Handler()
 		mux.Handle("/", web.Handler())
-		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.httpAddr, api.Wrap(mux), "dashboard", logger))
-		logger.Info("dashboard listening", "addr", cfg.httpAddr, "url", browseURL(cfg.httpAddr))
+		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.httpAddr, api.Wrap(mux), "dashboard", cfg.sec.tls, logger))
+		logger.Info("dashboard listening", "addr", cfg.httpAddr, "url", browseURL(cfg.httpAddr, cfg.sec.tls != nil))
 	}
 	if cfg.metricsAddr != "" {
 		mux := http.NewServeMux()
-		mux.Handle("/metrics", cl.MetricsHandler())
-		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.metricsAddr, mux, "metrics", logger))
+		mux.Handle("/metrics", cfg.sec.metricsHandler(cl.MetricsHandler()))
+		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.metricsAddr, mux, "metrics", cfg.sec.tls, logger))
 	}
 	lis, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.addr, err)
 	}
-	gs := grpc.NewServer()
+	gs := grpc.NewServer(cfg.sec.grpcServerOptions()...)
 	server.RegisterWorkflowServiceServer(gs, server.NewGRPCServerFrom(cl, logger))
 	go func() { _ = gs.Serve(lis) }()
 	logger.Info("gRPC server listening", "addr", cfg.addr)

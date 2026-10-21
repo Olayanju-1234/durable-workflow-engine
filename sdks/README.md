@@ -20,6 +20,22 @@ Every SDK here is **dependency-free**: Node's `fetch`, Python's `urllib`, and
 Java's `HttpClient` are all built in. No npm install, no pip install, no
 protobuf toolchain.
 
+## Auth and TLS
+
+For an engine started with `--auth-token-file` (or `$WORKFLOWD_AUTH_TOKEN`) and
+`--tls-cert`/`--tls-key`, give the SDK an `https://` address and the token:
+
+| SDK | Token | Private CA |
+|---|---|---|
+| Go | `client.Options{AuthToken: tok}` | `client.Options{TLS: &tls.Config{RootCAs: pool}}` |
+| TypeScript | `new Worker({ address, token })` | start Node with `NODE_EXTRA_CA_CERTS=/path/ca.pem` |
+| Python | `Worker(address=..., token=tok)` | `Worker(..., ca_file="/path/ca.pem")` |
+| Java | `new Workflowd.Worker(address, id, tok, ssl)` | `ssl = Workflowd.trustPem(Path.of("/path/ca.pem"))` |
+
+A certificate from a public CA needs nothing beyond the `https://` address. The
+examples read `WORKFLOWD_AUTH_TOKEN` and `WORKFLOWD_CA_FILE`, and CI runs every SDK
+over TLS with a required token (`E2E_SECURE=1 ./scripts/sdk-e2e.sh <sdk>`).
+
 ## How it works
 
 The engine never runs your workflow code. Instead it asks a question:

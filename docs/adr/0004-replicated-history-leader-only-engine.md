@@ -183,7 +183,7 @@ New in a cluster:
   history file, each fsync'd.
 - **Limits kept on purpose:** static membership (`--peers`); no PreVote (a
   rejoining partitioned node costs one election); no TLS or auth on the Raft
-  port (bind it to a private network); leader-only reads; the TypeScript and
+  port (bind it to a private network; mutual TLS was added later as `--raft-tls-*`); leader-only reads; the TypeScript and
   Python SDKs don't follow leader hints yet; production stays single-node.
 
 ## Alternatives considered

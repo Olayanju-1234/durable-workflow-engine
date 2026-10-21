@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,7 +38,6 @@ func main() {
 		addr        = flag.String("addr", ":7233", "gRPC listen address (serve mode)")
 		metricsAddr = flag.String("metrics-addr", ":9090", "HTTP listen address for /metrics (serve mode; empty disables)")
 		httpAddr    = flag.String("http-addr", ":8233", "HTTP listen address for the dashboard + JSON API (serve mode; empty disables)")
-		authToken   = flag.String("auth-token", "", "require this bearer token on mutating /api routes (empty disables auth)")
 		demoWorker  = flag.Bool("demo-worker", false, "run an in-process worker for the built-in demo activities (reserve, charge, ship, release)")
 		retention   = flag.Duration("retention", 0, "delete finished workflows this long after their last event, e.g. 168h (0 keeps them forever)")
 
@@ -47,6 +47,7 @@ func main() {
 		raftAddr = flag.String("raft-addr", "", "listen address for Raft peer traffic (cluster mode; default: this node's address in --peers)")
 		raftTick = flag.Duration("raft-tick", raft.DefaultTickInterval, "Raft tick: leaders heartbeat every tick, followers start an election after 10–20 silent ticks (cluster mode)")
 	)
+	secFlags := registerSecurityFlags(flag.CommandLine)
 	flag.Parse()
 
 	if *showVersion {
@@ -59,6 +60,14 @@ func main() {
 	clusterCfg, clustered, err := parseClusterFlags(*nodeID, *peers, *raftAddr, *raftTick)
 	if err != nil {
 		logger.Error("invalid cluster flags", "err", err)
+		os.Exit(2)
+	}
+	sec, err := secFlags.resolve(logger)
+	if err == nil && sec.peerTLS != nil && !clustered {
+		err = errors.New("--raft-tls-* need cluster mode (--peers)")
+	}
+	if err != nil {
+		logger.Error("invalid auth/TLS flags", "err", err)
 		os.Exit(2)
 	}
 
@@ -81,7 +90,7 @@ func main() {
 	if *serve {
 		cfg := serveConfig{
 			addr: *addr, metricsAddr: *metricsAddr, httpAddr: *httpAddr,
-			authToken: *authToken, demoWorker: *demoWorker, retention: *retention,
+			sec: sec, demoWorker: *demoWorker, retention: *retention,
 		}
 		if clustered {
 			if err := runCluster(logger, store, *dataDir, cfg, clusterCfg); err != nil {
@@ -107,9 +116,10 @@ const shutdownGracePeriod = 10 * time.Second
 
 // serveConfig is the --serve flag set.
 type serveConfig struct {
-	addr, metricsAddr, httpAddr, authToken string
-	demoWorker                             bool
-	retention                              time.Duration
+	addr, metricsAddr, httpAddr string
+	sec                         security
+	demoWorker                  bool
+	retention                   time.Duration
 }
 
 // demoWorkerConcurrency is how many demo activities run at once.
@@ -148,27 +158,24 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 	// scraped by Prometheus and is usually kept on an internal-only port. Either
 	// can be disabled with an empty address.
 	var httpSrvs []*http.Server
+	cfg.sec.logPosture(logger, cfg.httpAddr != "")
 
 	if cfg.httpAddr != "" {
-		opts := []server.HTTPOption{server.WithAuthToken(cfg.authToken)}
+		opts := cfg.sec.httpOptions()
 		if cfg.demoWorker {
 			opts = append(opts, server.WithDemoWorker())
 		}
 		api := server.NewHTTPAPI(engine, logger, opts...)
 		mux := api.Handler()
 		mux.Handle("/", web.Handler()) // embedded dashboard; API routes win by specificity
-		if cfg.authToken == "" {
-			logger.Warn("API auth is disabled; anyone who can reach the HTTP port can start, signal and terminate workflows",
-				"hint", "pass --auth-token to require a bearer token")
-		}
-		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.httpAddr, api.Wrap(mux), "dashboard", logger))
-		logger.Info("dashboard listening", "addr", cfg.httpAddr, "url", browseURL(cfg.httpAddr))
+		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.httpAddr, api.Wrap(mux), "dashboard", cfg.sec.tls, logger))
+		logger.Info("dashboard listening", "addr", cfg.httpAddr, "url", browseURL(cfg.httpAddr, cfg.sec.tls != nil))
 	}
 
 	if cfg.metricsAddr != "" {
 		mux := http.NewServeMux()
-		mux.Handle("/metrics", engine.Metrics().Handler())
-		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.metricsAddr, mux, "metrics", logger))
+		mux.Handle("/metrics", cfg.sec.metricsHandler(engine.Metrics().Handler()))
+		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.metricsAddr, mux, "metrics", cfg.sec.tls, logger))
 		logger.Info("metrics endpoint listening", "addr", cfg.metricsAddr, "path", "/metrics")
 	}
 
@@ -177,7 +184,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 		return fmt.Errorf("listen %s: %w", cfg.addr, err)
 	}
 
-	gs := grpc.NewServer()
+	gs := grpc.NewServer(cfg.sec.grpcServerOptions()...)
 	server.RegisterWorkflowServiceServer(gs, server.NewGRPCServer(engine, logger))
 
 	go func() {
@@ -239,18 +246,23 @@ func drainServers(logger *slog.Logger, httpSrvs []*http.Server, gs *grpc.Server)
 
 // startHTTP runs an HTTP server in the background, logging (but not fatally
 // failing on) a listen error — a busy dashboard port must not take down an
-// otherwise healthy engine.
-func startHTTP(ctx context.Context, addr string, handler http.Handler, name string, logger *slog.Logger) *http.Server {
+// otherwise healthy engine. A non-nil tlsCfg serves HTTPS.
+func startHTTP(ctx context.Context, addr string, handler http.Handler, name string, tlsCfg *tls.Config, logger *slog.Logger) *http.Server {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           handler,
+		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second, // basic slowloris guard
 		// Request contexts end on SIGTERM, so SDK long-polls return at once
 		// instead of holding Shutdown open for up to the 25 s poll window.
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		serve := srv.ListenAndServe
+		if tlsCfg != nil {
+			serve = func() error { return srv.ListenAndServeTLS("", "") }
+		}
+		if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server stopped", "server", name, "addr", addr, "err", err)
 		}
 	}()
@@ -259,15 +271,19 @@ func startHTTP(ctx context.Context, addr string, handler http.Handler, name stri
 
 // browseURL turns a listen address into a URL a person can open: ":8233" and
 // "0.0.0.0:8233" become localhost, while an explicit host is kept as-is.
-func browseURL(addr string) string {
+func browseURL(addr string, https bool) string {
+	scheme := "http://"
+	if https {
+		scheme = "https://"
+	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "http://" + addr
+		return scheme + addr
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "localhost"
 	}
-	return "http://" + net.JoinHostPort(host, port)
+	return scheme + net.JoinHostPort(host, port)
 }
 
 // registerDemoTypes registers the built-in example workflows every node runs.
