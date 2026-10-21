@@ -95,7 +95,17 @@ none of this runs. The Raft implementation in `internal/raft` has three layers:
 Elections use randomized timeouts (1–2 s by default), one durable vote per term,
 the paper's up-to-date log check, CheckQuorum (a leader that can't hear a
 majority steps down) and §6 vote suppression. Durable Raft state lives in
-`<data-dir>/raft/`, framed like the histories (`internal/record`).
+`<data-dir>/raft/` (`hardstate`, `log`), framed like the histories
+(`internal/record`).
+
+Replication: the leader appends proposals to its log and sends each follower
+what it is missing in `AppendEntries`, guarded by the prevLogIndex/prevLogTerm
+check (followers truncate only at a real conflict). An entry commits once a
+majority holds it on disk, counting only entries from the leader's own term; a
+new leader therefore opens its term with an empty entry. Each node's `Node`
+persists (hard state, then entries) before sending, and applies committed
+entries on a separate goroutine. `Node.Propose(ctx, term, data)` is fenced by
+term and returns the state machine's result once the entry is applied locally.
 
 ## Determinism (Phase 2+)
 
