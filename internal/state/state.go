@@ -129,173 +129,217 @@ func (s *State) Tail() *Step {
 // events after a terminal one). A durable engine must refuse to trust a corrupt
 // history rather than reconstruct a plausible-but-wrong state.
 func Reconstruct(events []*history.HistoryEvent) (*State, error) {
-	st := &State{Status: StatusNotStarted}
-	openIdx := -1       // index in st.Steps of the in-flight step, or -1
-	lastSeq := int64(0) // highest sequence scheduled so far
-
-	for i, ev := range events {
-		if st.Status.IsTerminal() {
-			return nil, fmt.Errorf("state: event %d (id %d) follows a terminal event", i, ev.GetEventId())
+	f := NewFolder()
+	for _, ev := range events {
+		if err := f.Apply(ev); err != nil {
+			return nil, err
 		}
-		st.LastEventID = ev.GetEventId()
+	}
+	return f.State(), nil
+}
 
-		switch attr := ev.GetAttributes().(type) {
-		case *history.HistoryEvent_WorkflowStarted:
-			if i != 0 {
-				return nil, fmt.Errorf("state: WorkflowStarted at position %d, must be first event", i)
-			}
-			ws := attr.WorkflowStarted
-			st.Status = StatusRunning
-			st.WorkflowType = ws.GetWorkflowType()
-			st.Input = ws.GetInput()
+// Folder is Reconstruct one event at a time, so a caller that keeps a
+// workflow's state in memory folds each new event in instead of replaying the
+// whole history. After an error it is poisoned: the history is invalid.
+type Folder struct {
+	st      State
+	openIdx int   // index in st.Steps of the in-flight step, or -1
+	lastSeq int64 // highest sequence scheduled so far
+	n       int   // events applied
+	err     error
+}
 
-		case *history.HistoryEvent_StepScheduled:
-			ss := attr.StepScheduled
-			if st.Status == StatusNotStarted {
-				return nil, fmt.Errorf("state: StepScheduled at position %d before WorkflowStarted", i)
-			}
-			if openIdx != -1 {
-				return nil, fmt.Errorf("state: StepScheduled %q at position %d while step %q is still in flight",
-					ss.GetStepName(), i, st.Steps[openIdx].Name)
-			}
-			seq := ss.GetSequence()
-			// Retry: re-scheduling the same sequence after a failure re-opens that step
-			// (another attempt) rather than starting a new one. Attempts tracks the count.
-			if n := len(st.Steps); n > 0 {
-				last := &st.Steps[n-1]
-				if seq == last.Sequence && last.Status == StepFailed && last.Kind == KindActivity && last.Name == ss.GetStepName() {
-					last.Status = StepScheduled
-					last.Error = ""
-					last.Input = ss.GetInput()
-					last.Attempts++
-					if p := RetryPolicyFromProto(ss.GetRetryPolicy()); p != nil {
-						last.Retry = p
-					}
-					openIdx = n - 1
-					break
+// NewFolder starts from an empty history.
+func NewFolder() *Folder {
+	return &Folder{st: State{Status: StatusNotStarted}, openIdx: -1}
+}
+
+// State is the state after every event applied so far. It is updated in
+// place by later Applies.
+func (f *Folder) State() *State { return &f.st }
+
+// Err is the error that poisoned the folder, if any.
+func (f *Folder) Err() error { return f.err }
+
+// Apply folds one more event into the state.
+func (f *Folder) Apply(ev *history.HistoryEvent) error {
+	if f.err != nil {
+		return f.err
+	}
+	if err := f.apply(ev); err != nil {
+		f.err = err
+		return err
+	}
+	f.n++
+	return nil
+}
+
+func (f *Folder) apply(ev *history.HistoryEvent) error {
+	st, i := &f.st, f.n
+	openIdx, lastSeq := f.openIdx, f.lastSeq
+	defer func() { f.openIdx, f.lastSeq = openIdx, lastSeq }()
+
+	if st.Status.IsTerminal() {
+		return fmt.Errorf("state: event %d (id %d) follows a terminal event", i, ev.GetEventId())
+	}
+	st.LastEventID = ev.GetEventId()
+
+	switch attr := ev.GetAttributes().(type) {
+	case *history.HistoryEvent_WorkflowStarted:
+		if i != 0 {
+			return fmt.Errorf("state: WorkflowStarted at position %d, must be first event", i)
+		}
+		ws := attr.WorkflowStarted
+		st.Status = StatusRunning
+		st.WorkflowType = ws.GetWorkflowType()
+		st.Input = ws.GetInput()
+
+	case *history.HistoryEvent_StepScheduled:
+		ss := attr.StepScheduled
+		if st.Status == StatusNotStarted {
+			return fmt.Errorf("state: StepScheduled at position %d before WorkflowStarted", i)
+		}
+		if openIdx != -1 {
+			return fmt.Errorf("state: StepScheduled %q at position %d while step %q is still in flight",
+				ss.GetStepName(), i, st.Steps[openIdx].Name)
+		}
+		seq := ss.GetSequence()
+		// Retry: re-scheduling the same sequence after a failure re-opens that step
+		// (another attempt) rather than starting a new one. Attempts tracks the count.
+		if n := len(st.Steps); n > 0 {
+			last := &st.Steps[n-1]
+			if seq == last.Sequence && last.Status == StepFailed && last.Kind == KindActivity && last.Name == ss.GetStepName() {
+				last.Status = StepScheduled
+				last.Error = ""
+				last.Input = ss.GetInput()
+				last.Attempts++
+				if p := RetryPolicyFromProto(ss.GetRetryPolicy()); p != nil {
+					last.Retry = p
 				}
+				openIdx = n - 1
+				break
 			}
-			if seq != lastSeq+1 {
-				return nil, fmt.Errorf("state: StepScheduled at position %d has sequence %d, want %d", i, seq, lastSeq+1)
-			}
-			// A StepScheduled opens either an activity (has a worker task) or a signal
-			// wait (no task); the awaits_signal flag distinguishes them from history.
-			kind := KindActivity
-			if ss.GetAwaitsSignal() {
-				kind = KindSignal
-			}
-			st.Steps = append(st.Steps, Step{
-				Name:     ss.GetStepName(),
-				Sequence: seq,
-				Kind:     kind,
-				Status:   StepScheduled,
-				Input:    ss.GetInput(),
-				Signal:   ss.GetSignalName(),
-				Attempts: 1,
-				Retry:    RetryPolicyFromProto(ss.GetRetryPolicy()),
-			})
-			openIdx = len(st.Steps) - 1
-			lastSeq = seq
-
-		case *history.HistoryEvent_TimerStarted:
-			ts := attr.TimerStarted
-			if st.Status == StatusNotStarted {
-				return nil, fmt.Errorf("state: TimerStarted at position %d before WorkflowStarted", i)
-			}
-			if openIdx != -1 {
-				return nil, fmt.Errorf("state: TimerStarted %q at position %d while step %q is still in flight",
-					ts.GetStepName(), i, st.Steps[openIdx].Name)
-			}
-			seq := ts.GetSequence()
-			if seq != lastSeq+1 {
-				return nil, fmt.Errorf("state: TimerStarted at position %d has sequence %d, want %d", i, seq, lastSeq+1)
-			}
-			st.Steps = append(st.Steps, Step{
-				Name:     ts.GetStepName(),
-				Sequence: seq,
-				Kind:     KindTimer,
-				Status:   StepScheduled,
-				Input:    ts.GetInput(),
-				FireAt:   ts.GetFireAt(),
-			})
-			openIdx = len(st.Steps) - 1
-			lastSeq = seq
-
-		case *history.HistoryEvent_MarkerRecorded:
-			mr := attr.MarkerRecorded
-			if st.Status == StatusNotStarted {
-				return nil, fmt.Errorf("state: MarkerRecorded at position %d before WorkflowStarted", i)
-			}
-			if openIdx != -1 {
-				return nil, fmt.Errorf("state: MarkerRecorded %q at position %d while step %q is still in flight",
-					mr.GetStepName(), i, st.Steps[openIdx].Name)
-			}
-			if seq := mr.GetSequence(); seq != lastSeq+1 {
-				return nil, fmt.Errorf("state: MarkerRecorded at position %d has sequence %d, want %d", i, seq, lastSeq+1)
-			}
-			st.Steps = append(st.Steps, Step{
-				Name:     mr.GetStepName(),
-				Sequence: mr.GetSequence(),
-				Kind:     KindMarker,
-				Status:   StepCompleted,
-				Output:   mr.GetData(),
-				Marker:   mr.GetMarker(),
-			})
-			lastSeq = mr.GetSequence()
-
-		case *history.HistoryEvent_StepCompleted:
-			if err := checkOpenStep(st, openIdx, i, attr.StepCompleted.GetStepName(), attr.StepCompleted.GetSequence()); err != nil {
-				return nil, err
-			}
-			st.Steps[openIdx].Status = StepCompleted
-			st.Steps[openIdx].Output = attr.StepCompleted.GetOutput()
-			openIdx = -1
-
-		case *history.HistoryEvent_TimerFired:
-			tf := attr.TimerFired
-			if err := checkOpenStep(st, openIdx, i, tf.GetStepName(), tf.GetSequence()); err != nil {
-				return nil, err
-			}
-			// A sleep produces no new data: its output is its input, so the pipeline
-			// continues past the timer with the value that flowed into it.
-			st.Steps[openIdx].Status = StepCompleted
-			st.Steps[openIdx].Output = st.Steps[openIdx].Input
-			openIdx = -1
-
-		case *history.HistoryEvent_SignalReceived:
-			if st.Status == StatusNotStarted {
-				return nil, fmt.Errorf("state: SignalReceived at position %d before WorkflowStarted", i)
-			}
-			sr := attr.SignalReceived
-			st.Signals = append(st.Signals, ReceivedSignal{Name: sr.GetSignalName(), Payload: sr.GetPayload()})
-
-		case *history.HistoryEvent_StepFailed:
-			if err := checkOpenStep(st, openIdx, i, attr.StepFailed.GetStepName(), attr.StepFailed.GetSequence()); err != nil {
-				return nil, err
-			}
-			st.Steps[openIdx].Status = StepFailed
-			st.Steps[openIdx].Error = attr.StepFailed.GetError()
-			openIdx = -1
-
-		case *history.HistoryEvent_WorkflowCompleted:
-			if openIdx != -1 {
-				return nil, fmt.Errorf("state: WorkflowCompleted at position %d while step %q is still in flight", i, st.Steps[openIdx].Name)
-			}
-			st.Status = StatusCompleted
-			st.Output = attr.WorkflowCompleted.GetOutput()
-
-		case *history.HistoryEvent_WorkflowFailed:
-			// Deliberately asymmetric with WorkflowCompleted above: a failure is
-			// allowed while a step is still in flight, because timeouts and (Phase 3)
-			// cancellation fail a workflow whose step never reported a result. The
-			// open step simply stays SCHEDULED.
-			st.Status = StatusFailed
-			st.Error = attr.WorkflowFailed.GetError()
-			st.Terminated = attr.WorkflowFailed.GetTerminated()
-
-		default:
-			return nil, fmt.Errorf("state: event %d has unknown or empty attributes", i)
 		}
+		if seq != lastSeq+1 {
+			return fmt.Errorf("state: StepScheduled at position %d has sequence %d, want %d", i, seq, lastSeq+1)
+		}
+		// A StepScheduled opens either an activity (has a worker task) or a signal
+		// wait (no task); the awaits_signal flag distinguishes them from history.
+		kind := KindActivity
+		if ss.GetAwaitsSignal() {
+			kind = KindSignal
+		}
+		st.Steps = append(st.Steps, Step{
+			Name:     ss.GetStepName(),
+			Sequence: seq,
+			Kind:     kind,
+			Status:   StepScheduled,
+			Input:    ss.GetInput(),
+			Signal:   ss.GetSignalName(),
+			Attempts: 1,
+			Retry:    RetryPolicyFromProto(ss.GetRetryPolicy()),
+		})
+		openIdx = len(st.Steps) - 1
+		lastSeq = seq
+
+	case *history.HistoryEvent_TimerStarted:
+		ts := attr.TimerStarted
+		if st.Status == StatusNotStarted {
+			return fmt.Errorf("state: TimerStarted at position %d before WorkflowStarted", i)
+		}
+		if openIdx != -1 {
+			return fmt.Errorf("state: TimerStarted %q at position %d while step %q is still in flight",
+				ts.GetStepName(), i, st.Steps[openIdx].Name)
+		}
+		seq := ts.GetSequence()
+		if seq != lastSeq+1 {
+			return fmt.Errorf("state: TimerStarted at position %d has sequence %d, want %d", i, seq, lastSeq+1)
+		}
+		st.Steps = append(st.Steps, Step{
+			Name:     ts.GetStepName(),
+			Sequence: seq,
+			Kind:     KindTimer,
+			Status:   StepScheduled,
+			Input:    ts.GetInput(),
+			FireAt:   ts.GetFireAt(),
+		})
+		openIdx = len(st.Steps) - 1
+		lastSeq = seq
+
+	case *history.HistoryEvent_MarkerRecorded:
+		mr := attr.MarkerRecorded
+		if st.Status == StatusNotStarted {
+			return fmt.Errorf("state: MarkerRecorded at position %d before WorkflowStarted", i)
+		}
+		if openIdx != -1 {
+			return fmt.Errorf("state: MarkerRecorded %q at position %d while step %q is still in flight",
+				mr.GetStepName(), i, st.Steps[openIdx].Name)
+		}
+		if seq := mr.GetSequence(); seq != lastSeq+1 {
+			return fmt.Errorf("state: MarkerRecorded at position %d has sequence %d, want %d", i, seq, lastSeq+1)
+		}
+		st.Steps = append(st.Steps, Step{
+			Name:     mr.GetStepName(),
+			Sequence: mr.GetSequence(),
+			Kind:     KindMarker,
+			Status:   StepCompleted,
+			Output:   mr.GetData(),
+			Marker:   mr.GetMarker(),
+		})
+		lastSeq = mr.GetSequence()
+
+	case *history.HistoryEvent_StepCompleted:
+		if err := checkOpenStep(st, openIdx, i, attr.StepCompleted.GetStepName(), attr.StepCompleted.GetSequence()); err != nil {
+			return err
+		}
+		st.Steps[openIdx].Status = StepCompleted
+		st.Steps[openIdx].Output = attr.StepCompleted.GetOutput()
+		openIdx = -1
+
+	case *history.HistoryEvent_TimerFired:
+		tf := attr.TimerFired
+		if err := checkOpenStep(st, openIdx, i, tf.GetStepName(), tf.GetSequence()); err != nil {
+			return err
+		}
+		// A sleep produces no new data: its output is its input, so the pipeline
+		// continues past the timer with the value that flowed into it.
+		st.Steps[openIdx].Status = StepCompleted
+		st.Steps[openIdx].Output = st.Steps[openIdx].Input
+		openIdx = -1
+
+	case *history.HistoryEvent_SignalReceived:
+		if st.Status == StatusNotStarted {
+			return fmt.Errorf("state: SignalReceived at position %d before WorkflowStarted", i)
+		}
+		sr := attr.SignalReceived
+		st.Signals = append(st.Signals, ReceivedSignal{Name: sr.GetSignalName(), Payload: sr.GetPayload()})
+
+	case *history.HistoryEvent_StepFailed:
+		if err := checkOpenStep(st, openIdx, i, attr.StepFailed.GetStepName(), attr.StepFailed.GetSequence()); err != nil {
+			return err
+		}
+		st.Steps[openIdx].Status = StepFailed
+		st.Steps[openIdx].Error = attr.StepFailed.GetError()
+		openIdx = -1
+
+	case *history.HistoryEvent_WorkflowCompleted:
+		if openIdx != -1 {
+			return fmt.Errorf("state: WorkflowCompleted at position %d while step %q is still in flight", i, st.Steps[openIdx].Name)
+		}
+		st.Status = StatusCompleted
+		st.Output = attr.WorkflowCompleted.GetOutput()
+
+	case *history.HistoryEvent_WorkflowFailed:
+		// Deliberately asymmetric with WorkflowCompleted above: a failure is
+		// allowed while a step is still in flight, because timeouts and (Phase 3)
+		// cancellation fail a workflow whose step never reported a result. The
+		// open step simply stays SCHEDULED.
+		st.Status = StatusFailed
+		st.Error = attr.WorkflowFailed.GetError()
+		st.Terminated = attr.WorkflowFailed.GetTerminated()
+
+	default:
+		return fmt.Errorf("state: event %d has unknown or empty attributes", i)
 	}
 
 	// No terminal event: the status is decided by whether a step is in flight.
@@ -306,7 +350,7 @@ func Reconstruct(events []*history.HistoryEvent) (*State, error) {
 			st.Status = StatusRunning
 		}
 	}
-	return st, nil
+	return nil
 }
 
 // checkOpenStep validates that a step result (completion/failure) refers to the

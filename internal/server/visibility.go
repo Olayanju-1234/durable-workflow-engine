@@ -61,16 +61,17 @@ func (e *Engine) ListWorkflows(filter WorkflowStatus) ([]*WorkflowSummary, error
 // GetWorkflow returns one workflow in full reconstructed detail: its summary
 // plus every step as replay sees it. Unknown ids return ErrNotFound.
 func (e *Engine) GetWorkflow(workflowID string) (*GetWorkflowResponse, error) {
-	events, err := e.store.ReadAll(workflowID)
+	if err := validateID(workflowID); err != nil {
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, workflowID)
+	}
+	w := e.lockWorkflow(workflowID)
+	defer e.unlockWorkflow(w)
+	events, st, err := e.historyLocked(w)
 	if err != nil {
-		return nil, fmt.Errorf("server: read history %s: %w", workflowID, err)
+		return nil, err
 	}
 	if len(events) == 0 {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, workflowID)
-	}
-	st, err := state.Reconstruct(events)
-	if err != nil {
-		return nil, fmt.Errorf("server: reconstruct %s: %w", workflowID, err)
 	}
 
 	steps := make([]*StepInfo, 0, len(st.Steps))
@@ -104,19 +105,18 @@ func (e *Engine) GetWorkflow(workflowID string) (*GetWorkflowResponse, error) {
 // harmless: every timer callback re-checks history and no-ops on a terminal
 // workflow.
 func (e *Engine) TerminateWorkflow(workflowID, reason string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	if err := validateID(workflowID); err != nil {
+		return fmt.Errorf("%w: %q", ErrNotFound, workflowID)
+	}
+	w := e.lockWorkflow(workflowID)
+	defer e.unlockWorkflow(w)
 
-	events, err := e.store.ReadAll(workflowID)
+	events, st, err := e.historyLocked(w)
 	if err != nil {
-		return fmt.Errorf("server: read history %s: %w", workflowID, err)
+		return err
 	}
 	if len(events) == 0 {
 		return fmt.Errorf("%w: %q", ErrNotFound, workflowID)
-	}
-	st, err := state.Reconstruct(events)
-	if err != nil {
-		return fmt.Errorf("server: reconstruct %s: %w", workflowID, err)
 	}
 	if st.Status.IsTerminal() {
 		return fmt.Errorf("%w: %q is %s", ErrAlreadyTerminal, workflowID, st.Status)
@@ -129,10 +129,10 @@ func (e *Engine) TerminateWorkflow(workflowID, reason string) error {
 	failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowFailed{
 		WorkflowFailed: &history.WorkflowFailedEvent{Error: msg, Terminated: true},
 	}}
-	if err := e.appendLocked(workflowID, failedEv, int64(len(events)+1)); err != nil {
+	if err := e.appendLocked(w, failedEv, int64(len(events)+1)); err != nil {
 		return err
 	}
-	delete(e.leases, workflowID)
+	e.dropLease(workflowID)
 	e.metrics.workflowsFinished.With("terminated").Inc()
 	e.metrics.workflowsActive.Dec()
 	e.log.Warn("workflow terminated", "workflow_id", workflowID, "reason", reason)

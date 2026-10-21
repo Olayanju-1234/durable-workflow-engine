@@ -81,70 +81,82 @@ func dropWorkflow(q *workflowTaskQueue, workflowID string) {
 // decision: the engine may have restarted while no SDK worker was connected, in
 // which case recovery skipped those workflows as "unregistered type".
 func (e *Engine) RegisterWorkflowTypes(workflowTypes []string, workerID, sdk string) error {
+	var added []string
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	for _, wt := range workflowTypes {
 		if wt == "" {
+			e.mu.Unlock()
 			return fmt.Errorf("server: empty workflow type in registration from %q", workerID)
 		}
 		if existing, ok := e.planners[wt]; ok {
 			// An in-process Go workflow already owns this type. Refuse rather
 			// than silently letting a remote SDK shadow compiled-in code.
 			if _, isRemote := existing.(*remotePlanner); !isRemote {
+				e.mu.Unlock()
 				return fmt.Errorf("server: workflow type %q is already registered in-process", wt)
 			}
 			continue
 		}
 		e.planners[wt] = &remotePlanner{workflowType: wt}
+		added = append(added, wt)
 		e.log.Info("workflow type registered", "type", wt, "worker_id", workerID, "sdk", sdk)
 	}
+	e.mu.Unlock()
 
-	// Pick up anything that was stranded while this type had no runner.
-	for _, wt := range workflowTypes {
-		if err := e.resumeTypeLocked(wt); err != nil {
+	// Pick up anything that was stranded while this type had no runner. A
+	// type already registered has nothing stranded: its decisions dispatch.
+	for _, wt := range added {
+		if err := e.resumeType(wt); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// resumeTypeLocked advances every non-terminal workflow of a type that is
-// waiting on a decision. The caller must hold e.mu.
-func (e *Engine) resumeTypeLocked(workflowType string) error {
+// resumeType advances every non-terminal workflow of a type that is waiting
+// on a decision.
+func (e *Engine) resumeType(workflowType string) error {
 	ids, err := e.store.ListWorkflows()
 	if err != nil {
 		return fmt.Errorf("server: list workflows to resume %s: %w", workflowType, err)
 	}
-	planner := e.planners[workflowType]
+	planner, _ := e.planner(workflowType)
 	for _, id := range ids {
-		events, err := e.store.ReadAll(id)
+		w := e.lockWorkflow(id)
+		resumed, err := e.resumeLocked(w, workflowType, planner)
+		e.unlockWorkflow(w)
 		if err != nil {
-			return fmt.Errorf("server: resume read %s: %w", id, err)
-		}
-		st, err := state.Reconstruct(events)
-		if err != nil {
-			// A corrupt log must not block registration of healthy workflows.
-			e.log.Error("resume: skipping unreadable workflow", "workflow_id", id, "err", err)
-			continue
-		}
-		if st.WorkflowType != workflowType || st.Status != state.StatusRunning {
-			continue // wrong type, terminal, or already waiting on a step
-		}
-		if err := e.advanceLocked(id, planner); err != nil {
 			return err
 		}
-		e.log.Info("resumed workflow after SDK registration", "workflow_id", id, "type", workflowType)
+		if resumed {
+			e.log.Info("resumed workflow after SDK registration", "workflow_id", id, "type", workflowType)
+		}
 	}
 	return nil
+}
+
+func (e *Engine) resumeLocked(w *wfState, workflowType string, planner Planner) (bool, error) {
+	_, st, err := e.historyLocked(w)
+	if err != nil {
+		// A corrupt log must not block registration of healthy workflows.
+		e.log.Error("resume: skipping unreadable workflow", "workflow_id", w.id, "err", err)
+		return false, nil
+	}
+	if st.WorkflowType != workflowType || st.Status != state.StatusRunning {
+		return false, nil // wrong type, terminal, or already waiting on a step
+	}
+	return true, e.advanceLocked(w, planner)
 }
 
 // dispatchWorkflowTaskLocked hands a workflow's history to an SDK worker for a
 // decision. It is idempotent per (workflow, history length): if a task for this
 // exact position is already outstanding, it is not duplicated. The caller must
-// hold e.mu.
-func (e *Engine) dispatchWorkflowTaskLocked(workflowID, workflowType string, events []*history.HistoryEvent) error {
+// hold w.mu.
+func (e *Engine) dispatchWorkflowTaskLocked(w *wfState, workflowType string, events []*history.HistoryEvent) error {
+	workflowID := w.id
 	historyLength := int64(len(events))
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if p, ok := e.pendingDecisions[workflowID]; ok && p.historyLength == historyLength {
 		return nil // already being decided at this position
 	}
@@ -182,29 +194,31 @@ func (e *Engine) dispatchWorkflowTaskLocked(workflowID, workflowType string, eve
 // and the history-length fence means a late answer from the original worker is
 // rejected rather than applied twice.
 func (e *Engine) onDecisionTimeout(tm timer.Timer) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	w := e.lockWorkflow(tm.WorkflowID)
+	defer e.unlockWorkflow(w)
 
+	e.mu.Lock()
 	p, ok := e.pendingDecisions[tm.WorkflowID]
+	e.mu.Unlock()
 	if !ok || p.historyLength != tm.Sequence {
 		return // answered, or superseded by a newer position
 	}
-	events, err := e.store.ReadAll(tm.WorkflowID)
-	if err != nil {
+	events, st, err := e.historyLocked(w)
+	if err != nil && events == nil {
 		e.log.Error("decision timeout: read history", "workflow_id", tm.WorkflowID, "err", err)
 		e.rearmCallback(e.decisionTimers, tm)
 		return
 	}
-	st, err := state.Reconstruct(events)
+	e.mu.Lock()
+	delete(e.pendingDecisions, tm.WorkflowID) // force a fresh dispatch below
+	e.mu.Unlock()
 	if err != nil || st.Status != state.StatusRunning {
-		delete(e.pendingDecisions, tm.WorkflowID)
 		return // moved on; nothing to decide
 	}
-	delete(e.pendingDecisions, tm.WorkflowID) // force a fresh dispatch below
 	e.metrics.workflowTaskTimeouts.Inc()
 	e.log.Warn("workflow task timed out; re-dispatching",
 		"workflow_id", tm.WorkflowID, "history_length", tm.Sequence)
-	if err := e.dispatchWorkflowTaskLocked(tm.WorkflowID, st.WorkflowType, events); err != nil {
+	if err := e.dispatchWorkflowTaskLocked(w, st.WorkflowType, events); err != nil {
 		e.log.Error("decision timeout: re-dispatch", "workflow_id", tm.WorkflowID, "err", err)
 	}
 }
@@ -234,10 +248,15 @@ func (e *Engine) PollWorkflowTask(ctx context.Context, workerID string, workflow
 // cannot replay its own history will never succeed on a retry, so looping would
 // be worse than surfacing it.
 func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *WorkflowCommand, replayError string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	if err := validateID(workflowID); err != nil {
+		return err
+	}
+	w := e.lockWorkflow(workflowID)
+	defer e.unlockWorkflow(w)
 
+	e.mu.Lock()
 	pending, ok := e.pendingDecisions[workflowID]
+	e.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("%w: no workflow task outstanding for %q (it was already answered, or the engine restarted)", ErrStaleDecision, workflowID)
 	}
@@ -245,20 +264,20 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 		return fmt.Errorf("%w: workflow task for %q was re-dispatched to another worker", ErrStaleDecision, workflowID)
 	}
 
-	events, err := e.store.ReadAll(workflowID)
+	events, st, err := e.historyLocked(w)
 	if err != nil {
-		return fmt.Errorf("server: read history %s: %w", workflowID, err)
+		return err
 	}
 	// The fence: the decision was computed from a snapshot of history. If a
 	// signal landed since, the command may be based on a stale view, so reject
 	// it. A signal that satisfies no wait dispatches nothing, so if the
 	// workflow still needs a decision, hand out a fresh task here.
 	if int64(len(events)) != pending.historyLength {
-		delete(e.pendingDecisions, workflowID)
+		e.dropDecision(workflowID)
 		stale := fmt.Errorf("%w: history for %q advanced from %d to %d events while the task was outstanding",
 			ErrStaleDecision, workflowID, pending.historyLength, len(events))
-		if st, err := state.Reconstruct(events); err == nil && st.Status == state.StatusRunning {
-			if err := e.dispatchWorkflowTaskLocked(workflowID, st.WorkflowType, events); err != nil {
+		if st.Status == state.StatusRunning {
+			if err := e.dispatchWorkflowTaskLocked(w, st.WorkflowType, events); err != nil {
 				return errors.Join(stale, err)
 			}
 		}
@@ -266,11 +285,11 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 	}
 
 	if replayError != "" {
-		delete(e.pendingDecisions, workflowID)
+		e.dropDecision(workflowID)
 		dropWorkflow(e.workflowQueue, workflowID)
 		e.metrics.workflowTaskReplayErrors.Inc()
 		e.log.Error("sdk replay failed", "workflow_id", workflowID, "err", replayError)
-		return e.applyDecisionLocked(workflowID, state.Decision{
+		return e.applyDecisionLocked(w, state.Decision{
 			Type:  state.DecideFailWorkflow,
 			Error: "workflow replay failed in SDK: " + replayError,
 		}, int64(len(events)+1))
@@ -285,17 +304,24 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 	if err != nil {
 		return err
 	}
-	if err := validateDecision(events, decision); err != nil {
+	if err := validateDecision(st, decision); err != nil {
 		return err
 	}
 
-	delete(e.pendingDecisions, workflowID)
+	e.dropDecision(workflowID)
 	dropWorkflow(e.workflowQueue, workflowID)
 	if decision.Type == state.DecideNoop {
 		return nil // SDK says the workflow is blocked; nothing to record
 	}
 	e.metrics.workflowTasksCompleted.Inc()
-	return e.applyDecisionLocked(workflowID, decision, int64(len(events)+1))
+	return e.applyDecisionLocked(w, decision, int64(len(events)+1))
+}
+
+// dropDecision forgets the workflow's outstanding decision.
+func (e *Engine) dropDecision(workflowID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.pendingDecisions, workflowID)
 }
 
 // decisionFromCommand translates the wire command into the engine's internal
@@ -389,14 +415,10 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 // engine must never trust an SDK to number its own steps correctly: a bad
 // sequence would produce a history that Reconstruct later refuses to read,
 // turning a client bug into an unreadable workflow.
-func validateDecision(events []*history.HistoryEvent, d state.Decision) error {
+func validateDecision(st *state.State, d state.Decision) error {
 	switch d.Type {
 	case state.DecideCompleteWorkflow, state.DecideFailWorkflow, state.DecideNoop:
 		return nil // terminal commands carry no step; noop carries nothing at all
-	}
-	st, err := state.Reconstruct(events)
-	if err != nil {
-		return fmt.Errorf("server: reconstruct before applying command: %w", err)
 	}
 	if want := int64(len(st.Steps) + 1); d.Sequence != want {
 		return fmt.Errorf("%w: command has sequence %d, expected %d — the SDK's replay is out of step with history",

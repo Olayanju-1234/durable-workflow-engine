@@ -31,6 +31,8 @@ func (e *Engine) retryPolicy(step *state.Step) RetryPolicy {
 	if step.Retry != nil {
 		return *step.Retry
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if p, ok := e.policies[step.Name]; ok {
 		return p
 	}
@@ -39,7 +41,7 @@ func (e *Engine) retryPolicy(step *state.Step) RetryPolicy {
 
 // scheduleRetryLocked arms a backoff timer to re-run a failed activity. The failure
 // is already recorded; when the timer fires, onRetryDue re-schedules the same step
-// sequence (another attempt). The caller must hold e.mu. A zero delay fires promptly
+// sequence (another attempt). A zero delay fires promptly
 // (used on recovery, where the original backoff window is lost).
 func (e *Engine) scheduleRetryLocked(workflowID string, step *state.Step, delay time.Duration) {
 	e.retryTimers.Add(timer.Timer{
@@ -54,18 +56,15 @@ func (e *Engine) scheduleRetryLocked(workflowID string, step *state.Step, delay 
 // onRetryDue is the retry timer's callback: re-schedule the failed activity as a new
 // attempt (same sequence) and dispatch it. Guarded so a stale fire is a no-op.
 func (e *Engine) onRetryDue(tm timer.Timer) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	w := e.lockWorkflow(tm.WorkflowID)
+	defer e.unlockWorkflow(w)
 
-	events, err := e.store.ReadAll(tm.WorkflowID)
+	events, st, err := e.historyLocked(w)
 	if err != nil {
-		e.log.Error("retry: read history", "workflow_id", tm.WorkflowID, "err", err)
-		e.rearmCallback(e.retryTimers, tm)
-		return
-	}
-	st, err := state.Reconstruct(events)
-	if err != nil {
-		e.log.Error("retry: reconstruct", "workflow_id", tm.WorkflowID, "err", err)
+		e.log.Error("retry", "workflow_id", tm.WorkflowID, "err", err)
+		if events == nil {
+			e.rearmCallback(e.retryTimers, tm)
+		}
 		return
 	}
 	tail := st.Tail()
@@ -73,21 +72,22 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 	if tail == nil || tail.Sequence != tm.Sequence || tail.Name != tm.StepName || tail.Status != state.StepFailed {
 		return
 	}
+	step := *tail
 	retry := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
 		StepScheduled: &history.StepScheduledEvent{
-			StepName: tail.Name, Sequence: tail.Sequence, Input: tail.Input,
-			RetryPolicy: tail.Retry.ToProto(),
+			StepName: step.Name, Sequence: step.Sequence, Input: step.Input,
+			RetryPolicy: step.Retry.ToProto(),
 		},
 	}}
-	if err := e.appendLocked(tm.WorkflowID, retry, int64(len(events)+1)); err != nil {
+	if err := e.appendLocked(w, retry, int64(len(events)+1)); err != nil {
 		e.log.Error("retry: append", "workflow_id", tm.WorkflowID, "err", err)
 		e.rearmCallback(e.retryTimers, tm)
 		return
 	}
 	e.queue.enqueue(&Task{
-		WorkflowId: tm.WorkflowID, StepName: tail.Name,
-		Sequence: tail.Sequence, Input: tail.Input,
+		WorkflowId: tm.WorkflowID, StepName: step.Name,
+		Sequence: step.Sequence, Input: step.Input,
 	})
-	e.log.Info("retry dispatched", "workflow_id", tm.WorkflowID, "step", tail.Name,
-		"sequence", tail.Sequence, "attempt", tail.Attempts+1)
+	e.log.Info("retry dispatched", "workflow_id", tm.WorkflowID, "step", step.Name,
+		"sequence", step.Sequence, "attempt", step.Attempts+1)
 }
