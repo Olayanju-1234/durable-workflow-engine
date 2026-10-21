@@ -41,7 +41,7 @@ schedule next step → record result.** Four components, built across phases:
 | Observability    | `internal/metrics` | 3 ✅  | Zero-dep Prometheus `/metrics`; visibility API (List/Get/Terminate). |
 | Dashboard + site | `web/`             | 3 ✅  | `go:embed` operational UI + JSON HTTP API; public landing page & docs. |
 | Polyglot SDKs    | `sdks/`            | —  ✅  | Workflow-task protocol + TypeScript/Python/Java SDKs (dependency-free). |
-| Consensus (Raft) | `internal/raft`    | 4 🚧  | Leader election ✅ (Wk11); log replication, snapshots, HA next. |
+| Consensus (Raft) | `internal/raft`    | 4 🚧  | Leader election ✅ (Wk11), log replication ✅ (Wk12); snapshots, engine wiring next. |
 | Public SDK       | `sdk`              | 5     | Ergonomic Go API developers import. |
 
 ## Build / test / regenerate
@@ -100,7 +100,9 @@ Sessions 16–17 hardened the history store's cached append handles: released wh
 workflow finishes, and dropped on a failed write or fsync so the reopen truncates the
 torn record. Session 18 started Phase 4 for real: a hand-rolled, deterministic Raft
 core with leader election (`internal/raft`), a gRPC transport, and opt-in cluster
-flags (`--node-id`, `--peers`); cluster mode runs Raft only until Week 14.
+flags (`--node-id`, `--peers`); cluster mode runs Raft only until Week 14. Session 19
+added log replication: majority commit, conflict repair, a durable Raft log and a
+term-fenced `Node.Propose`.
 
 **Polyglot invariants worth not breaking:** SDK decisions are fenced by history
 length (stale → reject); a malformed command must leave the task *pending* or the

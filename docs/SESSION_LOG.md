@@ -5,6 +5,60 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 19: Raft, part 2 (log replication)
+
+Week 12 of Phase 4, PR #10. Week 11 (PR #9) merged as `4eb0828` and is deployed
+(single-node; recovery replayed 5 workflows, smoke OrderSaga completed in 8.3 s).
+
+**Done:**
+- Core: `propose(term, data...)` (term-fenced: refused unless this node leads
+  exactly that term), `AppendEntries` carrying entries (≤256 or ~1 MB per
+  message), the prevLogIndex/prevLogTerm consistency check, truncation only at a
+  real conflict, follower commit capped at the last new entry, conflict hints that
+  skip a whole term, commit on a majority counting only current-term entries (the
+  leader counts itself only for entries already on its disk), and an empty entry
+  appended by every new leader (`Status.LeaderReady()` once it is applied).
+- `Ready` grows `Entries` (persist, replacing any suffix from `Entries[0].Index`)
+  and `CommittedEntries` (apply).
+- `DiskStorage` gains the log file (`raft/log`): CRC-framed `LogEntry` records,
+  in-memory offsets for suffix truncation, torn tail cut on open, one write +
+  fsync per batch, refuses gaps.
+- `Node`: persist hard state, then entries, then send, then queue committed
+  entries for a separate apply goroutine (slow applies never delay heartbeats).
+  `Propose(ctx, term, data)` batches queued proposals into one append and waits
+  for this node's apply. Errors: `ErrNotLeader` (refused), `ErrProposalDropped`
+  (overwritten), `ErrLeadershipLost` (outcome unknown). `StateMachine.Apply`.
+- `workflowd` cluster mode: a discard state machine; `/api/health` adds
+  `commit_index` / `applied_index`.
+- Tests: sim harness persists entries and applies committed ones; the checker
+  adds State Machine Safety; replication scenarios (commit, catch-up past the batch
+  limit, minority leader can't commit, paper Figure 7 convergence, Figure 8,
+  stale append, commit cap, conflict hint, full restart replay); randomized chaos
+  now proposes on every self-believed leader and demands identical applied
+  sequences after settling; log-file storage tests; real gRPC: 200 concurrent
+  proposals, follower catch-up, leader killed mid-stream, full restart.
+- Teeth-verified by mutation: skipped consistency check, truncate on match,
+  uncapped follower commit, counting old-term entries, vote without log check.
+
+**Live check:** `make cluster`, kill the leader: commit/applied go from 1 to 2
+as the new leader commits its opening entry (about 1.3 s).
+
+**Next:** Week 13, the five safety properties as a randomized checker with
+teeth knobs, then snapshots + log compaction + InstallSnapshot. ADR-0004 before
+Week 14.
+
+**Gotchas:**
+- My first Figure 8 test ignored the leader's opening empty entry, so indexes
+  were off by one and it passed with the bug reinstated. Mutation testing caught
+  it. Every safety test now has a recorded mutation that turns it red.
+- `deliverAll` caps deliveries at 100,000: a livelock bug used to hang the run
+  for the 10-minute test timeout; it now fails in 0.1 s.
+- macOS has no `timeout` command; bound test runs with `go test -timeout`.
+- Messages must not alias the log's backing array (`slices.Clone`), or a later
+  in-place conflict repair could rewrite a queued message.
+
+---
+
 ## 2026-10-21 — Session 18: Raft, part 1 (leader election)
 
 Phase 4 restarted in a side session that runs all four Raft weeks, one PR each.
