@@ -107,6 +107,17 @@ persists (hard state, then entries) before sending, and applies committed
 entries on a separate goroutine. `Node.Propose(ctx, term, data)` is fenced by
 term and returns the state machine's result once the entry is applied locally.
 
+Snapshots: every `SnapshotEvery` applied entries a node serializes its state
+machine, writes `raft/snapshot` (atomically) and only then rewrites the log
+without the covered entries. A follower that needs entries the leader has
+compacted gets an `InstallSnapshot`; it keeps its log if it already holds the
+snapshot's last entry, and otherwise replaces log and state with the snapshot.
+
+Testing: `sim_test.go` runs whole clusters in memory with no clock, goroutines or
+sockets, and a checker of the five Raft safety properties runs against 200
+seeded random failure schedules. Testing knobs that switch off one rule each
+prove the checker can fail. How the engine uses Raft is ADR-0004.
+
 ## Determinism (Phase 2+)
 
 Replay only works if workflow functions are deterministic: same inputs → same step

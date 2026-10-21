@@ -18,8 +18,9 @@ import (
 
 // recordingSM is a state machine that remembers every payload it applied.
 type recordingSM struct {
-	mu   sync.Mutex
-	data []string
+	mu       sync.Mutex
+	data     []string
+	restores int
 }
 
 func (m *recordingSM) Apply(e *LogEntry) any {
@@ -35,13 +36,35 @@ func (m *recordingSM) snapshot() []string {
 	return slices.Clone(m.data)
 }
 
+func (m *recordingSM) Snapshot() ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ents := make([]*LogEntry, len(m.data))
+	for i, d := range m.data {
+		ents[i] = &LogEntry{Data: []byte(d)}
+	}
+	return encodeApplied(ents), nil
+}
+
+func (m *recordingSM) Restore(snap *Snapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data = nil
+	for _, e := range decodeApplied(snap.Data) {
+		m.data = append(m.data, string(e.GetData()))
+	}
+	m.restores++
+	return nil
+}
+
 // grpcCluster runs real Nodes, each with its own on-disk storage and its own
 // gRPC server on a loopback TCP port, talking through the real transport.
 type grpcCluster struct {
-	t     *testing.T
-	addrs map[string]string
-	dirs  map[string]string
-	nodes map[string]*grpcMember
+	t             *testing.T
+	addrs         map[string]string
+	dirs          map[string]string
+	nodes         map[string]*grpcMember
+	snapshotEvery uint64
 }
 
 type grpcMember struct {
@@ -54,7 +77,12 @@ type grpcMember struct {
 
 func newGRPCCluster(t *testing.T, n int) *grpcCluster {
 	t.Helper()
-	c := &grpcCluster{t: t, addrs: map[string]string{}, dirs: map[string]string{}, nodes: map[string]*grpcMember{}}
+	return newGRPCClusterSnapshotting(t, n, 0)
+}
+
+func newGRPCClusterSnapshotting(t *testing.T, n int, every uint64) *grpcCluster {
+	t.Helper()
+	c := &grpcCluster{t: t, addrs: map[string]string{}, dirs: map[string]string{}, nodes: map[string]*grpcMember{}, snapshotEvery: every}
 	// Reserve every address first: each node must know all of them up front.
 	listeners := map[string]net.Listener{}
 	for i := 1; i <= n; i++ {
@@ -107,12 +135,13 @@ func (c *grpcCluster) start(id string, lis net.Listener) {
 	sm := &recordingSM{}
 	node, err := NewNode(Config{
 		ID: id, Members: c.members(), Storage: storage, Transport: tr, StateMachine: sm, Logger: logger,
-		TickInterval: 10 * time.Millisecond, ElectionTicks: 10, HeartbeatTicks: 1,
+		TickInterval: 10 * time.Millisecond, ElectionTicks: 20, HeartbeatTicks: 1,
+		SnapshotEvery: c.snapshotEvery,
 	})
 	if err != nil {
 		c.t.Fatal(err)
 	}
-	gs := grpc.NewServer()
+	gs := grpc.NewServer(ServerOptions()...)
 	RegisterServer(gs, node)
 	go func() { _ = gs.Serve(lis) }()
 	node.Start()
@@ -232,13 +261,13 @@ func (c *grpcCluster) proposeAll(lead string, term uint64, payloads []string) []
 	var wg sync.WaitGroup
 	errs := make(chan error, len(payloads))
 	base := len(c.nodes[lead].sm.snapshot())
-	for _, p := range payloads {
+	for i, p := range payloads {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			v, err := c.nodes[lead].node.Propose(context.Background(), term, []byte(p))
 			if err != nil {
-				errs <- fmt.Errorf("propose %s: %w", p, err)
+				errs <- fmt.Errorf("propose #%d (%d bytes): %w", i, len(p), err)
 				return
 			}
 			ordered[v.(int)-base-1] = p
@@ -301,4 +330,74 @@ func TestGRPCClusterRestartsFromDisk(t *testing.T) {
 		c.start(id, nil)
 	}
 	c.waitApplied(want)
+}
+
+// With a small snapshot interval the leader compacts its log while a follower
+// is down, so the follower can only catch up from an InstallSnapshot carried
+// over real gRPC. A node that restarts afterwards comes back from its own
+// snapshot file.
+func TestGRPCClusterCatchesUpFromSnapshot(t *testing.T) {
+	c := newGRPCClusterSnapshotting(t, 3, 20)
+	lead, term := c.waitReadyLeader("a ready leader")
+	want := c.proposeAll(lead, term, payloads("a", 30))
+	c.waitApplied(want)
+
+	var lagger string
+	for id := range c.nodes {
+		if id != lead {
+			lagger = id
+		}
+	}
+	c.stop(lagger)
+	stoppedAt := c.nodes[lead].node.Status().Commit
+	want = append(want, c.proposeAll(lead, term, payloads("b", 100))...)
+	// Snapshots are taken in the background once enough entries are applied.
+	deadline := time.Now().Add(10 * time.Second)
+	for c.nodes[lead].node.Status().Snapshot <= stoppedAt {
+		if time.Now().After(deadline) {
+			t.Fatalf("leader never compacted past index %d, where the follower stopped", stoppedAt)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	c.start(lagger, nil)
+	c.waitApplied(want)
+	if c.nodes[lagger].sm.restores == 0 {
+		t.Fatal("the follower caught up without restoring a snapshot")
+	}
+
+	c.stop(lagger)
+	c.start(lagger, nil)
+	if got := c.nodes[lagger].sm.restores; got != 1 {
+		t.Fatalf("restart restored %d snapshots, want 1 (its own, at startup)", got)
+	}
+	c.waitApplied(want)
+}
+
+// A big snapshot must fit through gRPC (the default message limit is 4 MB).
+func TestGRPCClusterLargeSnapshot(t *testing.T) {
+	c := newGRPCClusterSnapshotting(t, 3, 8)
+	lead, term := c.waitReadyLeader("a ready leader")
+	var lagger string
+	for id := range c.nodes {
+		if id != lead {
+			lagger = id
+		}
+	}
+	c.stop(lagger)
+	// One 5 MB entry, then enough small ones to trigger a snapshot holding it.
+	want := c.proposeAll(lead, term, []string{string(make([]byte, 5<<20))})
+	want = append(want, c.proposeAll(lead, term, payloads("small", 8))...)
+	deadline := time.Now().Add(10 * time.Second)
+	for c.nodes[lead].node.Status().Snapshot < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("the leader never snapshotted the large entry")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.start(lagger, nil)
+	c.waitApplied(want)
+	if c.nodes[lagger].sm.restores == 0 {
+		t.Fatal("the follower caught up without the large snapshot")
+	}
 }

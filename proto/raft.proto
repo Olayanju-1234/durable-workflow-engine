@@ -28,6 +28,8 @@ message Envelope {
     RequestVoteResponse request_vote_response = 11;
     AppendEntriesRequest append_entries = 12;
     AppendEntriesResponse append_entries_response = 13;
+    InstallSnapshotRequest install_snapshot = 14;
+    InstallSnapshotResponse install_snapshot_response = 15;
   }
 }
 
@@ -101,4 +103,29 @@ message AppendEntriesResponse {
   // last entry, or the first index of the follower's conflicting term, so the
   // leader backs up a whole term at a time instead of one entry (§5.3).
   uint64 conflict_index = 4;
+}
+
+// SnapshotMeta names the last log entry a snapshot replaces. Everything up to
+// and including it is folded into the snapshot's data and dropped from the log.
+message SnapshotMeta {
+  uint64 last_included_index = 1;
+  uint64 last_included_term = 2;
+}
+
+// InstallSnapshotRequest is how a leader catches up a follower that needs
+// entries the leader has already compacted away (paper §7). The whole
+// snapshot travels in one message; workflowd's snapshots are small.
+message InstallSnapshotRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  SnapshotMeta meta = 3;
+  // The state machine's serialized state as of meta.last_included_index.
+  bytes data = 4;
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1;
+  // The index the follower now holds everything up to: the snapshot's last
+  // index, or the follower's commit index if that was already further along.
+  uint64 match_index = 2;
 }

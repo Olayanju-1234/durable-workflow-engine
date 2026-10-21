@@ -161,3 +161,80 @@ func TestLogRejectsGaps(t *testing.T) {
 		t.Fatal("appended index 3 after index 1")
 	}
 }
+
+func TestSnapshotFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := openLoaded(t, dir)
+	want := &Snapshot{Index: 7, Term: 3, Data: []byte("state")}
+	if err := s.saveSnapshot(want); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	_, st := openLoaded(t, dir)
+	if got := st.snapshot; got == nil || got.Index != 7 || got.Term != 3 || string(got.Data) != "state" {
+		t.Fatalf("loaded snapshot %+v, want %+v", got, want)
+	}
+}
+
+// Compaction rewrites the log without the entries a snapshot covers, and the
+// result reopens cleanly.
+func TestCompactLogThenReopen(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := openLoaded(t, dir)
+	if err := s.appendEntries(logFromTerms("", []uint64{1, 1, 2, 2, 2, 3})); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveSnapshot(&Snapshot{Index: 4, Term: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.compactLog(4); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.appendEntries([]*LogEntry{{Index: 7, Term: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	_, st := openLoaded(t, dir)
+	if got, want := entryTerms(st.entries), []uint64{2, 3, 3}; !slices.Equal(got, want) || st.entries[0].GetIndex() != 5 {
+		t.Fatalf("after compaction: entries from %d with terms %v, want from 5 with %v", st.entries[0].GetIndex(), got, want)
+	}
+}
+
+// A crash between saving a snapshot and compacting leaves the covered entries
+// in the log; loading skips them.
+func TestLoadSkipsEntriesCoveredBySnapshot(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := openLoaded(t, dir)
+	if err := s.appendEntries(logFromTerms("", []uint64{1, 1, 2, 2})); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveSnapshot(&Snapshot{Index: 2, Term: 1}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close() // crash before compactLog
+	_, st := openLoaded(t, dir)
+	if len(st.entries) != 2 || st.entries[0].GetIndex() != 3 {
+		t.Fatalf("got %d entries from %d, want 2 from 3", len(st.entries), st.entries[0].GetIndex())
+	}
+}
+
+// A crash between saving a leader's snapshot and resetting the log leaves a
+// log that doesn't continue the snapshot. Loading discards all of it.
+func TestLoadResetsLogThatDivergesFromSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := openLoaded(t, dir)
+	if err := s.appendEntries(logFromTerms("", []uint64{1, 1, 1, 1})); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveSnapshot(&Snapshot{Index: 3, Term: 2}); err != nil { // term 2 at 3: not our entry
+		t.Fatal(err)
+	}
+	s.Close()
+	s, st := openLoaded(t, dir)
+	if len(st.entries) != 0 {
+		t.Fatalf("kept %d entries that don't follow the snapshot", len(st.entries))
+	}
+	if err := s.appendEntries([]*LogEntry{{Index: 4, Term: 2}}); err != nil {
+		t.Fatalf("append after reset: %v", err)
+	}
+}

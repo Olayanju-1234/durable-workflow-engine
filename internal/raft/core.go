@@ -63,12 +63,30 @@ type coreConfig struct {
 	heartbeatTick int
 	rand          *rand.Rand
 	logger        *slog.Logger
+	knobs         testingKnobs
+}
+
+// testingKnobs each switch off one Raft safety rule. They exist so the safety
+// tests can prove they notice a broken implementation; production code never
+// sets them, and the zero value is the correct algorithm.
+type testingKnobs struct {
+	grantStaleVotes   bool // vote without the up-to-date log check (§5.4.1)
+	skipPrevTermCheck bool // accept AppendEntries checking prevLogIndex but not its term
+	countOldTerms     bool // commit older-term entries by counting replicas (Figure 8)
 }
 
 // persistedState is what a node reloads from disk when it (re)starts.
 type persistedState struct {
 	hardState *HardState
-	entries   []*LogEntry
+	snapshot  *Snapshot   // nil if the node never took or installed one
+	entries   []*LogEntry // the entries after the snapshot
+}
+
+// Snapshot is a state machine's serialized state as of log entry Index (from
+// term Term). It replaces every log entry up to and including Index.
+type Snapshot struct {
+	Index, Term uint64
+	Data        []byte
 }
 
 // Ready is one batch of work the core hands its driver, to be handled in this
@@ -84,6 +102,10 @@ type Ready struct {
 	Messages []*Envelope
 	// CommittedEntries are safe on a majority and ready for the state machine.
 	CommittedEntries []*LogEntry
+	// Snapshot, when set, came from the leader and replaces this node's whole
+	// log and state: persist it before Entries and install it into the state
+	// machine before CommittedEntries.
+	Snapshot *Snapshot
 }
 
 // Status is a read-only snapshot of a node's volatile state.
@@ -96,6 +118,8 @@ type Status struct {
 	Commit uint64
 	// Applied is the highest index this node's state machine has applied.
 	Applied uint64
+	// Snapshot is the last index folded into this node's latest snapshot.
+	Snapshot uint64
 	// termStart is the index of the entry a leader appends when it takes
 	// office. Once that is applied, so is everything committed before it.
 	termStart uint64
@@ -140,7 +164,11 @@ type core struct {
 	msgs     []*Envelope
 	lastHard *HardState // the HardState most recently handed out in a Ready
 
+	snapshot       *Snapshot // latest snapshot, kept to send to lagging followers
+	pendingInstall *Snapshot // received from the leader, not yet handed to the driver
+
 	logger *slog.Logger
+	knobs  testingKnobs
 }
 
 // progress is the leader's view of one follower.
@@ -151,6 +179,10 @@ type progress struct {
 	// recentActive is set whenever the follower answers, and cleared at every
 	// quorum check. A leader that cannot hear a majority steps down.
 	recentActive bool
+	// snapshotSent is non-zero while a snapshot is on its way to the follower;
+	// snapshotWait counts ticks since, so a lost snapshot is sent again.
+	snapshotSent uint64
+	snapshotWait int
 }
 
 func newCore(cfg coreConfig, st persistedState) (*core, error) {
@@ -172,12 +204,14 @@ func newCore(cfg coreConfig, st persistedState) (*core, error) {
 		quorum:        len(cfg.members)/2 + 1,
 		term:          hs.GetCurrentTerm(),
 		vote:          hs.GetVotedFor(),
-		log:           newRaftLog(st.entries),
+		log:           newRaftLog(st.snapshot, st.entries),
+		snapshot:      st.snapshot,
 		electionTick:  cfg.electionTick,
 		heartbeatTick: cfg.heartbeatTick,
 		rand:          cfg.rand,
 		lastHard:      proto.Clone(hs).(*HardState),
 		logger:        cfg.logger.With("node_id", cfg.id),
+		knobs:         cfg.knobs,
 	}
 	c.becomeFollower(c.term, none)
 	return c, nil
@@ -206,6 +240,11 @@ func (c *core) tickLeader() {
 			c.logger.Warn("raft: lost contact with a majority; stepping down", "term", c.term)
 			c.becomeFollower(c.term, none)
 			return
+		}
+	}
+	for _, id := range c.peers {
+		if pr := c.progress[id]; pr.snapshotSent != 0 {
+			pr.snapshotWait++
 		}
 	}
 	c.heartbeatElapsed++
@@ -325,13 +364,18 @@ func (c *core) broadcastAppend() {
 }
 
 // sendAppend sends one follower the entries from its next index onward (none,
-// for a follower that is up to date: then it is a pure heartbeat).
+// for a follower that is up to date: then it is a pure heartbeat). A follower
+// that needs entries already compacted into a snapshot gets the snapshot.
 func (c *core) sendAppend(to string) {
 	pr := c.progress[to]
 	prev := pr.next - 1
 	prevTerm, ok := c.log.term(prev)
 	if !ok {
-		panic(fmt.Sprintf("raft: leader %s has no term for index %d (log %d..%d)", c.id, prev, c.log.offset, c.log.lastIndex()))
+		if prev >= c.log.offset {
+			panic(fmt.Sprintf("raft: leader %s has no term for index %d (log %d..%d)", c.id, prev, c.log.offset, c.log.lastIndex()))
+		}
+		c.sendSnapshot(to)
+		return
 	}
 	hi := min(c.log.lastIndex()+1, pr.next+maxEntriesPerMsg)
 	c.send(to, &Envelope_AppendEntries{AppendEntries: &AppendEntriesRequest{
@@ -344,6 +388,46 @@ func (c *core) sendAppend(to string) {
 		Entries:      slices.Clone(c.log.slice(pr.next, hi, maxBytesPerMsg)),
 		LeaderCommit: c.log.committed,
 	}})
+}
+
+// sendSnapshot sends the leader's latest snapshot. While one is in flight it
+// is re-sent only after two election timeouts without an answer, so a large
+// snapshot isn't queued up again and again behind itself; in between, a small
+// probe keeps the follower's election timer from firing.
+func (c *core) sendSnapshot(to string) {
+	pr := c.progress[to]
+	if pr.snapshotSent != 0 && pr.snapshotWait < 2*c.electionTick {
+		c.send(to, &Envelope_AppendEntries{AppendEntries: &AppendEntriesRequest{
+			Term: c.term, LeaderId: c.id, PrevLogIndex: c.log.offset, PrevLogTerm: c.log.offsetTerm,
+			LeaderCommit: c.log.committed,
+		}})
+		return
+	}
+	pr.snapshotSent, pr.snapshotWait = c.snapshot.Index, 0
+	c.logger.Info("raft: sending snapshot", "to", to, "index", c.snapshot.Index)
+	c.send(to, &Envelope_InstallSnapshot{InstallSnapshot: &InstallSnapshotRequest{
+		Term:     c.term,
+		LeaderId: c.id,
+		Meta:     &SnapshotMeta{LastIncludedIndex: c.snapshot.Index, LastIncludedTerm: c.snapshot.Term},
+		Data:     c.snapshot.Data,
+	}})
+}
+
+// compact discards log entries now covered by a snapshot the driver has made
+// durable. A snapshot older than the log's start (say, one taken while a newer
+// snapshot from the leader was being installed) is ignored.
+func (c *core) compact(snap *Snapshot) {
+	if snap.Index <= c.log.offset {
+		return
+	}
+	if snap.Index > c.log.handedOut {
+		panic(fmt.Sprintf("raft: snapshot at %d is ahead of what was applied (%d)", snap.Index, c.log.handedOut))
+	}
+	if t, _ := c.log.term(snap.Index); t != snap.Term {
+		panic(fmt.Sprintf("raft: snapshot at %d has term %d, log has %d", snap.Index, snap.Term, t))
+	}
+	c.log.compact(snap.Index, snap.Term)
+	c.snapshot = snap
 }
 
 // maybeCommit advances the commit index to the highest entry stored on a
@@ -362,7 +446,7 @@ func (c *core) maybeCommit() {
 	// An older-term entry on a majority can still be overwritten by a leader
 	// that never saw it (paper Figure 8); it commits indirectly once an entry
 	// of ours after it does.
-	if t, _ := c.log.term(n); t != c.term {
+	if t, _ := c.log.term(n); t != c.term && !c.knobs.countOldTerms {
 		return
 	}
 	c.log.committed = n
@@ -390,7 +474,8 @@ func (c *core) step(m *Envelope) {
 		// held, we are now a follower in theirs. This single rule is what makes a
 		// deposed leader harmless.
 		lead := none
-		if _, ok := m.GetBody().(*Envelope_AppendEntries); ok {
+		switch m.GetBody().(type) {
+		case *Envelope_AppendEntries, *Envelope_InstallSnapshot:
 			lead = m.GetFrom()
 		}
 		c.becomeFollower(term, lead)
@@ -400,6 +485,8 @@ func (c *core) step(m *Envelope) {
 		switch m.GetBody().(type) {
 		case *Envelope_AppendEntries:
 			c.send(m.GetFrom(), &Envelope_AppendEntriesResponse{AppendEntriesResponse: &AppendEntriesResponse{Term: c.term}})
+		case *Envelope_InstallSnapshot:
+			c.send(m.GetFrom(), &Envelope_InstallSnapshotResponse{InstallSnapshotResponse: &InstallSnapshotResponse{Term: c.term}})
 		case *Envelope_RequestVote:
 			c.send(m.GetFrom(), &Envelope_RequestVoteResponse{RequestVoteResponse: &RequestVoteResponse{Term: c.term}})
 		}
@@ -415,6 +502,10 @@ func (c *core) step(m *Envelope) {
 		c.handleAppendEntries(m.GetFrom(), b.AppendEntries)
 	case *Envelope_AppendEntriesResponse:
 		c.handleAppendResponse(m.GetFrom(), b.AppendEntriesResponse)
+	case *Envelope_InstallSnapshot:
+		c.handleInstallSnapshot(m.GetFrom(), b.InstallSnapshot)
+	case *Envelope_InstallSnapshotResponse:
+		c.handleSnapshotResponse(m.GetFrom(), b.InstallSnapshotResponse)
 	}
 }
 
@@ -423,7 +514,8 @@ func (c *core) handleRequestVote(from string, req *RequestVoteRequest) {
 	// don't already know a leader for this term), or if we already voted for it
 	// and are seeing a retransmitted request.
 	canVote := c.vote == from || (c.vote == none && c.lead == none)
-	grant := canVote && c.log.isUpToDate(req.GetLastLogIndex(), req.GetLastLogTerm())
+	upToDate := c.knobs.grantStaleVotes || c.log.isUpToDate(req.GetLastLogIndex(), req.GetLastLogTerm())
+	grant := canVote && upToDate
 	if grant {
 		c.vote = from
 		c.electionElapsed = 0 // granting a vote resets the election timer (Figure 2)
@@ -455,18 +547,27 @@ func (c *core) handleVoteResponse(from string, resp *RequestVoteResponse) {
 	}
 }
 
-func (c *core) handleAppendEntries(from string, req *AppendEntriesRequest) {
-	// Only a leader sends AppendEntries, and there is one leader per term, so a
-	// candidate in this term has lost and a follower now knows who leads.
+// acceptLeader handles the part common to every message only a leader sends:
+// a candidate in this term has lost, and a follower now knows who leads. It
+// reports false if this node itself leads the term, which Election Safety
+// rules out.
+func (c *core) acceptLeader(from string) bool {
 	if c.role == Leader {
 		c.logger.Error("raft: two leaders in one term; ignoring", "other", from, "term", c.term)
-		return
+		return false
 	}
 	if c.role == Candidate {
 		c.becomeFollower(c.term, from)
 	}
 	c.lead = from
 	c.electionElapsed = 0
+	return true
+}
+
+func (c *core) handleAppendEntries(from string, req *AppendEntriesRequest) {
+	if !c.acceptLeader(from) {
+		return
+	}
 
 	prev, prevTerm, ents := req.GetPrevLogIndex(), req.GetPrevLogTerm(), req.GetEntries()
 	if prev < c.log.committed {
@@ -478,7 +579,11 @@ func (c *core) handleAppendEntries(from string, req *AppendEntriesRequest) {
 		prev = c.log.committed
 		prevTerm, _ = c.log.term(prev)
 	}
-	if !c.log.matchTerm(prev, prevTerm) {
+	matched := c.log.matchTerm(prev, prevTerm)
+	if c.knobs.skipPrevTermCheck {
+		matched = prev <= c.log.lastIndex()
+	}
+	if !matched {
 		c.send(from, &Envelope_AppendEntriesResponse{AppendEntriesResponse: &AppendEntriesResponse{
 			Term: c.term, ConflictIndex: c.log.conflictHint(prev),
 		}})
@@ -502,6 +607,47 @@ func (c *core) handleAppendEntries(from string, req *AppendEntriesRequest) {
 	}})
 }
 
+// handleInstallSnapshot adopts a leader's snapshot (paper Figure 13). If this
+// log already holds the snapshot's last entry, the entries after it are kept
+// and only the commit point moves; otherwise the whole log is replaced.
+func (c *core) handleInstallSnapshot(from string, req *InstallSnapshotRequest) {
+	if !c.acceptLeader(from) {
+		return
+	}
+	idx, term := req.GetMeta().GetLastIncludedIndex(), req.GetMeta().GetLastIncludedTerm()
+	reply := func(match uint64) {
+		c.send(from, &Envelope_InstallSnapshotResponse{InstallSnapshotResponse: &InstallSnapshotResponse{Term: c.term, MatchIndex: match}})
+	}
+	switch {
+	case idx <= c.log.committed:
+		reply(c.log.committed) // nothing new: we already hold all of it
+	case c.log.matchTerm(idx, term):
+		c.log.committed = idx
+		reply(idx)
+	default:
+		snap := &Snapshot{Index: idx, Term: term, Data: req.GetData()}
+		c.logger.Info("raft: installing snapshot from leader", "leader", from, "index", idx, "term", term)
+		c.log.restore(idx, term)
+		c.snapshot, c.pendingInstall = snap, snap
+		reply(idx)
+	}
+}
+
+func (c *core) handleSnapshotResponse(from string, resp *InstallSnapshotResponse) {
+	if c.role != Leader {
+		return
+	}
+	pr, ok := c.progress[from]
+	if !ok {
+		return
+	}
+	pr.recentActive = true
+	pr.snapshotSent, pr.snapshotWait = 0, 0
+	pr.match = max(pr.match, resp.GetMatchIndex())
+	pr.next = max(pr.next, pr.match+1)
+	c.sendAppend(from) // carry on with the entries after the snapshot
+}
+
 func (c *core) handleAppendResponse(from string, resp *AppendEntriesResponse) {
 	if c.role != Leader {
 		return
@@ -512,6 +658,7 @@ func (c *core) handleAppendResponse(from string, resp *AppendEntriesResponse) {
 	}
 	pr.recentActive = true
 	if resp.GetSuccess() {
+		pr.snapshotSent = 0
 		if resp.GetMatchIndex() > pr.match {
 			pr.match = resp.GetMatchIndex()
 			c.maybeCommit()
@@ -521,6 +668,9 @@ func (c *core) handleAppendResponse(from string, resp *AppendEntriesResponse) {
 			c.sendAppend(from) // keep streaming to a follower that is catching up
 		}
 		return
+	}
+	if pr.snapshotSent != 0 {
+		return // a probe while the snapshot is in flight; the snapshot answers
 	}
 	// Rejected: back up to the follower's hint (never below what it is known to
 	// hold) and try again straight away.
@@ -542,7 +692,7 @@ func (c *core) hardState() *HardState {
 
 func (c *core) hasReady() bool {
 	return len(c.msgs) > 0 || !proto.Equal(c.hardState(), c.lastHard) ||
-		len(c.log.unstable()) > 0 || len(c.log.nextCommitted()) > 0
+		len(c.log.unstable()) > 0 || len(c.log.nextCommitted()) > 0 || c.pendingInstall != nil
 }
 
 // ready collects the work produced since the last advance.
@@ -551,6 +701,7 @@ func (c *core) ready() Ready {
 		Entries:          c.log.unstable(),
 		Messages:         c.msgs,
 		CommittedEntries: c.log.nextCommitted(),
+		Snapshot:         c.pendingInstall,
 	}
 	if hs := c.hardState(); !proto.Equal(hs, c.lastHard) {
 		rd.HardState = hs
@@ -572,6 +723,9 @@ func (c *core) advance(rd Ready) {
 	if n := len(rd.CommittedEntries); n > 0 {
 		c.log.handedOut = rd.CommittedEntries[n-1].GetIndex()
 	}
+	if rd.Snapshot != nil && c.pendingInstall == rd.Snapshot {
+		c.pendingInstall = nil
+	}
 	c.msgs = c.msgs[len(rd.Messages):]
 }
 
@@ -581,7 +735,8 @@ func (c *core) advance(rd Ready) {
 func (c *core) status() Status {
 	return Status{
 		ID: c.id, Term: c.term, Role: c.role, Leader: c.lead,
-		Commit: c.log.committed, Applied: c.log.handedOut, termStart: c.termStart,
+		Commit: c.log.committed, Applied: c.log.handedOut,
+		Snapshot: c.log.offset, termStart: c.termStart,
 	}
 }
 
@@ -596,6 +751,10 @@ func messageTerm(m *Envelope) uint64 {
 		return b.AppendEntries.GetTerm()
 	case *Envelope_AppendEntriesResponse:
 		return b.AppendEntriesResponse.GetTerm()
+	case *Envelope_InstallSnapshot:
+		return b.InstallSnapshot.GetTerm()
+	case *Envelope_InstallSnapshotResponse:
+		return b.InstallSnapshotResponse.GetTerm()
 	default:
 		return 0
 	}

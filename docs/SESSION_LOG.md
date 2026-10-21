@@ -5,6 +5,61 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 20: Raft, part 3 (safety properties + snapshots)
+
+Week 13 of Phase 4, PR #11. Week 12 (PR #10) merged as `19ad765` and deployed
+(single-node; recovery replayed 6 workflows, smoke OrderSaga completed).
+
+**Done:**
+- Safety checker covers all five Figure 3 properties: Election Safety, Leader
+  Append-Only (a leader's log copy must stay intact while it leads), Log Matching
+  (pairwise, every 10 random steps), Leader Completeness (a new leader holds
+  every entry ever committed), State Machine Safety (applies and snapshot
+  restores).
+- `testingKnobs` in the core (zero value = correct): `grantStaleVotes`,
+  `skipPrevTermCheck`, `countOldTerms`. Permanent teeth tests: stale votes →
+  Leader Completeness; skipped term check → Log Matching; Figure 8 with
+  `countOldTerms` → Leader Completeness then State Machine Safety; a direct
+  leader rewrite → Leader Append-Only; Session 18's forgotten vote → Election
+  Safety.
+- Snapshots: `InstallSnapshot` in the proto; core compaction (`compact`),
+  leader sends its snapshot when a follower needs compacted entries (re-sent
+  after 2 election timeouts, probes keep the follower's timer alive), follower
+  keeps a matching suffix or replaces its whole log (Figure 13). `Ready.Snapshot`.
+- `DiskStorage`: `snapshot` file (meta + data records, atomic), `compactLog`
+  (atomic rewrite), `resetLog`; `load` skips entries a snapshot covers and resets
+  a log that doesn't continue it (crash mid-install).
+- `Node`: `StateMachine` gains `Snapshot`/`Restore`; restore at startup; leader
+  snapshots installed in order on the apply goroutine; local snapshot every
+  `SnapshotEvery` (default 8192) applied entries; run loop drains its inbox
+  before each flush (one fsync per burst). gRPC message limit raised to 65 MB
+  (`raft.ServerOptions()`).
+- ADR-0004: replicated history + leader-only engine (what is replicated,
+  apply-time stamps and fence, per-term engines, client routing, snapshot format,
+  bootstrap rule, at-least-once in a cluster).
+- Tests: snapshot unit tests (stale duplicate ignored, matching suffix kept,
+  conflicting log replaced), lagging follower via snapshot, restart from own
+  snapshot, random snapshots in the chaos runs (≈720 compactions and 237 whole-log
+  installs across 200 seeds), snapshot storage crash windows, real gRPC catch-up
+  from snapshot and a 5 MB snapshot.
+
+**Next:** Week 14, wire the engine onto Raft per ADR-0004, plus real-process
+chaos tests.
+
+**Gotchas:**
+- Mutation "reinstall a snapshot we're already past" first failed nothing. A
+  delayed duplicate InstallSnapshot would wipe acknowledged entries;
+  `TestStaleSnapshotIgnored` now pins it.
+- A slow follower (fsync per message, several ms on macOS) made the leader fail
+  its quorum check under a 100 ms test timeout. Draining the inbox before
+  flushing fixed the cause; the gRPC tests also use 20-tick elections now.
+- The 5 MB snapshot test took 30 s only under `-race` (1.5 s without): the race
+  detector slows large copies ~20x. Measure before optimizing.
+- `countOldTerms` never fires in random schedules (the opening empty entry
+  makes Figure 8 rare); it is covered by the deterministic Figure 8 schedule.
+
+---
+
 ## 2026-10-21 — Session 19: Raft, part 2 (log replication)
 
 Week 12 of Phase 4, PR #10. Week 11 (PR #9) merged as `4eb0828` and is deployed

@@ -117,7 +117,7 @@ func runCluster(baseLogger *slog.Logger, dataDir string, serve serveConfig, cc c
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cc.raftAddr, err)
 	}
-	gs := grpc.NewServer()
+	gs := grpc.NewServer(raft.ServerOptions()...)
 	raft.RegisterServer(gs, node)
 	go func() { _ = gs.Serve(lis) }()
 	defer gs.Stop()
@@ -150,7 +150,9 @@ func runCluster(baseLogger *slog.Logger, dataDir string, serve serveConfig, cc c
 // and committed, then dropped.
 type discard struct{}
 
-func (discard) Apply(*raft.LogEntry) any { return nil }
+func (discard) Apply(*raft.LogEntry) any     { return nil }
+func (discard) Snapshot() ([]byte, error)    { return nil, nil }
+func (discard) Restore(*raft.Snapshot) error { return nil }
 
 func writeHealth(w http.ResponseWriter, st raft.Status) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

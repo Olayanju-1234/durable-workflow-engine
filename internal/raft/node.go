@@ -16,6 +16,9 @@ const (
 	DefaultTickInterval   = 100 * time.Millisecond
 	DefaultElectionTicks  = 10
 	DefaultHeartbeatTicks = 1
+	// DefaultSnapshotEvery is how many applied entries pile up before a node
+	// snapshots its state machine and compacts its log.
+	DefaultSnapshotEvery = 8192
 )
 
 var (
@@ -38,12 +41,18 @@ type Transport interface {
 
 // StateMachine is what a cluster replicates: every node applies the same
 // committed entries, in the same order, so every node ends in the same state.
+// All three methods are called from one goroutine, never concurrently.
 type StateMachine interface {
 	// Apply applies one committed entry and returns a result for the proposer,
 	// if it is waiting on this node. After a restart Apply sees again every
-	// entry since the start of the log, so a state machine that persists its
-	// own state must recognise entries it already applied.
+	// entry since the latest snapshot, so a state machine that persists its own
+	// state must recognise entries it already applied.
 	Apply(entry *LogEntry) any
+	// Snapshot serializes the state as of the last applied entry.
+	Snapshot() ([]byte, error)
+	// Restore replaces the whole state with a snapshot's: at startup, and when
+	// the leader sends one because this node fell too far behind.
+	Restore(snap *Snapshot) error
 }
 
 // Config configures a Node.
@@ -60,6 +69,7 @@ type Config struct {
 	TickInterval   time.Duration
 	ElectionTicks  int
 	HeartbeatTicks int
+	SnapshotEvery  uint64
 }
 
 // Node runs one Raft member. One goroutine owns the core: it turns wall-clock
@@ -77,23 +87,39 @@ type Node struct {
 
 	recvc chan *Envelope
 	propc chan *proposal
-	stopc chan struct{} // closed to stop both goroutines
-	done  chan struct{} // closed once both have exited
-	err   error         // why the run loop exited; read only after done
+	snapc chan *Snapshot // local snapshots, from the applier to the run loop
+	stopc chan struct{}  // closed to stop both goroutines
+	done  chan struct{}  // closed once both have exited
 	wg    sync.WaitGroup
+
+	errMu sync.Mutex
+	err   error // the first failure that stopped the node
+
+	snapshotEvery uint64
 
 	startOnce sync.Once
 	stopOnce  sync.Once
 
 	applyMu    sync.Mutex
-	applyq     []*LogEntry
+	applyq     []applyItem
 	applyReady chan struct{} // buffered(1): "applyq is not empty"
+
+	// Owned by the apply goroutine.
+	appliedTerm uint64 // term of the last applied entry
+	snapIndex   uint64 // index of the latest snapshot this node has
 
 	mu      sync.Mutex
 	status  Status
 	applied uint64
 	changed chan struct{}        // closed and replaced whenever status changes
 	waiters map[uint64]*proposal // log index -> proposal waiting for it
+}
+
+// applyItem is one unit of work for the applier, in log order: a committed
+// entry, or a snapshot from the leader that replaces everything before it.
+type applyItem struct {
+	entry *LogEntry
+	snap  *Snapshot
 }
 
 type proposal struct {
@@ -118,16 +144,26 @@ func NewNode(cfg Config) (*Node, error) {
 	if tick == 0 {
 		tick = DefaultTickInterval
 	}
-	election, heartbeat := cfg.ElectionTicks, cfg.HeartbeatTicks
+	election, heartbeat, every := cfg.ElectionTicks, cfg.HeartbeatTicks, cfg.SnapshotEvery
 	if election == 0 {
 		election = DefaultElectionTicks
 	}
 	if heartbeat == 0 {
 		heartbeat = DefaultHeartbeatTicks
 	}
+	if every == 0 {
+		every = DefaultSnapshotEvery
+	}
 	st, err := cfg.Storage.load()
 	if err != nil {
 		return nil, err
+	}
+	if st.snapshot != nil {
+		// The state machine starts from the snapshot; only later entries are
+		// applied again.
+		if err := cfg.StateMachine.Restore(st.snapshot); err != nil {
+			return nil, fmt.Errorf("raft: restore snapshot at %d: %w", st.snapshot.Index, err)
+		}
 	}
 	c, err := newCore(coreConfig{
 		id:            cfg.ID,
@@ -150,15 +186,23 @@ func NewNode(cfg Config) (*Node, error) {
 		logger:     cfg.Logger.With("node_id", cfg.ID),
 		recvc:      make(chan *Envelope, 256),
 		propc:      make(chan *proposal, 256),
+		snapc:      make(chan *Snapshot, 1),
 		stopc:      make(chan struct{}),
 		done:       make(chan struct{}),
 		applyReady: make(chan struct{}, 1),
 		status:     c.status(),
 		changed:    make(chan struct{}),
 		waiters:    make(map[uint64]*proposal),
+
+		snapshotEvery: every,
+		applied:       c.log.handedOut,
+		appliedTerm:   c.log.offsetTerm,
+		snapIndex:     c.log.offset,
 	}
+	n.status.Applied = n.applied
 	n.logger.Info("raft: node loaded", "term", st.hardState.GetCurrentTerm(),
-		"voted_for", st.hardState.GetVotedFor(), "last_index", c.log.lastIndex(), "members", cfg.Members)
+		"voted_for", st.hardState.GetVotedFor(), "snapshot", c.log.offset,
+		"last_index", c.log.lastIndex(), "members", cfg.Members)
 	return n, nil
 }
 
@@ -180,8 +224,7 @@ func (n *Node) Start() {
 func (n *Node) Stop() error {
 	n.stopOnce.Do(func() { close(n.stopc) })
 	n.Start() // so done is closed even if Start was never called
-	<-n.done
-	return n.err
+	return n.Err()
 }
 
 // Done is closed once the node has stopped, for any reason.
@@ -190,7 +233,21 @@ func (n *Node) Done() <-chan struct{} { return n.done }
 // Err reports why the node stopped; nil after a clean Stop. Valid after Done.
 func (n *Node) Err() error {
 	<-n.done
+	n.errMu.Lock()
+	defer n.errMu.Unlock()
 	return n.err
+}
+
+// fail stops the node because it can no longer guarantee what it promised:
+// a write that didn't reach disk, a snapshot that wouldn't restore.
+func (n *Node) fail(err error) {
+	n.errMu.Lock()
+	if n.err == nil {
+		n.err = err
+	}
+	n.errMu.Unlock()
+	n.logger.Error("raft: stopping node", "err", err)
+	n.stopOnce.Do(func() { close(n.stopc) })
 }
 
 // Step hands a message from a peer to the node.
@@ -270,17 +327,53 @@ func (n *Node) run() {
 			n.core.step(m)
 		case p := <-n.propc:
 			n.propose(p)
+		case snap := <-n.snapc:
+			if err := n.compact(snap); err != nil {
+				n.fail(err)
+				return
+			}
 		case <-n.stopc:
 			return
 		}
+		n.drainInbox()
 		if err := n.flush(); err != nil {
 			// A node that cannot persist must stop: carrying on could mean voting
 			// twice in one term, or acknowledging entries it would then lose.
-			n.err = err
-			n.logger.Error("raft: stopping node", "err", err)
+			n.fail(err)
 			return
 		}
 	}
+}
+
+// drainInbox steps every message already waiting, so a burst of messages
+// costs one flush (one fsync) instead of one each. Without it a follower that
+// fsyncs per message falls behind a busy leader and its acknowledgements
+// arrive too late for the leader's quorum check.
+func (n *Node) drainInbox() {
+	for range cap(n.recvc) {
+		select {
+		case m := <-n.recvc:
+			n.core.step(m)
+		default:
+			return
+		}
+	}
+}
+
+// compact makes a local snapshot durable, then drops the log entries it covers.
+func (n *Node) compact(snap *Snapshot) error {
+	if snap.Index <= n.core.log.offset {
+		return nil // overtaken by a snapshot installed from the leader
+	}
+	if err := n.storage.saveSnapshot(snap); err != nil {
+		return fmt.Errorf("raft: persist snapshot: %w", err)
+	}
+	if err := n.storage.compactLog(snap.Index); err != nil {
+		return fmt.Errorf("raft: compact log: %w", err)
+	}
+	n.core.compact(snap)
+	n.logger.Info("raft: snapshot taken", "index", snap.Index, "bytes", len(snap.Data))
+	return nil
 }
 
 // propose hands one proposal, plus any others already queued, to the core in
@@ -338,6 +431,17 @@ func (n *Node) flush() error {
 				return fmt.Errorf("raft: persist hard state: %w", err)
 			}
 		}
+		if rd.Snapshot != nil {
+			// Snapshot first, then drop the log it replaces: a crash in between
+			// leaves a log that load() recognises and resets.
+			if err := n.storage.saveSnapshot(rd.Snapshot); err != nil {
+				return fmt.Errorf("raft: persist leader snapshot: %w", err)
+			}
+			if err := n.storage.resetLog(rd.Snapshot.Index); err != nil {
+				return err
+			}
+			n.enqueueApply(applyItem{snap: rd.Snapshot})
+		}
 		if len(rd.Entries) > 0 {
 			if err := n.storage.appendEntries(rd.Entries); err != nil {
 				return fmt.Errorf("raft: persist entries: %w", err)
@@ -346,8 +450,8 @@ func (n *Node) flush() error {
 		for _, m := range rd.Messages {
 			n.transport.Send(m)
 		}
-		if len(rd.CommittedEntries) > 0 {
-			n.enqueueApply(rd.CommittedEntries)
+		for _, e := range rd.CommittedEntries {
+			n.enqueueApply(applyItem{entry: e})
 		}
 		n.core.advance(rd)
 	}
@@ -355,9 +459,9 @@ func (n *Node) flush() error {
 	return nil
 }
 
-func (n *Node) enqueueApply(ents []*LogEntry) {
+func (n *Node) enqueueApply(it applyItem) {
 	n.applyMu.Lock()
-	n.applyq = append(n.applyq, ents...)
+	n.applyq = append(n.applyq, it)
 	n.applyMu.Unlock()
 	select {
 	case n.applyReady <- struct{}{}:
@@ -374,17 +478,58 @@ func (n *Node) applyLoop() {
 			return // anything still queued is applied again after the restart
 		}
 		n.applyMu.Lock()
-		ents := n.applyq
+		items := n.applyq
 		n.applyq = nil
 		n.applyMu.Unlock()
-		for _, e := range ents {
-			var v any
-			if len(e.GetData()) > 0 {
-				v = n.sm.Apply(e)
+		for _, it := range items {
+			if it.snap != nil {
+				if err := n.sm.Restore(it.snap); err != nil {
+					n.fail(fmt.Errorf("raft: restore snapshot at %d: %w", it.snap.Index, err))
+					return
+				}
+				n.appliedTerm, n.snapIndex = it.snap.Term, it.snap.Index
+				n.markApplied(it.snap.Index)
+				continue
 			}
-			n.applied1(e, v)
+			var v any
+			if len(it.entry.GetData()) > 0 {
+				v = n.sm.Apply(it.entry)
+			}
+			n.appliedTerm = it.entry.GetTerm()
+			n.applied1(it.entry, v)
 		}
+		n.maybeSnapshot()
 	}
+}
+
+// maybeSnapshot snapshots the state machine once enough entries have been
+// applied since the last snapshot, and hands it to the run loop to persist.
+func (n *Node) maybeSnapshot() {
+	n.mu.Lock()
+	applied := n.applied
+	n.mu.Unlock()
+	if applied-n.snapIndex < n.snapshotEvery {
+		return
+	}
+	data, err := n.sm.Snapshot()
+	if err != nil {
+		// Not fatal: the log just keeps growing until a later attempt works.
+		n.logger.Error("raft: snapshot failed", "index", applied, "err", err)
+		return
+	}
+	select {
+	case n.snapc <- &Snapshot{Index: applied, Term: n.appliedTerm, Data: data}:
+		n.snapIndex = applied
+	default: // the previous one is still being written; try after the next batch
+	}
+}
+
+func (n *Node) markApplied(index uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.applied = index
+	n.status.Applied = index
+	n.notifyLocked()
 }
 
 // applied1 records that e was applied and answers its proposer, if waiting.
