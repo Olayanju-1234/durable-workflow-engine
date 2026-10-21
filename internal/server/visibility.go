@@ -47,6 +47,9 @@ func (e *Engine) ListWorkflows(filter WorkflowStatus) ([]*WorkflowSummary, error
 	summaries := make([]*WorkflowSummary, 0, len(ids))
 	for _, id := range ids {
 		sum := e.summarize(id)
+		if sum.GetHistoryLength() == 0 && sum.GetError() == "" {
+			continue // purged by retention between the directory scan and the read
+		}
 		if filter != WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED && sum.GetStatus() != filter {
 			continue
 		}
