@@ -116,12 +116,15 @@ func (e *Engine) RegisterWorkflowTypes(workflowTypes []string, workerID, sdk str
 // resumeType advances every non-terminal workflow of a type that is waiting
 // on a decision.
 func (e *Engine) resumeType(workflowType string) error {
-	ids, err := e.store.ListWorkflows()
+	waiting, err := e.indexed(func(s *WorkflowSummary) bool {
+		return s.GetWorkflowType() == workflowType && s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_RUNNING
+	})
 	if err != nil {
 		return fmt.Errorf("server: list workflows to resume %s: %w", workflowType, err)
 	}
 	planner, _ := e.planner(workflowType)
-	for _, id := range ids {
+	for _, s := range waiting {
+		id := s.GetWorkflowId()
 		w := e.lockWorkflow(id)
 		resumed, err := e.resumeLocked(w, workflowType, planner)
 		e.unlockWorkflow(w)

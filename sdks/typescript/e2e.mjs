@@ -52,6 +52,8 @@ async function waitDone(id) {
   fail(`workflow ${id} did not complete`);
 }
 
+// Registered before anything starts, so the first start can't race it.
+await worker.register();
 worker.run().catch((err) => fail(`worker: ${err.message}`));
 
 const id = await worker.startWorkflow('TsE2E', { n: 1 });

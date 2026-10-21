@@ -75,6 +75,8 @@ type Engine struct {
 	wfs  map[string]*wfState // workflows in use or cached
 	idle *list.List          // cached workflows nobody holds, most recent first
 
+	idx visibilityIndex
+
 	closeOnce sync.Once
 	done      chan struct{} // closed by Close; ends long polls
 
@@ -202,6 +204,9 @@ func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID str
 	if err := validateID(workflowID); err != nil {
 		return "", err
 	}
+	if isReservedID(workflowID) {
+		return "", fmt.Errorf("%w: workflow ids starting with %q are reserved", ErrInvalidArgument, reservedPrefix)
+	}
 	w := e.lockWorkflow(workflowID)
 	defer e.unlockWorkflow(w)
 	existing, _, err := e.historyLocked(w)
@@ -246,7 +251,11 @@ func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID str
 //
 // Completed steps are never re-run: Decide derives the next action from history,
 // and history already records them as done. Call Recover once, before serving.
-func (e *Engine) Recover() error {
+func (e *Engine) Recover() (err error) {
+	// The pass over every history also builds the visibility index.
+	if first, _ := e.startIndex(); first {
+		defer func() { e.finishIndex(err) }()
+	}
 	ids, err := e.store.ListWorkflows()
 	if err != nil {
 		return fmt.Errorf("server: list workflows for recovery: %w", err)
@@ -254,8 +263,12 @@ func (e *Engine) Recover() error {
 
 	var c recoveryCounts
 	for _, id := range ids {
+		if isReservedID(id) {
+			continue
+		}
 		w := e.lockWorkflow(id)
 		err := e.recoverLocked(w, &c)
+		e.indexLocked(w)
 		e.unlockWorkflow(w)
 		if err != nil {
 			return err
@@ -742,9 +755,11 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 	if err := e.hlog.Append(workflowID, ev); err != nil {
 		// The event may or may not have reached the log; read it back next time.
 		w.forget()
+		e.indexLocked(w)
 		return fmt.Errorf("server: append %s: %w", workflowID, err)
 	}
 	w.recordLocked(ev)
+	e.indexLocked(w)
 	if isTerminalEvent(ev) {
 		// The event is already durable; a failed close only costs a descriptor.
 		if err := e.store.Release(workflowID); err != nil {

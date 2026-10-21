@@ -12,12 +12,15 @@ import (
 // old. Each workflow is checked and deleted under its own lock, so a purge
 // never stalls live traffic.
 func (e *Engine) PurgeTerminated(cutoff time.Time) (int, error) {
-	ids, err := e.store.ListWorkflows()
+	due, err := e.indexed(func(s *WorkflowSummary) bool {
+		return isTerminalStatus(s.GetStatus()) && s.GetUpdatedAt() <= cutoff.UnixNano()
+	})
 	if err != nil {
 		return 0, fmt.Errorf("server: purge: %w", err)
 	}
 	purged := 0
-	for _, id := range ids {
+	for _, s := range due {
+		id := s.GetWorkflowId()
 		ok, err := e.purgeIfExpired(id, cutoff)
 		if err != nil {
 			// One unreadable log must not block retention for the rest.
@@ -47,8 +50,10 @@ func (e *Engine) purgeIfExpired(workflowID string, cutoff time.Time) (bool, erro
 	}
 	w.forget()
 	if err := e.hlog.Delete(workflowID); err != nil {
+		e.indexLocked(w) // the delete may or may not have happened
 		return false, err
 	}
+	e.indexDelete(workflowID)
 	e.metrics.workflowsPurged.Inc()
 	e.log.Info("retention: purged workflow", "workflow_id", workflowID, "status", st.Status.String())
 	return true, nil
@@ -70,4 +75,13 @@ func (e *Engine) RunRetention(ctx context.Context, keep, interval time.Duration)
 		case <-time.After(interval):
 		}
 	}
+}
+
+func isTerminalStatus(s WorkflowStatus) bool {
+	switch s {
+	case WorkflowStatus_WORKFLOW_STATUS_COMPLETED, WorkflowStatus_WORKFLOW_STATUS_FAILED,
+		WorkflowStatus_WORKFLOW_STATUS_TERMINATED, WorkflowStatus_WORKFLOW_STATUS_TIMED_OUT:
+		return true
+	}
+	return false
 }
