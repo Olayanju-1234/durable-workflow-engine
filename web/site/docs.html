@@ -496,9 +496,9 @@ w := worker.New(srv.Client(), worker.Options{})
       <thead><tr><th>SDK</th><th>Location</th><th>Status</th></tr></thead>
       <tbody>
         <tr><td>Go</td><td><code>workflow/</code>, <code>worker/</code>, <code>client/</code></td><td>Tested end to end, including leader failover (gRPC; see <a href="#registering">Workers &amp; clients</a>)</td></tr>
-        <tr><td>TypeScript / Node</td><td><code>sdks/typescript/</code></td><td>Verified end-to-end</td></tr>
-        <tr><td>Python</td><td><code>sdks/python/</code></td><td>Verified end-to-end</td></tr>
-        <tr><td>Java</td><td><code>sdks/java/</code></td><td>Written but not yet compiled — reference implementation</td></tr>
+        <tr><td>TypeScript / Node</td><td><code>sdks/typescript/</code></td><td>Run end to end in CI on every change, in plaintext and over TLS with a token. Packaged for npm, not yet published</td></tr>
+        <tr><td>Python</td><td><code>sdks/python/</code></td><td>Run end to end in CI, as above. Packaged for PyPI, not yet published</td></tr>
+        <tr><td>Java</td><td><code>sdks/java/</code></td><td>Compiled for Java 11 and run end to end in CI, as above. Packaged for Maven Central, not yet published</td></tr>
       </tbody>
     </table>
     <p>
@@ -994,8 +994,8 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
     <p>
       Yes — both halves. <em>Activities</em> have always been language-agnostic (any process
       that speaks the API can execute them). <em>Workflow definitions</em> can now also run
-      outside the engine: TypeScript and Python SDKs ship in <code>sdks/</code>, with a Java
-      reference implementation, and the <a href="#polyglot-protocol">protocol</a> is three HTTP
+      outside the engine: TypeScript, Python and Java SDKs ship in <code>sdks/</code>, each run
+      end to end in CI, and the <a href="#polyglot-protocol">protocol</a> is three HTTP
       endpoints if you want to add another language.
     </p>
 

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workflowd"
+version = "0.1.0"
+description = "Python SDK for workflowd, a single-binary durable workflow engine. Zero dependencies."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Joseph Olayanju" }]
+keywords = ["workflow", "durable-execution", "orchestration", "saga", "temporal"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Olayanju-1234/durable-workflow-engine"
+Documentation = "https://github.com/Olayanju-1234/durable-workflow-engine/tree/main/sdks#readme"
+Issues = "https://github.com/Olayanju-1234/durable-workflow-engine/issues"
+
+[tool.setuptools]
+py-modules = ["workflowd"]

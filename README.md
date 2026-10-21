@@ -168,9 +168,9 @@ worker.workflow('OrderWorkflow', async (ctx) => {
 | SDK | Status |
 |-----|--------|
 | Go (`workflow`, `worker`, `client`) | tested end to end, including leader failover |
-| TypeScript (`sdks/typescript/`) | verified end to end |
-| Python (`sdks/python/`) | verified end to end |
-| Java (`sdks/java/`) | written, never compiled: a reference implementation |
+| TypeScript (`sdks/typescript/`) | run end to end in CI (plaintext and TLS + token); npm-ready, not yet published |
+| Python (`sdks/python/`) | run end to end in CI (plaintext and TLS + token); PyPI-ready, not yet published |
+| Java (`sdks/java/`) | compiled for Java 11 and run end to end in CI; Maven-ready, not yet published |
 
 `GetVersion` and `SideEffect` are Go-only for now. [`sdks/README.md`](sdks/README.md) describes
 the protocol if you want to add a language.

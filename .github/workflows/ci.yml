@@ -107,3 +107,45 @@ jobs:
         env:
           AGAINST: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: buf breaking --against ".git#ref=${AGAINST},subdir=proto"
+
+  # The SDK packages build and validate the way the release workflow builds them.
+  # Nothing is published here; see .github/workflows/release-sdks.yml.
+  sdk-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: The SDK versions agree
+        run: python3 scripts/sdk-version.py
+
+      - name: npm package
+        working-directory: sdks/typescript
+        run: |
+          cp ../../LICENSE ../../NOTICE .
+          npx -y -p typescript@5.6.3 tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --lib es2022,dom types-check.mts
+          npm pack --dry-run
+
+      - name: Python package
+        working-directory: sdks/python
+        run: |
+          cp ../../LICENSE ../../NOTICE .
+          python -m pip install --quiet build==1.2.2 twine==6.0.1
+          python -m build
+          twine check --strict dist/*
+
+      - name: Maven artifact (jar, sources, javadoc)
+        working-directory: sdks/java
+        run: mvn -B -ntp -P release -Dgpg.skip verify
