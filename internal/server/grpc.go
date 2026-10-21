@@ -143,7 +143,7 @@ func (s *GRPCServer) SignalWorkflow(ctx context.Context, req *SignalWorkflowRequ
 	if err != nil {
 		return nil, err
 	}
-	err = e.SignalWorkflow(req.GetWorkflowId(), req.GetSignalName(), req.GetPayload())
+	err = e.SignalWorkflowOnce(req.GetWorkflowId(), req.GetSignalName(), req.GetRequestId(), req.GetPayload())
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):

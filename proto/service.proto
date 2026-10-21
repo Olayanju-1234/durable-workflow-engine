@@ -321,6 +321,10 @@ message SignalWorkflowRequest {
   string workflow_id = 1;
   string signal_name = 2;
   bytes payload = 3;
+  // Optional idempotency key, unique per signal the caller means to send.
+  // Retrying with the same key records the signal at most once, across
+  // restarts and leader changes (the key is kept in history).
+  string request_id = 4;
 }
 
 message SignalWorkflowResponse {}

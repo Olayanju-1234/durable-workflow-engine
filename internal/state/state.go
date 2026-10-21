@@ -124,6 +124,9 @@ type State struct {
 	// LastEventResolves: the latest event gave a step its result (or started
 	// the workflow), so the workflow code may have more to do.
 	LastEventResolves bool
+	// SignalRequests maps each signal idempotency key recorded to its signal
+	// name (nil until one is).
+	SignalRequests map[string]string
 }
 
 // Step returns the step with the given sequence, or nil.
@@ -326,6 +329,12 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 	case *history.HistoryEvent_SignalReceived:
 		sr := attr.SignalReceived
 		st.Signals = append(st.Signals, ReceivedSignal{Name: sr.GetSignalName(), Payload: sr.GetPayload()})
+		if id := sr.GetRequestId(); id != "" {
+			if st.SignalRequests == nil {
+				st.SignalRequests = make(map[string]string)
+			}
+			st.SignalRequests[id] = sr.GetSignalName()
+		}
 
 	case *history.HistoryEvent_StepFailed:
 		sf := attr.StepFailed

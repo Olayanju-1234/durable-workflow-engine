@@ -518,6 +518,14 @@ func (e *Engine) pollError(err error) error {
 // A signal to a not-yet-started or terminal workflow is rejected; so is an empty
 // signal name — it would be recorded forever and could never match a real wait.
 func (e *Engine) SignalWorkflow(workflowID, signalName string, payload []byte) error {
+	return e.SignalWorkflowOnce(workflowID, signalName, "", payload)
+}
+
+// SignalWorkflowOnce is SignalWorkflow with an idempotency key. The key is
+// recorded with the signal, so a retry with the same key (after a lost reply,
+// a restart or a leader change) succeeds without recording it again, even if
+// the workflow has finished since. An empty key means no deduplication.
+func (e *Engine) SignalWorkflowOnce(workflowID, signalName, requestID string, payload []byte) error {
 	if signalName == "" {
 		return fmt.Errorf("%w: signal name must not be empty", ErrInvalidArgument)
 	}
@@ -534,12 +542,21 @@ func (e *Engine) SignalWorkflow(workflowID, signalName string, payload []byte) e
 	if st.Status == state.StatusNotStarted {
 		return fmt.Errorf("%w: %q", ErrNotFound, workflowID)
 	}
+	if name, seen := st.SignalRequests[requestID]; requestID != "" && seen {
+		if name != signalName {
+			return fmt.Errorf("%w: request id %q was already used for signal %q", ErrInvalidArgument, requestID, name)
+		}
+		e.metrics.signalsDeduplicated.Inc()
+		e.log.Info("signal already recorded; not recording it again", "workflow_id", workflowID,
+			"signal", signalName, "request_id", requestID)
+		return nil
+	}
 	if st.Status.IsTerminal() {
 		return fmt.Errorf("%w: %q is %s; cannot signal a terminal workflow", ErrAlreadyTerminal, workflowID, st.Status)
 	}
 
 	sig := &history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
-		SignalReceived: &history.SignalReceivedEvent{SignalName: signalName, Payload: payload},
+		SignalReceived: &history.SignalReceivedEvent{SignalName: signalName, Payload: payload, RequestId: requestID},
 	}}
 	if err := e.appendLocked(w, sig, int64(len(events)+1)); err != nil {
 		return err

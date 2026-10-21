@@ -846,9 +846,13 @@ func (x *TimerFiredEvent) GetSequence() int64 {
 // Signals are buffered in the log: one that arrives before the workflow waits for
 // it is matched to the matching wait later, in arrival order.
 type SignalReceivedEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SignalName    string                 `protobuf:"bytes,1,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
-	Payload       []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SignalName string                 `protobuf:"bytes,1,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
+	Payload    []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
+	// The sender's idempotency key, if it gave one: a SignalWorkflow retried
+	// with the same key (say, after a leader change hid the reply) finds it here
+	// and is not recorded again. Older binaries ignore it.
+	RequestId     string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -895,6 +899,13 @@ func (x *SignalReceivedEvent) GetPayload() []byte {
 		return x.Payload
 	}
 	return nil
+}
+
+func (x *SignalReceivedEvent) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
 }
 
 // MarkerRecordedEvent records a value workflow code must see identically on
@@ -1043,11 +1054,13 @@ const file_event_proto_rawDesc = "" +
 	"\x05input\x18\x04 \x01(\fR\x05input\"J\n" +
 	"\x0fTimerFiredEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
-	"\bsequence\x18\x02 \x01(\x03R\bsequence\"P\n" +
+	"\bsequence\x18\x02 \x01(\x03R\bsequence\"o\n" +
 	"\x13SignalReceivedEvent\x12\x1f\n" +
 	"\vsignal_name\x18\x01 \x01(\tR\n" +
 	"signalName\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayload\"z\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x03 \x01(\tR\trequestId\"z\n" +
 	"\x13MarkerRecordedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x16\n" +

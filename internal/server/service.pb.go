@@ -1941,10 +1941,14 @@ func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
 }
 
 type SignalWorkflowRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkflowId    string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
-	SignalName    string                 `protobuf:"bytes,2,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
-	Payload       []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowId string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	SignalName string                 `protobuf:"bytes,2,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
+	Payload    []byte                 `protobuf:"bytes,3,opt,name=payload,proto3" json:"payload,omitempty"`
+	// Optional idempotency key, unique per signal the caller means to send.
+	// Retrying with the same key records the signal at most once, across
+	// restarts and leader changes (the key is kept in history).
+	RequestId     string `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1998,6 +2002,13 @@ func (x *SignalWorkflowRequest) GetPayload() []byte {
 		return x.Payload
 	}
 	return nil
+}
+
+func (x *SignalWorkflowRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
 }
 
 type SignalWorkflowResponse struct {
@@ -2678,13 +2689,15 @@ const file_service_proto_rawDesc = "" +
 	"\vlease_token\x18\x02 \x01(\tR\n" +
 	"leaseToken\x12\x1b\n" +
 	"\tworker_id\x18\x03 \x01(\tR\bworkerId\"\x13\n" +
-	"\x11HeartbeatResponse\"s\n" +
+	"\x11HeartbeatResponse\"\x92\x01\n" +
 	"\x15SignalWorkflowRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1f\n" +
 	"\vsignal_name\x18\x02 \x01(\tR\n" +
 	"signalName\x12\x18\n" +
-	"\apayload\x18\x03 \x01(\fR\apayload\"\x18\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x04 \x01(\tR\trequestId\"\x18\n" +
 	"\x16SignalWorkflowResponse\"X\n" +
 	"\x14ListWorkflowsRequest\x12@\n" +
 	"\rstatus_filter\x18\x01 \x01(\x0e2\x1b.workflow.v1.WorkflowStatusR\fstatusFilter\"\x87\x02\n" +

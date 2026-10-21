@@ -163,8 +163,8 @@ export class Worker {
   register(): Promise<void>;
   /** Start a workflow; resolves to its id. */
   startWorkflow(type: string, input?: Payload, workflowId?: string): Promise<string>;
-  /** Send an external signal to a running workflow. */
-  signal(workflowId: string, name: string, payload?: Payload): Promise<void>;
+  /** Send an external signal to a running workflow; recorded once, even when retried. */
+  signal(workflowId: string, name: string, payload?: Payload, opts?: { requestId?: string }): Promise<void>;
   /** The engine's view of a workflow: status, steps, output, error. */
   describe(workflowId: string): Promise<Record<string, unknown>>;
   /** Register, then serve workflow decisions and activities until stop(). */

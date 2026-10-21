@@ -546,11 +546,16 @@ export class Worker {
     return id;
   }
 
-  /** Send an external signal to a running workflow. */
-  async signal(workflowId, name, payload = '') {
+  /**
+   * Send an external signal to a running workflow. It is recorded once even if
+   * the request is retried (after a lost reply or a leader change): every
+   * attempt carries the same idempotency key, opts.requestId or a random one.
+   */
+  async signal(workflowId, name, payload = '', opts = {}) {
+    const requestId = opts.requestId ?? `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
     await this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}/signal`, {
       method: 'POST',
-      body: putPayload({ name }, 'payload', payload),
+      body: putPayload({ name, request_id: requestId }, 'payload', payload),
     });
   }
 

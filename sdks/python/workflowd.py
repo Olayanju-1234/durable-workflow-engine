@@ -552,11 +552,15 @@ class Worker:
                 raise
         return wid
 
-    def signal(self, workflow_id: str, name: str, payload: Any = "") -> None:
+    def signal(self, workflow_id: str, name: str, payload: Any = "", request_id: Optional[str] = None) -> None:
+        """Send a signal. It is recorded once even if the request is retried
+        (after a lost reply or a leader change): every attempt carries the same
+        idempotency key, ``request_id`` or a random one."""
+        body = {"name": name, "request_id": request_id or f"{random.randrange(16**16):016x}"}
         self.conn.request(
             "POST",
             f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}/signal",
-            _put_payload({"name": name}, "payload", payload),
+            _put_payload(body, "payload", payload),
         )
 
     def describe(self, workflow_id: str) -> dict:
