@@ -155,12 +155,17 @@ func (c *Client) DescribeWorkflow(ctx context.Context, workflowID string) (*Work
 
 // WaitForResult polls until the workflow finishes and returns its output. A
 // workflow that failed or was terminated returns an error matching
-// ErrWorkflowFailed whose message carries the workflow's own error.
+// ErrWorkflowFailed whose message carries the workflow's own error. It keeps
+// waiting while the engine is unreachable (a restart, an election); bound it
+// with ctx.
 func (c *Client) WaitForResult(ctx context.Context, workflowID string) ([]byte, error) {
 	delay := 20 * time.Millisecond
 	for {
 		d, err := c.DescribeWorkflow(ctx, workflowID)
-		if err != nil {
+		if errors.Is(err, ErrUnavailable) && ctx.Err() == nil {
+			c.log.Debug("engine unavailable; still waiting", "workflow_id", workflowID, "err", err)
+			d = &WorkflowDescription{}
+		} else if err != nil {
 			return nil, err
 		}
 		switch d.Status {

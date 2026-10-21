@@ -43,7 +43,7 @@ schedule next step → record result.** Four components, built across phases:
 | Polyglot SDKs    | `sdks/`            | —  ✅  | Workflow-task protocol + TypeScript/Python/Java SDKs (dependency-free). |
 | Consensus (Raft) | `internal/raft`    | 4 ✅  | Elections, log replication, snapshots, five-property safety checker. |
 | Cluster          | `internal/cluster` | 4 ✅  | Replicated history state machine, leader-only per-term engine, leader hints (ADR-0004). |
-| Public SDK       | `sdk`              | 5     | Ergonomic Go API developers import. |
+| Public Go SDK    | `workflow`, `worker`, `client`, `testsuite`, `embedded` | 5 ✅ | What Go developers import (ADR-0005). Replay engine in `internal/replay`; `sdk` is deprecated aliases. |
 
 ## Build / test / regenerate
 
@@ -84,6 +84,13 @@ source of truth because they travel with `git clone`; the global memory is the l
 
 ## Current status
 
+**Phase 5 complete (Weeks 15–17): the public Go SDK, all 17 roadmap weeks done.**
+Session 22: `workflow` / `worker` / `client` / `embedded` (Wk15), `GetVersion` +
+`SideEffect` markers and `testsuite` (Wk16), README, quickstart, three tested
+`examples/`, docs and a launch blog draft (Wk17). Engine fixes found on the way:
+steps resume without a registered planner, and a stale SDK decision after an early
+signal is re-dispatched.
+
 **Phase 4 complete (Weeks 1–14): Raft replication, opt-in with `--node-id`/`--peers`.**
 **Phase 3 complete (Weeks 1–10), plus polyglot workflows (Session 13, unplanned).**
 Week 9: observability (zero-dep Prometheus `/metrics`; visibility API). Week 10:
@@ -119,6 +126,13 @@ files are fsync'd before a snapshot marker claims them durable.
 
 **Polyglot invariants worth not breaking:** SDK decisions are fenced by history
 length (stale → reject); a malformed command must leave the task *pending* or the
-workflow strands; and each language needs a suspend mechanism workflow code can't
-catch (Go panic, Python `BaseException`, Java `Error`, JS **non-settling promise** —
-`catch` catches everything in JS).
+workflow strands; a stale decision whose workflow still needs one must be
+re-dispatched; and each language needs a suspend mechanism workflow code can't
+catch (Go `runtime.Goexit` on its own goroutine, Python `BaseException`, Java
+`Error`, JS **non-settling promise**, since `catch` catches everything in JS).
+
+**SDK invariants worth not breaking:** recording a step's outcome (recovery,
+timer, signal, activity result) never requires the workflow type to be
+registered; only deciding does. A worker re-registers whenever its connection is
+turned away. `GetVersion` consumes a step sequence only when a version marker is
+there (or is being recorded).

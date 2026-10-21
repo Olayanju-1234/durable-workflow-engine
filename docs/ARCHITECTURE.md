@@ -14,10 +14,11 @@
 | **State Machine** | `internal/state` | 1 | Walks a workflow's history to reconstruct state and emit *decisions* (schedule step, complete, fail). Pure function of history. |
 | **gRPC Task Queue** | `internal/server` | 1 | Public API: `StartWorkflow`, `PollTask`, `CompleteTask`. Bridges engine ↔ external workers. |
 | **Timers & Signals** | `internal/timer` | 2 | Min-heap of fire times; background goroutine appends `TimerFired`. External `SignalWorkflow` to park/resume workflows. |
-| **Replay Engine** | `sdk` + engine | 2 | Re-executes workflow code, returning recorded outputs for already-completed steps so side effects never repeat. Requires deterministic workflows. |
+| **Replay Engine** | `internal/replay` | 2, 5 | Re-executes workflow code, returning recorded outputs for already-completed steps so side effects never repeat. Requires deterministic workflows. Shared by the in-process engine, the Go worker and the test environment. |
 | **Scheduler** | `internal/server` | 3 | Worker identity, lease tokens on every dispatched task, `Heartbeat` RPC, reassignment on lease expiry (a dead worker's task is retried per policy). Sticky queues deferred — workers are stateless activity executors, so there is no worker-side cache to stick to yet. |
 | **Consensus (Raft)** | `internal/raft` | 4 | Leader election (Wk11), log replication, snapshotting. All history writes go through the Raft log for HA. See "Replication (Raft)" below. |
-| **Public SDK** | `sdk` | 5 | The Go package developers import. `workflow.Execute/Sleep/WaitForEvent/...`, `client.*`, `worker.New`. |
+| **Polyglot protocol** | `internal/server` | 3+ | `RegisterWorkflowType` / `PollWorkflowTask` / `CompleteWorkflowTask`: workflow code runs in an SDK process and returns one command per decision. |
+| **Public Go SDK** | `workflow`, `worker`, `client`, `testsuite`, `embedded` | 5 | What Go developers import: write workflows, run them in their own process over gRPC, start and inspect them, unit-test them in virtual time, or embed an engine. See "The Go SDK" below and [ADR-0005](adr/0005-public-go-sdk.md). |
 
 ## Data flow (happy path)
 
@@ -72,6 +73,8 @@ Records are appended and fsync'd one at a time:
   error; a short read (torn header/payload from a crash mid-append) is treated as end-of-log.
 - **fsync per append** → an event is only "committed" once durable. Correctness over
   performance for now; Phase 4 batches writes to amortize fsync.
+- **Event types** grow by adding `oneof` fields (`MarkerRecordedEvent` arrived in Phase 5).
+  An older binary cannot read a history that contains a newer event type.
 - **Torn-tail truncation on open** → the append handle is cached per workflow, and opening it
   truncates any partial trailing record. A failed write or fsync drops the cached handle, so
   a live process recovers on its next append the same way a restarted one does.
@@ -146,14 +149,56 @@ client ──▶ any node ──▶ follower?  ─▶ 503 / Unavailable + leader
   the leader's id and client addresses (learned from metadata on Raft traffic).
 - **Snapshots:** the raw bytes of every history file in `internal/record` frames.
 
-## Determinism (Phase 2+)
+## The Go SDK (Phase 5, ADR-0005)
 
-Replay only works if workflow functions are deterministic: same inputs → same step
-sequence. The SDK forbids non-determinism and provides replacements:
+```
+your process                                         workflowd
+──────────────────────────────────────               ─────────────────────────
+client.StartWorkflow ─────────── gRPC ──────────────▶ append WorkflowStarted
+worker ─ RegisterWorkflowType ───────────────────────▶ type → remote planner
+worker ─ PollWorkflowTask ◀── task: full history ──── dispatch decision
+  replay.Decide(fn, history)  (internal/replay)
+worker ─ CompleteWorkflowTask(one command) ──────────▶ validate, fence, append
+worker ─ PollTask(step_names) ◀── activity task ───── lease + enqueue
+  run ActivityFunc, Heartbeat every lease/3
+worker ─ CompleteTask(output | error) ───────────────▶ append, decide again
+```
 
-- ❌ `time.Now()` → ✅ `workflow.Now(ctx)` (recorded time)
-- ❌ `rand` → ✅ `workflow.Random(ctx)` (deterministic seed)
-- ❌ bare `go func()` → ✅ `workflow.Go(ctx, fn)` (tracked in history)
+- **One replay engine.** `internal/replay` runs a `workflow.Func` against a history and
+  returns the next decision. The engine uses it in-process for the daemon's own demo
+  workflows, the worker uses it for tasks it polls, and `testsuite` uses it against an
+  in-memory history, so all three behave identically.
+- **Suspension can't be caught.** Each decision runs the function on its own goroutine.
+  When a durable call reaches the first step history has no result for, the context
+  records the decision and calls `runtime.Goexit()`, which `recover()` in workflow code
+  cannot stop. A panic in workflow code becomes a replay error and fails the workflow.
+- **Markers.** `GetVersion` and `SideEffect` record a `MarkerRecordedEvent`: a step that
+  completes as it is recorded, with no worker. A version marker stores which branch an
+  execution took; an execution with no marker at that point predates the change and gets
+  `DefaultVersion`, without consuming a step sequence, so its old history still lines up.
+- **Following the leader.** `internal/rpc` keeps a gRPC connection per known node. A
+  `workflowd-leader-grpc` trailer on `Unavailable` moves calls to the leader; without one,
+  calls rotate through the known nodes with a short backoff. Every time a call is turned
+  away the worker registers its workflow types again, because each new engine (restart,
+  new leader, new term) starts with none.
+- **Steps don't wait for registration.** Recovery, timers, signals and activity results
+  are recorded whether or not the workflow's type is registered; only the next decision
+  waits for a worker to register it.
+
+## Determinism
+
+Replay only works if workflow functions are deterministic: same history, same sequence of
+durable calls. The Go SDK provides the replacements:
+
+- `time.Now()` → `ctx.Now()`: the time of the latest event the code has replayed past, in UTC.
+- `time.Sleep` → `ctx.Sleep`: a durable timer recorded in history.
+- `rand`, UUIDs, reading config that may change → `ctx.SideEffect`: run once, recorded.
+- Changing the code while executions are in flight → `ctx.GetVersion`.
+- No goroutines, file or network I/O in workflow code; do it in activities.
+
+A workflow that issues a different step than history recorded fails with a non-determinism
+error rather than corrupting the execution. `testsuite` replays every decision, so tests
+catch this before a deploy does.
 
 ## Key concepts this design exercises
 

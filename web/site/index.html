@@ -34,7 +34,7 @@
 <header class="hero">
   <div class="wrap hero-grid">
     <div>
-      <span class="pill">Pre-alpha · weeks 1–10 of 17</span>
+      <span class="pill">Pre-alpha · all 17 roadmap weeks done</span>
       <h1>Durable execution,<br><em>woven to last.</em></h1>
       <p class="sub">
         Write ordinary functions in Go, TypeScript or Python. The engine makes them
@@ -263,7 +263,7 @@
       </div>
       <div class="code-card">
         <div class="code-head"><span class="card-tag">Go</span><span>order_workflow.go</span></div>
-        <pre data-lang="go"><code>func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
+        <pre data-lang="go"><code>func OrderWorkflow(ctx workflow.Context, input []byte) ([]byte, error) {
 	reserved, err := ctx.ExecuteActivity("reserve", input)
 	if err != nil {
 		return nil, err // failed before any money moved
@@ -376,7 +376,7 @@ def capture(ctx):
       </div>
       <div class="code-card">
         <div class="code-head"><span class="card-tag">Go</span><span>trial.go</span></div>
-        <pre data-lang="go"><code>func TrialToPaid(ctx sdk.Context, user []byte) ([]byte, error) {
+        <pre data-lang="go"><code>func TrialToPaid(ctx workflow.Context, user []byte) ([]byte, error) {
 	// 14 days. The deadline is on disk: deploys, restarts and even
 	// engine upgrades don't reset the clock.
 	ctx.Sleep("trial", 14*24*time.Hour)
@@ -483,7 +483,8 @@ def capture(ctx):
       <h2>The pattern, section by section</h2>
       <p>
         This is a build-in-public engineering project, currently <strong>pre-alpha</strong>.
-        Weeks 1–14 of a 17-week plan are done. Don't put payroll on it yet.
+        All 17 weeks of the plan are done, but it has not carried real production traffic yet.
+        Don't put payroll on it yet.
       </p>
     </div>
     <div class="phases">
@@ -507,10 +508,10 @@ def capture(ctx):
         <div><div class="label">Phase 4 — Replication with Raft</div>
         <div class="desc">Hand-rolled Raft: elections, log replication, snapshots, a leader-only engine, chaos tests</div></div>
       </div>
-      <div class="phase next">
-        <span class="state">◐</span>
+      <div class="phase done">
+        <span class="state">✓</span>
         <div><div class="label">Phase 5 — SDK polish &amp; DX</div>
-        <div class="desc">Ergonomic public API, workflow versioning, testing framework, docs</div></div>
+        <div class="desc">Public Go SDK (workflow, worker, client), versioning, a virtual-time test environment, examples</div></div>
       </div>
     </div>
   </div>

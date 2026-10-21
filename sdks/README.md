@@ -6,7 +6,7 @@ logic can live in any language.
 
 | SDK | Path | Status |
 |-----|------|--------|
-| Go | [`../sdk/`](../sdk/) | ✅ in-process (compiled into the engine) |
+| Go | [`../workflow/`](../workflow/), [`../worker/`](../worker/), [`../client/`](../client/) | ✅ tested end to end, including leader failover (gRPC) |
 | TypeScript / Node | [`typescript/`](typescript/) | ✅ verified end-to-end against a live engine |
 | Python | [`python/`](python/) | ✅ verified end-to-end against a live engine |
 | Java | [`java/`](java/) | ⚠️ **written but never compiled** — no JDK was available on the machine it was authored on. Treat as a reference implementation until someone runs it. |
@@ -86,7 +86,7 @@ hatch:
 
 | Language | Mechanism | Why it's safe |
 |---|---|---|
-| Go | `panic` / `recover` | Recovered only by the SDK's own frame |
+| Go | `runtime.Goexit` on the workflow's own goroutine | `recover()` cannot stop it. (Until Phase 5 this was panic/recover, which a `recover()` in workflow code could swallow.) |
 | Python | subclass `BaseException` | `except Exception` doesn't catch it |
 | Java | subclass `Error` | `catch (Exception)` doesn't catch it |
 | **TypeScript** | **a promise that never settles** | `catch` catches *everything* in JS, so suspension must not be a throw at all |
