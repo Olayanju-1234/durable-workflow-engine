@@ -647,13 +647,29 @@ func (e *Engine) applyDecisionLocked(workflowID string, decision state.Decision,
 
 // appendLocked stamps the event id and wall-clock timestamp, then durably
 // appends. The caller must hold e.mu so ids stay contiguous across workflows.
+// Every terminal event passes through here, so this is where a finished
+// workflow's append handle is released.
 func (e *Engine) appendLocked(workflowID string, ev *history.HistoryEvent, eventID int64) error {
 	ev.EventId = eventID
 	ev.Timestamp = time.Now().UnixNano()
 	if err := e.store.Append(workflowID, ev); err != nil {
 		return fmt.Errorf("server: append %s: %w", workflowID, err)
 	}
+	if isTerminalEvent(ev) {
+		// The event is already durable; a failed close only costs a descriptor.
+		if err := e.store.Release(workflowID); err != nil {
+			e.log.Warn("release history handle", "workflow_id", workflowID, "err", err)
+		}
+	}
 	return nil
+}
+
+func isTerminalEvent(ev *history.HistoryEvent) bool {
+	switch ev.GetAttributes().(type) {
+	case *history.HistoryEvent_WorkflowCompleted, *history.HistoryEvent_WorkflowFailed:
+		return true
+	}
+	return false
 }
 
 // callbackRetryDelay is how long a failed timer callback waits before retrying.
