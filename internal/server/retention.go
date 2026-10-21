@@ -4,15 +4,13 @@ import (
 	"context"
 	"fmt"
 	"time"
-
-	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 )
 
 // PurgeTerminated deletes the history of every finished workflow (completed,
 // failed or terminated) whose last event is older than cutoff, and returns how
 // many it deleted. Running and waiting workflows are never touched, however
-// old. Each workflow is checked and deleted under the engine lock on its own,
-// so a large purge never stalls live traffic for long.
+// old. Each workflow is checked and deleted under its own lock, so a purge
+// never stalls live traffic.
 func (e *Engine) PurgeTerminated(cutoff time.Time) (int, error) {
 	ids, err := e.store.ListWorkflows()
 	if err != nil {
@@ -34,23 +32,20 @@ func (e *Engine) PurgeTerminated(cutoff time.Time) (int, error) {
 }
 
 func (e *Engine) purgeIfExpired(workflowID string, cutoff time.Time) (bool, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	w := e.lockWorkflow(workflowID)
+	defer e.unlockWorkflow(w)
 
-	events, err := e.store.ReadAll(workflowID)
+	events, st, err := e.historyLocked(w)
 	if err != nil {
 		return false, err
 	}
 	if len(events) == 0 {
 		return false, nil
 	}
-	st, err := state.Reconstruct(events)
-	if err != nil {
-		return false, err
-	}
 	if !st.Status.IsTerminal() || time.Unix(0, events[len(events)-1].GetTimestamp()).After(cutoff) {
 		return false, nil
 	}
+	w.forget()
 	if err := e.hlog.Delete(workflowID); err != nil {
 		return false, err
 	}

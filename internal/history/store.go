@@ -116,27 +116,42 @@ func (s *HistoryStore) append(workflowID string, event *HistoryEvent, sync bool)
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	f, err := s.fileLocked(workflowID, sync)
+	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
+	// The write and fsync run without s.mu, so appends to different workflows
+	// share the disk instead of queueing on one lock. Callers serialise appends
+	// to one workflow (the engine's per-workflow lock, the cluster's apply loop),
+	// so nothing else uses or closes f until this returns.
+	//
 	// os.File.Write errors whenever it writes short, so err alone catches a torn
 	// record. Dropping the handle makes the next Append reopen and truncate it.
 	if _, err := s.writeFile(f, rec); err != nil {
-		s.releaseLocked(workflowID)
+		s.dropHandle(workflowID, f)
 		return fmt.Errorf("history: write record: %w", err)
 	}
 	if !sync {
+		s.mu.Lock()
 		s.dirty[workflowID] = true
+		s.mu.Unlock()
 		return nil
 	}
 	if err := f.Sync(); err != nil {
-		s.releaseLocked(workflowID)
+		s.dropHandle(workflowID, f)
 		return fmt.Errorf("history: fsync: %w", err)
 	}
 	return nil
+}
+
+// dropHandle forgets f as the workflow's append handle after a failed write.
+func (s *HistoryStore) dropHandle(workflowID string, f *os.File) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.files[workflowID] == f {
+		s.releaseLocked(workflowID)
+	}
 }
 
 // ReadAll returns every event in the workflow's history, in append order. A
@@ -148,9 +163,8 @@ func (s *HistoryStore) ReadAll(workflowID string) ([]*HistoryEvent, error) {
 		return nil, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// No lock: a read racing an append sees the new record whole or not at
+	// all (a partial tail reads as the end of the log).
 	f, err := os.Open(s.path(workflowID))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil

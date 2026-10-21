@@ -199,6 +199,12 @@ func Decide(def WorkflowDefinition, events []*history.HistoryEvent) (Decision, e
 	if err != nil {
 		return Decision{}, err
 	}
+	return def.DecideState(st)
+}
+
+// DecideState is Decide for a caller that already holds the replayed state,
+// such as the engine, which keeps it in memory.
+func (def WorkflowDefinition) DecideState(st *State) (Decision, error) {
 
 	// Terminal, in-flight, or not-yet-started: the engine has nothing to decide.
 	if st.Status != StatusRunning {
