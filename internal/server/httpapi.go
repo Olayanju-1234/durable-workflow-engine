@@ -207,22 +207,27 @@ type summaryDTO struct {
 }
 
 type stepDTO struct {
-	StepName   string `json:"step_name"`
-	Sequence   int64  `json:"sequence"`
-	Kind       string `json:"kind"`
-	Status     string `json:"status"`
-	Attempts   int32  `json:"attempts"`
-	Error      string `json:"error,omitempty"`
-	Output     string `json:"output,omitempty"`
-	FireAt     string `json:"fire_at,omitempty"`
-	SignalName string `json:"signal_name,omitempty"`
+	StepName string `json:"step_name"`
+	Sequence int64  `json:"sequence"`
+	Kind     string `json:"kind"`
+	Status   string `json:"status"`
+	Attempts int32  `json:"attempts"`
+	Error    string `json:"error,omitempty"`
+	Output   string `json:"output,omitempty"`
+	// Set only when Output's bytes are not valid UTF-8 (see base64Twin).
+	OutputBase64 string `json:"output_base64,omitempty"`
+	FireAt       string `json:"fire_at,omitempty"`
+	SignalName   string `json:"signal_name,omitempty"`
+	Marker       string `json:"marker,omitempty"`
 }
 
 type workflowDTO struct {
 	summaryDTO
-	Input  string     `json:"input,omitempty"`
-	Output string     `json:"output,omitempty"`
-	Steps  []*stepDTO `json:"steps"`
+	Input        string     `json:"input,omitempty"`
+	InputBase64  string     `json:"input_base64,omitempty"`
+	Output       string     `json:"output,omitempty"`
+	OutputBase64 string     `json:"output_base64,omitempty"`
+	Steps        []*stepDTO `json:"steps"`
 }
 
 // health is answered by every node, leader or not: a follower is healthy too.
@@ -326,32 +331,42 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	steps := make([]*stepDTO, 0, len(resp.GetSteps()))
 	for _, s := range resp.GetSteps() {
 		steps = append(steps, &stepDTO{
-			StepName:   s.GetStepName(),
-			Sequence:   s.GetSequence(),
-			Kind:       s.GetKind(),
-			Status:     s.GetStatus(),
-			Attempts:   s.GetAttempts(),
-			Error:      s.GetError(),
-			Output:     string(s.GetOutput()),
-			FireAt:     formatNanos(s.GetFireAt()),
-			SignalName: s.GetSignalName(),
+			StepName:     s.GetStepName(),
+			Sequence:     s.GetSequence(),
+			Kind:         s.GetKind(),
+			Status:       s.GetStatus(),
+			Attempts:     s.GetAttempts(),
+			Error:        s.GetError(),
+			Output:       string(s.GetOutput()),
+			OutputBase64: base64Twin(s.GetOutput()),
+			FireAt:       formatNanos(s.GetFireAt()),
+			SignalName:   s.GetSignalName(),
+			Marker:       s.GetMarker(),
 		})
 	}
 	writeJSON(w, http.StatusOK, &workflowDTO{
-		summaryDTO: *toSummaryDTO(resp.GetSummary()),
-		Input:      string(resp.GetInput()),
-		Output:     string(resp.GetOutput()),
-		Steps:      steps,
+		summaryDTO:   *toSummaryDTO(resp.GetSummary()),
+		Input:        string(resp.GetInput()),
+		InputBase64:  base64Twin(resp.GetInput()),
+		Output:       string(resp.GetOutput()),
+		OutputBase64: base64Twin(resp.GetOutput()),
+		Steps:        steps,
 	})
 }
 
 func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Type       string `json:"type"`
-		Input      string `json:"input"`
-		WorkflowID string `json:"workflow_id"`
+		Type        string  `json:"type"`
+		Input       string  `json:"input"`
+		InputBase64 *string `json:"input_base64"`
+		WorkflowID  string  `json:"workflow_id"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	input, err := payloadFrom(body.Input, body.InputBase64, "input_base64")
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -359,7 +374,7 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
-	id, err := e.StartWorkflow(body.Type, []byte(body.Input), body.WorkflowID)
+	id, err := e.StartWorkflow(body.Type, input, body.WorkflowID)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):
@@ -413,10 +428,16 @@ func (a *HTTPAPI) terminateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name    string `json:"name"`
-		Payload string `json:"payload"`
+		Name          string  `json:"name"`
+		Payload       string  `json:"payload"`
+		PayloadBase64 *string `json:"payload_base64"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	payload, err := payloadFrom(body.Payload, body.PayloadBase64, "payload_base64")
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -424,7 +445,7 @@ func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
-	if err := e.SignalWorkflow(r.PathValue("id"), body.Name, []byte(body.Payload)); err != nil {
+	if err := e.SignalWorkflow(r.PathValue("id"), body.Name, payload); err != nil {
 		switch {
 		case errors.Is(err, ErrNotLeader):
 			a.writeNotLeader(w, err)

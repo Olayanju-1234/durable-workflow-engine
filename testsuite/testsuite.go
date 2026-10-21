@@ -14,8 +14,10 @@
 // worker. So a test also catches non-determinism: code that takes a different
 // path on replay fails here the way it would in production.
 //
-// Engine-side retry policies are not simulated: a failed activity returns its
-// error to the workflow at once.
+// A retry policy set with workflow.WithRetryPolicy is honoured in virtual
+// time. Engine-side policies (configured on the server by step name) are not
+// simulated: without a policy on the call, a failed activity returns its error
+// to the workflow at once.
 package testsuite
 
 import (
@@ -164,23 +166,34 @@ func (e *Env) runActivity(d state.Decision) error {
 	if !ok {
 		return fmt.Errorf("testsuite: activity %q is not registered; call RegisterActivity", d.StepName)
 	}
-	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
-		StepScheduled: &history.StepScheduledEvent{StepName: d.StepName, Sequence: d.Sequence, Input: d.Input},
-	}})
+	policy := state.RetryPolicy{MaxAttempts: 1}
+	if d.Retry != nil {
+		policy = *d.Retry
+	}
 	ctx := context.WithValue(context.Background(), sdkctx.ActivityInfoKey{}, worker.ActivityInfo{
 		WorkflowID: WorkflowID, StepName: d.StepName, Sequence: d.Sequence,
 	})
-	out, err := fn(ctx, d.Input)
-	if err != nil {
-		e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
-			StepFailed: &history.StepFailedEvent{StepName: d.StepName, Sequence: d.Sequence, Error: err.Error(), RetryCount: 1},
+	for attempt := 1; ; attempt++ {
+		e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
+			StepScheduled: &history.StepScheduledEvent{StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, RetryPolicy: d.Retry.ToProto()},
 		}})
-		return nil
+		out, err := fn(ctx, d.Input)
+		if err == nil {
+			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
+				StepCompleted: &history.StepCompletedEvent{StepName: d.StepName, Sequence: d.Sequence, Output: out},
+			}})
+			return nil
+		}
+		e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
+			StepFailed: &history.StepFailedEvent{StepName: d.StepName, Sequence: d.Sequence, Error: err.Error(), RetryCount: int32(attempt)},
+		}})
+		if attempt >= policy.MaxAttempts {
+			return nil
+		}
+		next := e.now.Add(policy.Delay(attempt))
+		e.deliverSignalsUntil(next)
+		e.now = next
 	}
-	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
-		StepCompleted: &history.StepCompletedEvent{StepName: d.StepName, Sequence: d.Sequence, Output: out},
-	}})
-	return nil
 }
 
 // awaitSignal advances virtual time to the next scheduled signal until one

@@ -291,7 +291,7 @@ func (e *Engine) Recover() error {
 			// window) must retry, not fail. The backoff timer was in memory, so re-arm
 			// it — promptly, since the original window is unknown.
 			if tail := st.Tail(); tail != nil && tail.Status == state.StepFailed && tail.Kind == state.KindActivity {
-				if p := e.retryPolicy(tail.Name); tail.Attempts < p.MaxAttempts {
+				if p := e.retryPolicy(tail); tail.Attempts < p.MaxAttempts {
 					e.scheduleRetryLocked(id, tail, 0)
 					rearmed++
 					continue
@@ -366,9 +366,9 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 
 		// Retry transparently if attempts remain (only activities retry); the
 		// workflow sees the error only once the policy is exhausted.
-		policy := e.retryPolicy(stepName)
+		policy := e.retryPolicy(tail)
 		if tail.Kind == state.KindActivity && tail.Attempts < policy.MaxAttempts {
-			e.scheduleRetryLocked(workflowID, tail, policy.backoff(tail.Attempts))
+			e.scheduleRetryLocked(workflowID, tail, policy.Delay(tail.Attempts))
 			return nil
 		}
 		return e.advanceIfRegisteredLocked(workflowID, st.WorkflowType)
@@ -592,6 +592,7 @@ func (e *Engine) applyDecisionLocked(workflowID string, decision state.Decision,
 		scheduled := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
 			StepScheduled: &history.StepScheduledEvent{
 				StepName: decision.StepName, Sequence: decision.Sequence, Input: decision.Input,
+				RetryPolicy: decision.Retry.ToProto(),
 			},
 		}}
 		if err := e.appendLocked(workflowID, scheduled, nextID); err != nil {

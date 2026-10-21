@@ -43,6 +43,29 @@ const (
 	MarkerSideEffect = "side_effect" // workflow.SideEffect: a recorded result
 )
 
+// RetryPolicy controls automatic re-execution of a failed activity: the
+// workflow sees the error only once attempts are exhausted. MaxAttempts counts
+// the first try (1 = no retry); Backoff is the first delay, doubled after each
+// further failure and capped at MaxBackoff (zero = no cap).
+type RetryPolicy struct {
+	MaxAttempts int
+	Backoff     time.Duration
+	MaxBackoff  time.Duration
+}
+
+// Delay is how long to wait before retrying after the given attempt failed
+// (attempt 1 waits Backoff).
+func (p RetryPolicy) Delay(attempt int) time.Duration {
+	d := p.Backoff
+	for i := 1; i < attempt; i++ {
+		d *= 2
+		if p.MaxBackoff > 0 && d >= p.MaxBackoff {
+			return p.MaxBackoff
+		}
+	}
+	return d
+}
+
 // StepDef is one planned step in a WorkflowDefinition. The zero value is an
 // activity, so a plain list of names still describes a linear activity pipeline.
 type StepDef struct {
@@ -142,6 +165,10 @@ type Decision struct {
 
 	// Set when Type == DecideAwaitSignal: the signal name the step waits for.
 	Signal string
+
+	// Optionally set when Type == DecideScheduleStep: the retry policy the
+	// workflow code chose, recorded on the step. Nil means the engine's.
+	Retry *RetryPolicy
 
 	// Set when Type == DecideRecordMarker: the marker kind ("version" or
 	// "side_effect"); its data rides in Output.

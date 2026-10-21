@@ -137,3 +137,34 @@ func TestVersionAndSideEffect(t *testing.T) {
 		t.Fatalf("activity info %+v", info)
 	}
 }
+
+func TestRetryPolicyInVirtualTime(t *testing.T) {
+	env := testsuite.NewEnv()
+	calls := 0
+	env.RegisterActivity("charge", func(context.Context, []byte) ([]byte, error) {
+		if calls++; calls < 3 {
+			return nil, errors.New("declined")
+		}
+		return []byte("charged"), nil
+	})
+	out, err := env.ExecuteWorkflow(func(ctx workflow.Context, in []byte) ([]byte, error) {
+		return ctx.ExecuteActivity("charge", in, workflow.WithRetryPolicy(workflow.RetryPolicy{
+			MaxAttempts: 3, InitialBackoff: time.Minute,
+		}))
+	}, nil)
+	if err != nil || string(out) != "charged" {
+		t.Fatalf("got %q, %v; want charged", out, err)
+	}
+	if env.Elapsed() != 3*time.Minute { // 1m, then 2m
+		t.Errorf("elapsed %s, want 3m of backoff", env.Elapsed())
+	}
+
+	env = testsuite.NewEnv()
+	env.RegisterActivity("charge", func(context.Context, []byte) ([]byte, error) { return nil, errors.New("declined") })
+	_, err = env.ExecuteWorkflow(func(ctx workflow.Context, in []byte) ([]byte, error) {
+		return ctx.ExecuteActivity("charge", in, workflow.WithRetryPolicy(workflow.RetryPolicy{MaxAttempts: 2}))
+	}, nil)
+	if !errors.Is(err, testsuite.ErrWorkflowFailed) {
+		t.Fatalf("exhausted retries: %v, want ErrWorkflowFailed", err)
+	}
+}

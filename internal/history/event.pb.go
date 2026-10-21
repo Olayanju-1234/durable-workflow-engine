@@ -334,8 +334,12 @@ type StepScheduledEvent struct {
 	// A signal wait is a step with no worker task: it records a StepScheduled with
 	// awaits_signal set and the awaited signal_name, so recovery and signal delivery
 	// are driven by history alone (no need to consult the workflow definition/code).
-	AwaitsSignal  bool   `protobuf:"varint,4,opt,name=awaits_signal,json=awaitsSignal,proto3" json:"awaits_signal,omitempty"`
-	SignalName    string `protobuf:"bytes,5,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
+	AwaitsSignal bool   `protobuf:"varint,4,opt,name=awaits_signal,json=awaitsSignal,proto3" json:"awaits_signal,omitempty"`
+	SignalName   string `protobuf:"bytes,5,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
+	// Set when the workflow code chose this activity's retry policy (Phase 5
+	// polish). Recorded so retries follow it across restarts; absent means the
+	// engine's policy for the step name applies. Older binaries ignore it.
+	RetryPolicy   *RetryPolicy `protobuf:"bytes,6,opt,name=retry_policy,json=retryPolicy,proto3" json:"retry_policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -405,6 +409,77 @@ func (x *StepScheduledEvent) GetSignalName() string {
 	return ""
 }
 
+func (x *StepScheduledEvent) GetRetryPolicy() *RetryPolicy {
+	if x != nil {
+		return x.RetryPolicy
+	}
+	return nil
+}
+
+// RetryPolicy re-runs a failed activity before the workflow sees the error.
+// Backoff doubles after each failed attempt, capped at max_backoff_ms.
+type RetryPolicy struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Attempts in total, counting the first: 1 means no retries.
+	MaxAttempts      int32 `protobuf:"varint,1,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
+	InitialBackoffMs int64 `protobuf:"varint,2,opt,name=initial_backoff_ms,json=initialBackoffMs,proto3" json:"initial_backoff_ms,omitempty"`
+	// Zero means no cap.
+	MaxBackoffMs  int64 `protobuf:"varint,3,opt,name=max_backoff_ms,json=maxBackoffMs,proto3" json:"max_backoff_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RetryPolicy) Reset() {
+	*x = RetryPolicy{}
+	mi := &file_event_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RetryPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RetryPolicy) ProtoMessage() {}
+
+func (x *RetryPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_event_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RetryPolicy.ProtoReflect.Descriptor instead.
+func (*RetryPolicy) Descriptor() ([]byte, []int) {
+	return file_event_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RetryPolicy) GetMaxAttempts() int32 {
+	if x != nil {
+		return x.MaxAttempts
+	}
+	return 0
+}
+
+func (x *RetryPolicy) GetInitialBackoffMs() int64 {
+	if x != nil {
+		return x.InitialBackoffMs
+	}
+	return 0
+}
+
+func (x *RetryPolicy) GetMaxBackoffMs() int64 {
+	if x != nil {
+		return x.MaxBackoffMs
+	}
+	return 0
+}
+
 type StepCompletedEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StepName      string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
@@ -416,7 +491,7 @@ type StepCompletedEvent struct {
 
 func (x *StepCompletedEvent) Reset() {
 	*x = StepCompletedEvent{}
-	mi := &file_event_proto_msgTypes[3]
+	mi := &file_event_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -428,7 +503,7 @@ func (x *StepCompletedEvent) String() string {
 func (*StepCompletedEvent) ProtoMessage() {}
 
 func (x *StepCompletedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[3]
+	mi := &file_event_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -441,7 +516,7 @@ func (x *StepCompletedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepCompletedEvent.ProtoReflect.Descriptor instead.
 func (*StepCompletedEvent) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{3}
+	return file_event_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *StepCompletedEvent) GetStepName() string {
@@ -477,7 +552,7 @@ type StepFailedEvent struct {
 
 func (x *StepFailedEvent) Reset() {
 	*x = StepFailedEvent{}
-	mi := &file_event_proto_msgTypes[4]
+	mi := &file_event_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -489,7 +564,7 @@ func (x *StepFailedEvent) String() string {
 func (*StepFailedEvent) ProtoMessage() {}
 
 func (x *StepFailedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[4]
+	mi := &file_event_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -502,7 +577,7 @@ func (x *StepFailedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepFailedEvent.ProtoReflect.Descriptor instead.
 func (*StepFailedEvent) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{4}
+	return file_event_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *StepFailedEvent) GetStepName() string {
@@ -542,7 +617,7 @@ type WorkflowCompletedEvent struct {
 
 func (x *WorkflowCompletedEvent) Reset() {
 	*x = WorkflowCompletedEvent{}
-	mi := &file_event_proto_msgTypes[5]
+	mi := &file_event_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -554,7 +629,7 @@ func (x *WorkflowCompletedEvent) String() string {
 func (*WorkflowCompletedEvent) ProtoMessage() {}
 
 func (x *WorkflowCompletedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[5]
+	mi := &file_event_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -567,7 +642,7 @@ func (x *WorkflowCompletedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowCompletedEvent.ProtoReflect.Descriptor instead.
 func (*WorkflowCompletedEvent) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{5}
+	return file_event_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *WorkflowCompletedEvent) GetOutput() []byte {
@@ -590,7 +665,7 @@ type WorkflowFailedEvent struct {
 
 func (x *WorkflowFailedEvent) Reset() {
 	*x = WorkflowFailedEvent{}
-	mi := &file_event_proto_msgTypes[6]
+	mi := &file_event_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -602,7 +677,7 @@ func (x *WorkflowFailedEvent) String() string {
 func (*WorkflowFailedEvent) ProtoMessage() {}
 
 func (x *WorkflowFailedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[6]
+	mi := &file_event_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -615,7 +690,7 @@ func (x *WorkflowFailedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowFailedEvent.ProtoReflect.Descriptor instead.
 func (*WorkflowFailedEvent) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{6}
+	return file_event_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *WorkflowFailedEvent) GetError() string {
@@ -647,7 +722,7 @@ type TimerStartedEvent struct {
 
 func (x *TimerStartedEvent) Reset() {
 	*x = TimerStartedEvent{}
-	mi := &file_event_proto_msgTypes[7]
+	mi := &file_event_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -659,7 +734,7 @@ func (x *TimerStartedEvent) String() string {
 func (*TimerStartedEvent) ProtoMessage() {}
 
 func (x *TimerStartedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[7]
+	mi := &file_event_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -672,7 +747,7 @@ func (x *TimerStartedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TimerStartedEvent.ProtoReflect.Descriptor instead.
 func (*TimerStartedEvent) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{7}
+	return file_event_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *TimerStartedEvent) GetStepName() string {
@@ -715,7 +790,7 @@ type TimerFiredEvent struct {
 
 func (x *TimerFiredEvent) Reset() {
 	*x = TimerFiredEvent{}
-	mi := &file_event_proto_msgTypes[8]
+	mi := &file_event_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -727,7 +802,7 @@ func (x *TimerFiredEvent) String() string {
 func (*TimerFiredEvent) ProtoMessage() {}
 
 func (x *TimerFiredEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[8]
+	mi := &file_event_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -740,7 +815,7 @@ func (x *TimerFiredEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TimerFiredEvent.ProtoReflect.Descriptor instead.
 func (*TimerFiredEvent) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{8}
+	return file_event_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TimerFiredEvent) GetStepName() string {
@@ -770,7 +845,7 @@ type SignalReceivedEvent struct {
 
 func (x *SignalReceivedEvent) Reset() {
 	*x = SignalReceivedEvent{}
-	mi := &file_event_proto_msgTypes[9]
+	mi := &file_event_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -782,7 +857,7 @@ func (x *SignalReceivedEvent) String() string {
 func (*SignalReceivedEvent) ProtoMessage() {}
 
 func (x *SignalReceivedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[9]
+	mi := &file_event_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -795,7 +870,7 @@ func (x *SignalReceivedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignalReceivedEvent.ProtoReflect.Descriptor instead.
 func (*SignalReceivedEvent) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{9}
+	return file_event_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SignalReceivedEvent) GetSignalName() string {
@@ -833,7 +908,7 @@ type MarkerRecordedEvent struct {
 
 func (x *MarkerRecordedEvent) Reset() {
 	*x = MarkerRecordedEvent{}
-	mi := &file_event_proto_msgTypes[10]
+	mi := &file_event_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -845,7 +920,7 @@ func (x *MarkerRecordedEvent) String() string {
 func (*MarkerRecordedEvent) ProtoMessage() {}
 
 func (x *MarkerRecordedEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_event_proto_msgTypes[10]
+	mi := &file_event_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -858,7 +933,7 @@ func (x *MarkerRecordedEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MarkerRecordedEvent.ProtoReflect.Descriptor instead.
 func (*MarkerRecordedEvent) Descriptor() ([]byte, []int) {
-	return file_event_proto_rawDescGZIP(), []int{10}
+	return file_event_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *MarkerRecordedEvent) GetStepName() string {
@@ -919,14 +994,19 @@ const file_event_proto_rawDesc = "" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12#\n" +
 	"\rworkflow_type\x18\x02 \x01(\tR\fworkflowType\x12\x14\n" +
-	"\x05input\x18\x03 \x01(\fR\x05input\"\xa9\x01\n" +
+	"\x05input\x18\x03 \x01(\fR\x05input\"\xe5\x01\n" +
 	"\x12StepScheduledEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1a\n" +
 	"\bsequence\x18\x03 \x01(\x03R\bsequence\x12#\n" +
 	"\rawaits_signal\x18\x04 \x01(\bR\fawaitsSignal\x12\x1f\n" +
 	"\vsignal_name\x18\x05 \x01(\tR\n" +
-	"signalName\"e\n" +
+	"signalName\x12:\n" +
+	"\fretry_policy\x18\x06 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\"\x84\x01\n" +
+	"\vRetryPolicy\x12!\n" +
+	"\fmax_attempts\x18\x01 \x01(\x05R\vmaxAttempts\x12,\n" +
+	"\x12initial_backoff_ms\x18\x02 \x01(\x03R\x10initialBackoffMs\x12$\n" +
+	"\x0emax_backoff_ms\x18\x03 \x01(\x03R\fmaxBackoffMs\"e\n" +
 	"\x12StepCompletedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x16\n" +
 	"\x06output\x18\x02 \x01(\fR\x06output\x12\x1a\n" +
@@ -974,36 +1054,38 @@ func file_event_proto_rawDescGZIP() []byte {
 	return file_event_proto_rawDescData
 }
 
-var file_event_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_event_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_event_proto_goTypes = []any{
 	(*HistoryEvent)(nil),           // 0: history.v1.HistoryEvent
 	(*WorkflowStartedEvent)(nil),   // 1: history.v1.WorkflowStartedEvent
 	(*StepScheduledEvent)(nil),     // 2: history.v1.StepScheduledEvent
-	(*StepCompletedEvent)(nil),     // 3: history.v1.StepCompletedEvent
-	(*StepFailedEvent)(nil),        // 4: history.v1.StepFailedEvent
-	(*WorkflowCompletedEvent)(nil), // 5: history.v1.WorkflowCompletedEvent
-	(*WorkflowFailedEvent)(nil),    // 6: history.v1.WorkflowFailedEvent
-	(*TimerStartedEvent)(nil),      // 7: history.v1.TimerStartedEvent
-	(*TimerFiredEvent)(nil),        // 8: history.v1.TimerFiredEvent
-	(*SignalReceivedEvent)(nil),    // 9: history.v1.SignalReceivedEvent
-	(*MarkerRecordedEvent)(nil),    // 10: history.v1.MarkerRecordedEvent
+	(*RetryPolicy)(nil),            // 3: history.v1.RetryPolicy
+	(*StepCompletedEvent)(nil),     // 4: history.v1.StepCompletedEvent
+	(*StepFailedEvent)(nil),        // 5: history.v1.StepFailedEvent
+	(*WorkflowCompletedEvent)(nil), // 6: history.v1.WorkflowCompletedEvent
+	(*WorkflowFailedEvent)(nil),    // 7: history.v1.WorkflowFailedEvent
+	(*TimerStartedEvent)(nil),      // 8: history.v1.TimerStartedEvent
+	(*TimerFiredEvent)(nil),        // 9: history.v1.TimerFiredEvent
+	(*SignalReceivedEvent)(nil),    // 10: history.v1.SignalReceivedEvent
+	(*MarkerRecordedEvent)(nil),    // 11: history.v1.MarkerRecordedEvent
 }
 var file_event_proto_depIdxs = []int32{
 	1,  // 0: history.v1.HistoryEvent.workflow_started:type_name -> history.v1.WorkflowStartedEvent
 	2,  // 1: history.v1.HistoryEvent.step_scheduled:type_name -> history.v1.StepScheduledEvent
-	3,  // 2: history.v1.HistoryEvent.step_completed:type_name -> history.v1.StepCompletedEvent
-	4,  // 3: history.v1.HistoryEvent.step_failed:type_name -> history.v1.StepFailedEvent
-	5,  // 4: history.v1.HistoryEvent.workflow_completed:type_name -> history.v1.WorkflowCompletedEvent
-	6,  // 5: history.v1.HistoryEvent.workflow_failed:type_name -> history.v1.WorkflowFailedEvent
-	7,  // 6: history.v1.HistoryEvent.timer_started:type_name -> history.v1.TimerStartedEvent
-	8,  // 7: history.v1.HistoryEvent.timer_fired:type_name -> history.v1.TimerFiredEvent
-	9,  // 8: history.v1.HistoryEvent.signal_received:type_name -> history.v1.SignalReceivedEvent
-	10, // 9: history.v1.HistoryEvent.marker_recorded:type_name -> history.v1.MarkerRecordedEvent
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	4,  // 2: history.v1.HistoryEvent.step_completed:type_name -> history.v1.StepCompletedEvent
+	5,  // 3: history.v1.HistoryEvent.step_failed:type_name -> history.v1.StepFailedEvent
+	6,  // 4: history.v1.HistoryEvent.workflow_completed:type_name -> history.v1.WorkflowCompletedEvent
+	7,  // 5: history.v1.HistoryEvent.workflow_failed:type_name -> history.v1.WorkflowFailedEvent
+	8,  // 6: history.v1.HistoryEvent.timer_started:type_name -> history.v1.TimerStartedEvent
+	9,  // 7: history.v1.HistoryEvent.timer_fired:type_name -> history.v1.TimerFiredEvent
+	10, // 8: history.v1.HistoryEvent.signal_received:type_name -> history.v1.SignalReceivedEvent
+	11, // 9: history.v1.HistoryEvent.marker_recorded:type_name -> history.v1.MarkerRecordedEvent
+	3,  // 10: history.v1.StepScheduledEvent.retry_policy:type_name -> history.v1.RetryPolicy
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_event_proto_init() }
@@ -1029,7 +1111,7 @@ func file_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_event_proto_rawDesc), len(file_event_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

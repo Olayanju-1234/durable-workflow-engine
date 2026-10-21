@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 )
@@ -80,12 +81,13 @@ type Step struct {
 	Kind     StepKind // reconstructed from the opening event, so runtime needs no definition
 	Status   StepStatus
 	Input    []byte
-	Output   []byte // set once Status == StepCompleted
-	Error    string // set once Status == StepFailed
-	FireAt   int64  // timer steps only: unix-nanos deadline (from TimerStarted), for recovery re-arm
-	Signal   string // signal steps only: the awaited signal name
-	Marker   string // marker steps only: "version" or "side_effect"
-	Attempts int    // activity steps: how many times scheduled (>1 means it was retried)
+	Output   []byte       // set once Status == StepCompleted
+	Error    string       // set once Status == StepFailed
+	FireAt   int64        // timer steps only: unix-nanos deadline (from TimerStarted), for recovery re-arm
+	Signal   string       // signal steps only: the awaited signal name
+	Marker   string       // marker steps only: "version" or "side_effect"
+	Attempts int          // activity steps: how many times scheduled (>1 means it was retried)
+	Retry    *RetryPolicy // activity steps: the policy recorded with the step, if any
 }
 
 // ReceivedSignal is one external signal delivered to a workflow, in arrival order.
@@ -166,6 +168,9 @@ func Reconstruct(events []*history.HistoryEvent) (*State, error) {
 					last.Error = ""
 					last.Input = ss.GetInput()
 					last.Attempts++
+					if p := RetryPolicyFromProto(ss.GetRetryPolicy()); p != nil {
+						last.Retry = p
+					}
 					openIdx = n - 1
 					break
 				}
@@ -187,6 +192,7 @@ func Reconstruct(events []*history.HistoryEvent) (*State, error) {
 				Input:    ss.GetInput(),
 				Signal:   ss.GetSignalName(),
 				Attempts: 1,
+				Retry:    RetryPolicyFromProto(ss.GetRetryPolicy()),
 			})
 			openIdx = len(st.Steps) - 1
 			lastSeq = seq
@@ -344,4 +350,28 @@ func (s *State) DeliverableSignal() ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+// RetryPolicyFromProto converts a recorded policy; nil or unset gives nil.
+func RetryPolicyFromProto(p *history.RetryPolicy) *RetryPolicy {
+	if p == nil || p.GetMaxAttempts() == 0 {
+		return nil
+	}
+	return &RetryPolicy{
+		MaxAttempts: int(p.GetMaxAttempts()),
+		Backoff:     time.Duration(p.GetInitialBackoffMs()) * time.Millisecond,
+		MaxBackoff:  time.Duration(p.GetMaxBackoffMs()) * time.Millisecond,
+	}
+}
+
+// ToProto is the recorded form of p; nil stays nil.
+func (p *RetryPolicy) ToProto() *history.RetryPolicy {
+	if p == nil {
+		return nil
+	}
+	return &history.RetryPolicy{
+		MaxAttempts:      int32(p.MaxAttempts),
+		InitialBackoffMs: p.Backoff.Milliseconds(),
+		MaxBackoffMs:     p.MaxBackoff.Milliseconds(),
+	}
 }

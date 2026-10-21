@@ -1,0 +1,92 @@
+// End-to-end check of the SDK against a live engine, run by sdks/sdk_e2e_test.go:
+//   node e2e.mjs <follower-url> <leader-url>
+// The worker is given only the follower, so everything below also proves it
+// follows the leader hint. Prints PASS on success.
+import { createInterface } from 'node:readline';
+import { Worker, DEFAULT_VERSION } from './workflowd.mjs';
+
+const [follower, leader] = process.argv.slice(2);
+const fail = (msg) => {
+  console.error(`[ts e2e] FAIL: ${msg}`);
+  process.exit(1);
+};
+const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
+
+const worker = new Worker({ addresses: [follower], workerId: 'ts-e2e' });
+let flakyCalls = 0;
+
+worker.workflow('TsE2E', async (ctx) => {
+  const order = ctx.inputAs('json');
+  const v = await ctx.getVersion('pricing-v2', DEFAULT_VERSION, 2);
+  const id = await ctx.sideEffect('order-id', () => `id-${order.n}`);
+  const flaky = await ctx.activity('ts-flaky', order, {
+    retry: { maxAttempts: 3, initialBackoffMs: 10 },
+    as: 'json',
+  });
+  const bin = await ctx.activity('ts-binary', new Uint8Array([0xff, 0x00, 0x7f]), { as: 'bytes' });
+  const slow = await ctx.activity('ts-slow', 'x');
+  await ctx.sleep('nap', 20);
+  const sig = await ctx.waitForSignal('wait', 'go', { as: 'json' });
+  return { v, id, flaky, bin: [...bin], slow, sig };
+});
+worker.workflow('TsAfterRestart', async (ctx) => ctx.activity('ts-flaky', { n: 41 }, { as: 'json' }));
+
+worker.activity('ts-flaky', async (order) => {
+  if (order.n === 1 && ++flakyCalls < 3) throw new Error('flaky');
+  return { ok: order.n + 1 };
+}, { as: 'json' });
+worker.activity('ts-binary', async (bytes) => Buffer.from([...bytes].reverse()), { as: 'bytes' });
+// Longer than the engine's 600 ms lease: it only survives by heartbeating.
+worker.activity('ts-slow', async () => {
+  await new Promise((r) => setTimeout(r, 1500));
+  return 'slow-done';
+});
+
+async function waitDone(id) {
+  for (let i = 0; i < 300; i++) {
+    const wf = await worker.describe(id);
+    if (wf.status === 'COMPLETED') return wf;
+    if (wf.status !== 'RUNNING' && wf.status !== 'WAITING') fail(`workflow ${id} is ${wf.status}: ${wf.error}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  fail(`workflow ${id} did not complete`);
+}
+
+worker.run().catch((err) => fail(`worker: ${err.message}`));
+
+const id = await worker.startWorkflow('TsE2E', { n: 1 });
+if (worker.address !== leader) fail(`worker uses ${worker.address}, want the leader ${leader}`);
+for (let i = 0; ; i++) {
+  const wf = await worker.describe(id);
+  if (wf.steps.some((s) => s.step_name === 'wait')) break;
+  if (i > 300) fail('workflow never reached its signal wait');
+  await new Promise((r) => setTimeout(r, 50));
+}
+await worker.signal(id, 'go', { go: true });
+const wf = await waitDone(id);
+const want = { v: 2, id: 'id-1', flaky: { ok: 2 }, bin: [0x7f, 0x00, 0xff], slow: 'slow-done', sig: { go: true } };
+if (JSON.stringify(JSON.parse(wf.output)) !== JSON.stringify(want)) fail(`output ${wf.output}, want ${JSON.stringify(want)}`);
+const flakyStep = wf.steps.find((s) => s.step_name === 'ts-flaky');
+if (flakyStep.attempts !== 3) fail(`ts-flaky attempts ${flakyStep.attempts}, want 3`);
+const slowStep = wf.steps.find((s) => s.step_name === 'ts-slow');
+if (slowStep.attempts !== 1) fail(`ts-slow attempts ${slowStep.attempts}, want 1 (heartbeats kept the lease)`);
+
+// A restarted engine has forgotten every registration: the worker must notice
+// and register again before this workflow can be dispatched.
+console.log('RESTART');
+await lines.next();
+let afterId;
+for (let i = 0; !afterId; i++) {
+  try {
+    afterId = await worker.startWorkflow('TsAfterRestart');
+  } catch (err) {
+    // 400 until the worker has registered with the new engine.
+    if (err.status !== 400 || i > 100) fail(`start after restart: ${err.message}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+const after = await waitDone(afterId);
+if (after.output !== '{"ok":42}') fail(`after restart: output ${after.output}`);
+
+console.log('PASS');
+process.exit(0);

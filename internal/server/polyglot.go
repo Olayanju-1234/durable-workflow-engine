@@ -307,9 +307,13 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 	switch c := cmd.GetCommand().(type) {
 	case *WorkflowCommand_ScheduleActivity:
 		a := c.ScheduleActivity
+		retry, err := retryFromCommand(a.GetRetryPolicy())
+		if err != nil {
+			return state.Decision{}, err
+		}
 		return state.Decision{
 			Type: state.DecideScheduleStep, StepName: a.GetStepName(),
-			Sequence: a.GetSequence(), Input: a.GetInput(),
+			Sequence: a.GetSequence(), Input: a.GetInput(), Retry: retry,
 		}, nil
 	case *WorkflowCommand_StartTimer:
 		t := c.StartTimer
@@ -339,13 +343,26 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 	}
 }
 
+// retryFromCommand validates an SDK-chosen retry policy. A malformed one is
+// refused like any malformed command, before it can reach the log.
+func retryFromCommand(p *history.RetryPolicy) (*state.RetryPolicy, error) {
+	if p == nil {
+		return nil, nil
+	}
+	if p.GetMaxAttempts() < 1 || p.GetInitialBackoffMs() < 0 || p.GetMaxBackoffMs() < 0 {
+		return nil, fmt.Errorf("%w: retry policy needs max_attempts >= 1 and non-negative backoffs, got %v",
+			ErrInvalidCommand, p)
+	}
+	return state.RetryPolicyFromProto(p), nil
+}
+
 // CommandFromDecision is the inverse of decisionFromCommand: what a Go SDK
 // worker sends back for a decision its replay produced. A noop is a nil command.
 func CommandFromDecision(d state.Decision) *WorkflowCommand {
 	switch d.Type {
 	case state.DecideScheduleStep:
 		return &WorkflowCommand{Command: &WorkflowCommand_ScheduleActivity{ScheduleActivity: &ScheduleActivityCommand{
-			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input,
+			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, RetryPolicy: d.Retry.ToProto(),
 		}}}
 	case state.DecideStartTimer:
 		return &WorkflowCommand{Command: &WorkflowCommand_StartTimer{StartTimer: &StartTimerCommand{

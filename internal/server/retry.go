@@ -10,45 +10,31 @@ import (
 
 // RetryPolicy controls automatic re-execution of a failed activity. Retries are an
 // engine concern, handled transparently: the workflow only sees an activity error
-// once attempts are exhausted. MaxAttempts counts the first try (1 = no retry);
-// Backoff is the base delay, doubled each subsequent attempt (exponential), capped
-// at MaxBackoff.
-type RetryPolicy struct {
-	MaxAttempts int
-	Backoff     time.Duration
-	MaxBackoff  time.Duration
-}
+// once attempts are exhausted. See state.RetryPolicy.
+type RetryPolicy = state.RetryPolicy
 
 // noRetry is the default: run once, surface any failure to the workflow immediately.
 var noRetry = RetryPolicy{MaxAttempts: 1}
 
 // SetRetryPolicy registers a retry policy for an activity by step name. Call before
-// serving. Keying by step name is a Phase-2 simplification; per-call activity options
-// arrive with the richer SDK in Phase 5.
+// serving. A policy the workflow code sets on the call itself (recorded with the
+// step) takes precedence.
 func (e *Engine) SetRetryPolicy(stepName string, p RetryPolicy) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.policies[stepName] = p
 }
 
-func (e *Engine) retryPolicy(stepName string) RetryPolicy {
-	if p, ok := e.policies[stepName]; ok {
+// retryPolicy is the policy that governs a step: the one recorded with it,
+// else the engine's for its name, else no retries.
+func (e *Engine) retryPolicy(step *state.Step) RetryPolicy {
+	if step.Retry != nil {
+		return *step.Retry
+	}
+	if p, ok := e.policies[step.Name]; ok {
 		return p
 	}
 	return noRetry
-}
-
-// backoff returns the delay before the given attempt's retry (attempt is the number
-// that just failed: 1 → first backoff). Exponential, capped at MaxBackoff.
-func (p RetryPolicy) backoff(attempt int) time.Duration {
-	d := p.Backoff
-	for i := 1; i < attempt; i++ {
-		d *= 2
-		if p.MaxBackoff > 0 && d >= p.MaxBackoff {
-			return p.MaxBackoff
-		}
-	}
-	return d
 }
 
 // scheduleRetryLocked arms a backoff timer to re-run a failed activity. The failure
@@ -90,6 +76,7 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 	retry := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
 		StepScheduled: &history.StepScheduledEvent{
 			StepName: tail.Name, Sequence: tail.Sequence, Input: tail.Input,
+			RetryPolicy: tail.Retry.ToProto(),
 		},
 	}}
 	if err := e.appendLocked(tm.WorkflowID, retry, int64(len(events)+1)); err != nil {
