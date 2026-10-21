@@ -19,8 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RaftService_RequestVote_FullMethodName   = "/raft.v1.RaftService/RequestVote"
-	RaftService_AppendEntries_FullMethodName = "/raft.v1.RaftService/AppendEntries"
+	RaftService_Send_FullMethodName = "/raft.v1.RaftService/Send"
 )
 
 // RaftServiceClient is the client API for RaftService service.
@@ -31,17 +30,13 @@ const (
 // deliberately separate from WorkflowService: that one faces clients and
 // workers, this one is internal cluster traffic and should never be exposed.
 //
-// Raft defines exactly two RPCs for the core algorithm, and both are issued
-// only by a node that believes it is a candidate (RequestVote) or the leader
-// (AppendEntries). Every RPC carries a term, and any node seeing a term higher
-// than its own immediately steps down — that single rule is what makes stale
-// leaders harmless.
+// The paper describes RequestVote and AppendEntries as request/response RPCs.
+// Here every request and every response is its own one-way message, delivered
+// by a single Send call. That keeps the Raft core a pure "message in, messages
+// out" state machine that never blocks on the network, and it matches what
+// Raft already tolerates: messages may be lost, duplicated or reordered.
 type RaftServiceClient interface {
-	// RequestVote is sent by a candidate to gather votes for an election.
-	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
-	// AppendEntries replicates log entries. With an empty entries list it is the
-	// leader's heartbeat, which is what suppresses new elections.
-	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
+	Send(ctx context.Context, in *Envelope, opts ...grpc.CallOption) (*SendAck, error)
 }
 
 type raftServiceClient struct {
@@ -52,20 +47,10 @@ func NewRaftServiceClient(cc grpc.ClientConnInterface) RaftServiceClient {
 	return &raftServiceClient{cc}
 }
 
-func (c *raftServiceClient) RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error) {
+func (c *raftServiceClient) Send(ctx context.Context, in *Envelope, opts ...grpc.CallOption) (*SendAck, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RequestVoteResponse)
-	err := c.cc.Invoke(ctx, RaftService_RequestVote_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *raftServiceClient) AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AppendEntriesResponse)
-	err := c.cc.Invoke(ctx, RaftService_AppendEntries_FullMethodName, in, out, cOpts...)
+	out := new(SendAck)
+	err := c.cc.Invoke(ctx, RaftService_Send_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,17 +65,13 @@ func (c *raftServiceClient) AppendEntries(ctx context.Context, in *AppendEntries
 // deliberately separate from WorkflowService: that one faces clients and
 // workers, this one is internal cluster traffic and should never be exposed.
 //
-// Raft defines exactly two RPCs for the core algorithm, and both are issued
-// only by a node that believes it is a candidate (RequestVote) or the leader
-// (AppendEntries). Every RPC carries a term, and any node seeing a term higher
-// than its own immediately steps down — that single rule is what makes stale
-// leaders harmless.
+// The paper describes RequestVote and AppendEntries as request/response RPCs.
+// Here every request and every response is its own one-way message, delivered
+// by a single Send call. That keeps the Raft core a pure "message in, messages
+// out" state machine that never blocks on the network, and it matches what
+// Raft already tolerates: messages may be lost, duplicated or reordered.
 type RaftServiceServer interface {
-	// RequestVote is sent by a candidate to gather votes for an election.
-	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
-	// AppendEntries replicates log entries. With an empty entries list it is the
-	// leader's heartbeat, which is what suppresses new elections.
-	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	Send(context.Context, *Envelope) (*SendAck, error)
 	mustEmbedUnimplementedRaftServiceServer()
 }
 
@@ -101,11 +82,8 @@ type RaftServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedRaftServiceServer struct{}
 
-func (UnimplementedRaftServiceServer) RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method RequestVote not implemented")
-}
-func (UnimplementedRaftServiceServer) AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method AppendEntries not implemented")
+func (UnimplementedRaftServiceServer) Send(context.Context, *Envelope) (*SendAck, error) {
+	return nil, status.Error(codes.Unimplemented, "method Send not implemented")
 }
 func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
 func (UnimplementedRaftServiceServer) testEmbeddedByValue()                     {}
@@ -128,38 +106,20 @@ func RegisterRaftServiceServer(s grpc.ServiceRegistrar, srv RaftServiceServer) {
 	s.RegisterService(&RaftService_ServiceDesc, srv)
 }
 
-func _RaftService_RequestVote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RequestVoteRequest)
+func _RaftService_Send_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Envelope)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(RaftServiceServer).RequestVote(ctx, in)
+		return srv.(RaftServiceServer).Send(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: RaftService_RequestVote_FullMethodName,
+		FullMethod: RaftService_Send_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RaftServiceServer).RequestVote(ctx, req.(*RequestVoteRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _RaftService_AppendEntries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AppendEntriesRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(RaftServiceServer).AppendEntries(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: RaftService_AppendEntries_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RaftServiceServer).AppendEntries(ctx, req.(*AppendEntriesRequest))
+		return srv.(RaftServiceServer).Send(ctx, req.(*Envelope))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -172,12 +132,8 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*RaftServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "RequestVote",
-			Handler:    _RaftService_RequestVote_Handler,
-		},
-		{
-			MethodName: "AppendEntries",
-			Handler:    _RaftService_AppendEntries_Handler,
+			MethodName: "Send",
+			Handler:    _RaftService_Send_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

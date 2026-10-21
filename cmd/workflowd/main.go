@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/raft"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
@@ -38,6 +39,12 @@ func main() {
 		authToken   = flag.String("auth-token", "", "require this bearer token on mutating /api routes (empty disables auth)")
 		demoWorker  = flag.Bool("demo-worker", false, "run an in-process worker for the built-in demo activities (reserve, charge, ship, release)")
 		retention   = flag.Duration("retention", 0, "delete finished workflows this long after their last event, e.g. 168h (0 keeps them forever)")
+
+		// Clustering is opt-in; with none of these set the daemon is single-node.
+		nodeID   = flag.String("node-id", "", "this node's id in --peers (cluster mode)")
+		peers    = flag.String("peers", "", "every cluster member as id=host:port of its Raft listener, comma-separated, e.g. n1=127.0.0.1:7333,n2=127.0.0.1:7334 (enables cluster mode)")
+		raftAddr = flag.String("raft-addr", "", "listen address for Raft peer traffic (cluster mode; default: this node's address in --peers)")
+		raftTick = flag.Duration("raft-tick", raft.DefaultTickInterval, "Raft tick: leaders heartbeat every tick, followers start an election after 10–20 silent ticks (cluster mode)")
 	)
 	flag.Parse()
 
@@ -47,6 +54,12 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	cluster, clustered, err := parseClusterFlags(*nodeID, *peers, *raftAddr, *raftTick)
+	if err != nil {
+		logger.Error("invalid cluster flags", "err", err)
+		os.Exit(2)
+	}
 
 	store, err := history.NewHistoryStore(*dataDir)
 	if err != nil {
@@ -68,6 +81,13 @@ func main() {
 		cfg := serveConfig{
 			addr: *addr, metricsAddr: *metricsAddr, httpAddr: *httpAddr,
 			authToken: *authToken, demoWorker: *demoWorker, retention: *retention,
+		}
+		if clustered {
+			if err := runCluster(logger, *dataDir, cfg, cluster); err != nil {
+				logger.Error("cluster node stopped", "err", err)
+				os.Exit(1)
+			}
+			return
 		}
 		if err := runServe(logger, store, cfg); err != nil {
 			logger.Error("server stopped", "err", err)
