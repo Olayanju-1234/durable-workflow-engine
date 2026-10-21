@@ -116,7 +116,32 @@ snapshot's last entry, and otherwise replaces log and state with the snapshot.
 Testing: `sim_test.go` runs whole clusters in memory with no clock, goroutines or
 sockets, and a checker of the five Raft safety properties runs against 200
 seeded random failure schedules. Testing knobs that switch off one rule each
-prove the checker can fail. How the engine uses Raft is ADR-0004.
+prove the checker can fail.
+
+### The engine on Raft (`internal/cluster`, ADR-0004)
+
+```
+client ──▶ any node ──▶ follower?  ─▶ 503 / Unavailable + leader hint
+                    └─▶ leader ─▶ Engine (this term's) ─▶ HistoryLog.Append
+                                                         │ propose Command (term-fenced)
+                                       Raft log ◀────────┘ commit on a majority
+                                         │ apply on every node
+                                         ▼
+                              history store (<id>.history, raft_index stamps)
+```
+
+- **What is replicated:** history mutations (`AppendEvent`, `DeleteWorkflow`), the
+  engine's outputs. Followers never run workflow logic.
+- **State machine:** each node's history directory. Apply stamps each event with
+  its Raft index (idempotent replay after restart) and accepts it only at the next
+  event id (a deterministic fence). Files are written without fsync; the Raft log
+  is the write-ahead log, and `Sync` runs before a snapshot marks them durable.
+- **Leader-only engine:** a fresh `Engine` per term, built once the leader has
+  applied its term's opening entry, then `Recover()`: a leader change is a restart
+  elsewhere. Lost leadership closes the engine; pending writes fail.
+- **Routing:** `EngineSource` resolves the engine per call; followers answer with
+  the leader's id and client addresses (learned from metadata on Raft traffic).
+- **Snapshots:** the raw bytes of every history file in `internal/record` frames.
 
 ## Determinism (Phase 2+)
 

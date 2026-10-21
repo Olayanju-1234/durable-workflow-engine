@@ -5,6 +5,79 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 21: Raft, part 4 (the engine on Raft) — Phase 4 complete
+
+Week 14 of Phase 4, PR #12. Week 13 (PR #11) merged as `3998bc7` and deployed
+(single-node; recovery replayed 7 workflows, smoke OrderSaga completed).
+
+**Done:**
+- `internal/server`: `HistoryLog` seam (`WithHistoryLog`; default = the store, so
+  single-node is unchanged), `EngineSource` routing for gRPC (`NewGRPCServerFrom`)
+  and HTTP (`WithEngineSource`, `WithClusterStatus`), `ErrNotLeader` /
+  `NotLeaderError{LeaderHint}`: gRPC `Unavailable` + `workflowd-leader[-grpc|-http]`
+  trailers, HTTP `503` + JSON + `X-Workflowd-Leader` (or `Retry-After`). Health is
+  served by every node. `Engine.Close` ends long polls (`ErrEngineClosed`).
+- `proto/event.proto`: `HistoryEvent.raft_index` (optional; zero in single-node).
+  `proto/cluster.proto`: `Command{AppendEvent|DeleteWorkflow}`, snapshot records.
+- `internal/cluster`: the history state machine (stamps + event-id fence,
+  idempotent replay, deletes vs reused ids, snapshot = raw history files, restore
+  via `HistoryStore.ReplaceAll`, `raft/applied-snapshot` marker), the term-fenced
+  `replicatedLog`, and `Cluster`: per-term engines started after `LeaderReady` +
+  `Recover()`, stopped on leadership loss; leader hints learned from gRPC metadata
+  on Raft traffic; Raft gauges on `/metrics`; refuses a single-node data dir.
+- `internal/raft`: `StateMachine.Apply` returns a fatal error; transport takes
+  extra dial options; the leader replicates while writing its own copy (§10.2.1,
+  `Ready.LeaderAppend`); `UnsafeDisableFsyncForTests` (chaos tests only).
+- `internal/history`: `ReadRaw`, `ReplaceAll`, `AppendBuffered` + `Sync`
+  (cluster mode writes history without per-event fsync; `Sync` before a snapshot
+  marker). `internal/record`: `WriteFile`/`ReadFile`/`ReplaceFile`/`SyncDir`,
+  replacing raft's private copies.
+- `workflowd --serve --node-id --peers` now serves the full API in cluster mode;
+  demo worker and retention run per leadership term. `make cluster` adds
+  `--demo-worker`.
+- Engine fix found by the chaos test: a long poll whose deadline expired just as
+  a task arrived leased the task to a departed worker (stranded until lease
+  expiry, a failed attempt). `PollTask`/`PollWorkflowTask` now re-queue the task
+  if the poller is gone (checked under the engine lock).
+- Tests: routing (gRPC/HTTP hints, health, poll on closed engine, writes via
+  `HistoryLog`, mid-flight leadership loss, departed poller); state machine
+  (stamps, fence, idempotent replay, delete + reuse, snapshot round trip, restore
+  skip, lost buffered writes restored by replay); in-process 3-node cluster
+  (byte-identical histories, follower hints, failover mid-workflow, replicated
+  retention, catch-up from history snapshot, deposed leader stops serving,
+  rejection reaches the engine, bootstrap refusal); real-process chaos
+  (`cmd/workflowd/chaos_test.go`: re-exec'd nodes, TCP proxies per Raft link):
+  kill leader mid-workflow, partitioned leader cannot commit, 100 workflows
+  across a leader kill. Full suite stable 6/6 runs in parallel under `-race`.
+- Mutation-verified: no barrier, never stopping the engine, skipping Recover, no
+  event-id fence, ignoring rejections, leasing to a departed poller.
+
+**Live check:** `make cluster`: follower `503` with `X-Workflowd-Leader`; leader
+SIGKILLed during an OrderSaga's durable timer; the new leader served 1.2 s later
+and completed the saga 5.8 s after the kill; survivors' history files identical.
+
+**Measured:** macOS fsync (`F_FULLFSYNC`) ≈ 21 ms; three nodes on one disk made a
+commit ≈ 117 ms (six fsyncs). Parallel leader write + buffered history: 60–80 ms;
+Raft-log fsync off: ≈ 1 ms (100 workflows in 6.3 s).
+
+**Next:** Phase 5 (public Go SDK, `workflow.Version`, quickstart). Cluster
+follow-ups: PreVote, SDKs following leader hints, per-workflow locking for write
+throughput, follower reads, TLS/auth on the Raft port, single-node → cluster
+import, chunked snapshots, a cluster section in `web/site/docs.html`.
+
+**Gotchas:**
+- Engine throughput in a cluster = one commit per history write under the global
+  lock. The 100-workflow test submits from 4 clients; 100 simultaneous submissions
+  on a shared laptop disk queued completions past the 30 s lease.
+- The chaos test's failures under parallel load were (1) the departed-poller bug,
+  (2) 200 ms election timeouts in the in-process/gRPC tests (now 500 ms–1 s).
+- Chaos node processes call `raft.UnsafeDisableFsyncForTests()`: they kill
+  processes, not machines, so the page cache survives. Never call it elsewhere.
+- `go test -run` in a re-exec'd child must target only the helper test, or the
+  child re-runs the whole suite.
+
+---
+
 ## 2026-10-21 — Session 20: Raft, part 3 (safety properties + snapshots)
 
 Week 13 of Phase 4, PR #11. Week 12 (PR #10) merged as `19ad765` and deployed
