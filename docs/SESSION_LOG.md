@@ -5,6 +5,69 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 22: the public Go SDK — Phase 5 complete
+
+Weeks 15–17, PRs #13 (Wk15), #14 (Wk16) and #15 (Wk17). Wk15+16 deployed together as
+`14a1fa0` (single-node; recovery replayed 11 workflows, smoke OrderSaga completed).
+
+**Done:**
+- ADR-0005: public packages `workflow`, `client`, `worker`, `embedded` (+ `testsuite`).
+  Generated protobuf stays internal: the public packages live in the module, so they
+  may import `internal/server`; user code imports only them.
+- `internal/replay`: the replay engine moved out of `sdk`. Each decision runs the
+  workflow on its own goroutine and suspends with `runtime.Goexit`, which `recover()`
+  can't stop; a panic becomes `*PanicError`. `ctx.Now()` = timestamp of the latest
+  event replayed past (UTC); `ctx.Logger()` drops records while replaying.
+- `client`: `Dial`, `StartWorkflow` (client-generated ids, so `AlreadyExists` on a
+  retry counts as success), `SignalWorkflow` (at-least-once across a leader change),
+  `TerminateWorkflow`, `DescribeWorkflow`, `WaitForResult` (waits through outages),
+  sentinels. `internal/rpc`: per-node connections; `Unavailable` + leader trailer →
+  hinted node, otherwise round-robin with backoff (~5 s budget); an epoch counter.
+- `worker`: registers types, polls workflow tasks and activities (`step_names`),
+  heartbeats at lease/3, re-registers whenever the connection epoch moves;
+  `Start`/`Stop` (returns once registered) and `Run`; `GetActivityInfo`.
+- `embedded`: real engine on a data dir over bufconn. `sdk`: deprecated aliases.
+- Wk16: `MarkerRecordedEvent` (history oneof 19) + `RecordMarkerCommand` (oneof 6);
+  `GetVersion` (consumes a sequence only when a version marker is there or being
+  recorded; old executions get `DefaultVersion`) and `SideEffect`. `testsuite`:
+  mocked activities, virtual time, signals in virtual time, `ErrBlocked`, replays
+  every decision. Dashboard glyph for MARKER.
+- Wk17: three examples (`hello`, `checkout`, `onboarding`), each tested against an
+  embedded engine and in `testsuite`; README rewrite; quickstart timed at 42 s from a
+  fresh clone with empty Go caches; ARCHITECTURE, docs.html, index.html, sdks/README;
+  launch blog **draft** at `docs/blog/2026-10-launch-draft.md` (not published).
+
+**Engine bugs found by the SDK work (both also hit TS/Python):**
+- Recovery, timers, signals, `CompleteTask` and lease expiry bailed out when the
+  workflow's type wasn't registered. SDK types register after recovery, so a remote
+  workflow mid-activity or mid-timer at a restart/leader change was stranded. Now
+  outcomes are recorded without a planner; only deciding waits (`advanceIfRegisteredLocked`).
+- A signal landing while an SDK decision was outstanding made it stale (correct) but
+  nothing re-dispatched, stranding the workflow. `CompleteWorkflowTask` now
+  re-dispatches. Found on CI: the e2e test hung in 9/20 runs without the fix.
+
+**Teeth:** panic-based suspension → `TestSuspensionCannotBeRecovered`; register-once or
+signal gated on registration → restart test; ignoring leader hints →
+`TestSDKFollowsLeaderAcrossFailover` (client seeded with one follower, real 3-node
+Raft, leader killed mid-activity); `GetVersion` returning max on old histories →
+`TestOldExecutionReplaysOldBranch`.
+
+**Next (backlog):** SDK-side retry policies; `GetVersion`/`SideEffect` and leader
+hints in TS/Python; signal request ids (exactly-once signals across failover);
+parallel steps; replaying an exported history against new code; TLS/auth; per-workflow
+locking; brand + module path decision.
+
+**Gotchas:**
+- Cluster test ports must be reserved with listeners held open; listen-and-close let
+  n1's gRPC port come back as n2's Raft port on CI.
+- `time.Unix` returns local time: workflow time must be `.UTC()` or workers in other
+  zones replay different values (caught by a testsuite test).
+- Rollback across this release: older binaries can't read `MarkerRecordedEvent`, and
+  `Recover` fails on an unreadable history. Prod has none (demo workflows don't use
+  markers; gRPC is not public).
+
+---
+
 ## 2026-10-21 — Session 21: Raft, part 4 (the engine on Raft) — Phase 4 complete
 
 Week 14 of Phase 4, PR #12. Week 13 (PR #11) merged as `3998bc7` and deployed

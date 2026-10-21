@@ -44,11 +44,14 @@
     <a href="#determinism">Determinism rules</a>
     <a href="#steps">Steps: activity, timer, signal</a>
 
-    <h4>Building</h4>
+    <h4>Building in Go</h4>
     <a href="#writing-workflows">Writing workflows</a>
-    <a href="#registering">Registering &amp; running</a>
-    <a href="#workers">Writing a worker</a>
+    <a href="#registering">Workers &amp; clients</a>
+    <a href="#workers">Activities</a>
     <a href="#retries">Retries &amp; Saga</a>
+    <a href="#testing">Testing workflows</a>
+    <a href="#versioning">Changing running code</a>
+    <a href="#embedding">Embedding the engine</a>
 
     <h4>Other languages</h4>
     <a href="#polyglot">Polyglot workflows</a>
@@ -79,16 +82,17 @@
     </p>
 
     <div class="callout warn">
-      <strong>Pre-alpha.</strong> Weeks 1–10 of a 17-week plan are complete. The core
-      (durability, replay, retries, leases, observability) is implemented and tested,
-      but the public API is still moving and there is no HA yet. Don't run payroll on it.
+      <strong>Pre-alpha.</strong> All 17 weeks of the roadmap are complete: durability, replay,
+      retries, leases, observability, opt-in Raft replication and a public Go SDK are implemented
+      and tested. It has not carried real production traffic yet and the API may still move.
+      Don't run payroll on it.
     </div>
 
     <h2 id="introduction">Introduction</h2>
     <p>
       <strong>workflowd</strong> is a durable workflow execution engine: you write ordinary
-      Go functions, and the engine guarantees they run to completion even if the process is
-      killed halfway through. It is a lightweight, self-hostable alternative to Temporal —
+      functions in Go, TypeScript or Python, and the engine guarantees they run to completion
+      even if a process is killed halfway through. It is a lightweight, self-hostable alternative to Temporal —
       a single binary with no external database.
     </p>
     <p>A workflow is a good fit when your business process:</p>
@@ -100,49 +104,51 @@
     </ul>
 
     <h2 id="quickstart">Quickstart</h2>
-    <p>Requires Go 1.26+. No database, no broker, no container runtime.</p>
+    <p>Requires Go 1.26+. No database, no broker, no container runtime. From a fresh clone with
+      empty Go caches this took 42 seconds on a laptop, most of it the first build.</p>
 
-    <h3>1. Build and run the engine</h3>
-    <pre data-lang="sh"><code>git clone https://github.com/olayanju-1234/durable-workflow-engine
+    <h3>1. Run the engine</h3>
+    <pre data-lang="sh"><code>git clone https://github.com/Olayanju-1234/durable-workflow-engine.git
 cd durable-workflow-engine
-make build
-go build -o workflowd ./cmd/workflowd
-
-./workflowd --serve</code></pre>
-    <p>That single process now exposes three things:</p>
+go run ./cmd/workflowd --serve</code></pre>
+    <p>That single process exposes three things, and keeps histories in <code>./data</code>:</p>
     <table>
       <thead><tr><th>Address</th><th>Protocol</th><th>Purpose</th></tr></thead>
       <tbody>
-        <tr><td><code>:7233</code></td><td>gRPC</td><td>Workflow API — start workflows, poll and complete tasks</td></tr>
+        <tr><td><code>:7233</code></td><td>gRPC</td><td>Workflow API, used by the Go client and worker</td></tr>
         <tr><td><code>:8233</code></td><td>HTTP</td><td>Dashboard + JSON API</td></tr>
         <tr><td><code>:9090</code></td><td>HTTP</td><td><code>/metrics</code> for Prometheus</td></tr>
       </tbody>
     </table>
 
-    <h3>2. Open the dashboard</h3>
+    <h3>2. Run a workflow</h3>
+    <p>In a second terminal:</p>
+    <pre data-lang="sh"><code>go run ./examples/hello Ada</code></pre>
+    <pre data-lang="text"><code>started workflow Greeting-3f9c2a7d1e5b8a40
+result: Hello, Ada! 👋</code></pre>
     <p>
-      Visit <code>http://localhost:8233</code>. It is compiled into the binary — nothing to
-      deploy separately.
+      That program is a worker (it runs the <code>Greeting</code> workflow and its activities in
+      its own process) and a client (it starts the workflow and waits for the result).
     </p>
 
-    <h3>3. Start a workflow</h3>
-    <p>The bundled demo registers an <code>OrderSaga</code> workflow. Start one over HTTP:</p>
-    <pre data-lang="sh"><code>curl -X POST http://localhost:8233/api/workflows \
-  -H 'Content-Type: application/json' \
-  -d '{"type":"OrderSaga","input":"order-42"}'</code></pre>
+    <h3>3. Open the dashboard</h3>
     <p>
-      It immediately parks in <code>WAITING</code> — no worker is running yet, so nobody
-      can execute the <code>reserve</code> activity. Watch it in the dashboard, then start a
-      worker (see <a href="#workers">Writing a worker</a>) and it will run to completion.
+      Visit <code>http://localhost:8233</code> to see the run: two activities and a durable
+      one-second timer. The dashboard is compiled into the binary.
     </p>
 
     <h3>4. Prove it's durable</h3>
     <p>
-      Kill the engine with <code>kill -9</code> while a workflow is mid-flight, then start it
-      again. It re-reads the log, replays, and resumes at the exact step it was on. That
-      behaviour is enforced by a test in the repo (<code>kill_test.go</code>) that SIGKILLs a
-      real engine process at step 3 of 5 and asserts the workflow finishes with no duplicated
-      steps.
+      Start a drip that sleeps between emails, then stop the engine with Ctrl-C while it sleeps
+      and start it again:
+    </p>
+    <pre data-lang="sh"><code>go run ./examples/onboarding -day 10s ada@example.com</code></pre>
+    <p>
+      The engine re-reads its histories and re-arms the timer against the recorded deadline, the
+      worker reconnects and registers again, and the next email goes out on time. No email is sent
+      twice. The same guarantee is pinned by tests in the repo, including one that SIGKILLs a real
+      engine process at step 3 of 5 (<code>kill_test.go</code>). The
+      <code>examples/checkout</code> program shows a Saga with a manager-approval signal.
     </p>
 
     <h2 id="mental-model">Mental model</h2>
@@ -218,27 +224,31 @@ go build -o workflowd ./cmd/workflowd
     <table>
       <thead><tr><th>Don't</th><th>Do</th><th>Why</th></tr></thead>
       <tbody>
-        <tr><td><code>time.Now()</code></td><td><code>ctx.Sleep(...)</code>, or pass time in as activity output</td><td>Wall clock differs on every replay</td></tr>
-        <tr><td><code>rand</code>, <code>uuid.New()</code></td><td>Generate inside an activity</td><td>New value each replay</td></tr>
+        <tr><td><code>time.Now()</code></td><td><code>ctx.Now()</code> (the time of the latest recorded event, in UTC)</td><td>Wall clock differs on every replay</td></tr>
+        <tr><td><code>time.Sleep</code></td><td><code>ctx.Sleep(...)</code></td><td>Only a recorded timer survives a restart</td></tr>
+        <tr><td><code>rand</code>, <code>uuid.New()</code></td><td><code>ctx.SideEffect(...)</code>, or generate inside an activity</td><td>New value each replay</td></tr>
         <tr><td>HTTP calls, DB queries, file I/O</td><td><code>ctx.ExecuteActivity(...)</code></td><td>Side effects would repeat on every replay</td></tr>
-        <tr><td><code>go func(){}</code>, channels</td><td>Sequential code (parallel steps land in Phase 5)</td><td>Goroutine scheduling is non-deterministic</td></tr>
-        <tr><td>Reading global mutable state</td><td>Pass data through step inputs/outputs</td><td>Process memory is gone after a restart</td></tr>
-        <tr><td>Reordering or renaming steps in a running deployment</td><td>Version your workflow (Phase 5)</td><td>In-flight histories won't match the new code</td></tr>
+        <tr><td><code>go func(){}</code>, channels</td><td>Sequential code (parallel steps are not supported yet)</td><td>Goroutine scheduling is non-deterministic</td></tr>
+        <tr><td>Reading global mutable state</td><td>Pass data through the workflow input and step outputs</td><td>Process memory is gone after a restart</td></tr>
+        <tr><td>Reordering or renaming steps in a running deployment</td><td><a href="#versioning"><code>ctx.GetVersion(...)</code></a></td><td>In-flight histories won't match the new code</td></tr>
       </tbody>
     </table>
     <p>
-      Also avoid <code>defer</code> with side effects inside workflow functions — the deferred
-      call runs on every replay pass.
+      Also avoid <code>defer</code> with side effects inside workflow functions: the deferred
+      call runs on every replay pass. Recovering panics is harmless; it cannot intercept the
+      engine's suspension of your function. The <a href="#testing">test environment</a> replays
+      every decision, so a test catches most violations before a deploy does.
     </p>
 
     <h2 id="steps">Steps: activity, timer, signal</h2>
-    <p>Three kinds of step, all recorded in the same history:</p>
+    <p>Four kinds of step, all recorded in the same history:</p>
     <table>
       <thead><tr><th>Kind</th><th>Created by</th><th>Completed by</th></tr></thead>
       <tbody>
         <tr><td><code>ACTIVITY</code></td><td><code>ctx.ExecuteActivity</code></td><td>A worker reporting a result over gRPC</td></tr>
         <tr><td><code>TIMER</code></td><td><code>ctx.Sleep</code></td><td>The engine's timer service when the deadline passes</td></tr>
         <tr><td><code>SIGNAL</code></td><td><code>ctx.WaitForSignal</code></td><td>An external <code>SignalWorkflow</code> call</td></tr>
+        <tr><td><code>MARKER</code></td><td><code>ctx.GetVersion</code>, <code>ctx.SideEffect</code></td><td>Itself: a recorded value, complete as soon as it is written</td></tr>
       </tbody>
     </table>
     <p>
@@ -249,9 +259,10 @@ go build -o workflowd ./cmd/workflowd
 
     <h2 id="writing-workflows">Writing workflows</h2>
     <p>
-      A workflow is a Go function matching <code>sdk.WorkflowFunc</code>. It interacts with the
-      outside world <em>only</em> through the <code>sdk.Context</code> it is given.
+      A workflow is a Go function of type <code>workflow.Func</code>. It interacts with the
+      outside world <em>only</em> through the <code>workflow.Context</code> it is given.
     </p>
+    <pre data-lang="sh"><code>go get github.com/olayanju-1234/durable-workflow-engine</code></pre>
 
     <h3>The Context API</h3>
     <pre data-lang="go"><code>type Context interface {
@@ -266,124 +277,126 @@ go build -o workflowd ./cmd/workflowd
 	// A signal that arrived earlier is buffered and returned immediately.
 	WaitForSignal(name, signal string) []byte
 
-	// The workflow's start input.
-	Input() []byte
+	Input() []byte        // the start input
+	Now() time.Time       // deterministic clock: latest recorded event, UTC
+	Info() Info           // workflow id and type
+	Logger() *slog.Logger // drops records while replaying
+
+	// Change code safely while executions are in flight (see Versioning).
+	GetVersion(changeID string, minSupported, maxSupported Version) Version
+	// Run fn once, record its result, return the recording on every replay.
+	SideEffect(name string, fn func() []byte) []byte
 }</code></pre>
 
     <h3>A complete example</h3>
-    <pre data-lang="go"><code>func OrderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
-	// 1. Reserve stock. If this fails, the workflow fails — nothing to undo.
-	reserved, err := ctx.ExecuteActivity("reserve", input)
-	if err != nil {
+    <pre data-lang="go"><code>func Checkout(ctx workflow.Context, input []byte) ([]byte, error) {
+	// 1. Reserve stock. If this fails, the workflow fails: nothing to undo.
+	if _, err := ctx.ExecuteActivity("reserve-stock", input); err != nil {
 		return nil, err
 	}
 
-	// 2. Wait for a human to approve. Could be seconds or days.
-	approval := ctx.WaitForSignal("await-approval", "approved")
-	if string(approval) != "yes" {
-		ctx.ExecuteActivity("release", reserved)
-		return nil, errors.New("order rejected by reviewer")
+	// 2. Wait for a manager to approve. Could be seconds or days.
+	if string(ctx.WaitForSignal("manager-approval", "approval")) != "approve" {
+		ctx.ExecuteActivity("release-stock", input)
+		return nil, errors.New("order rejected by a manager")
 	}
 
-	// 3. Give the payment processor a moment to settle.
-	ctx.Sleep("settle", 2*time.Second)
-
-	// 4. Charge. Retries are automatic (see Retries below); we only see an
-	//    error once the policy is exhausted — so compensate and fail.
-	if _, err := ctx.ExecuteActivity("charge", reserved); err != nil {
-		ctx.ExecuteActivity("release", reserved)
-		return nil, fmt.Errorf("charge failed, reservation released: %w", err)
+	// 3. Charge. If it fails, compensate and fail.
+	receipt, err := ctx.ExecuteActivity("charge-card", input)
+	if err != nil {
+		ctx.ExecuteActivity("release-stock", input)
+		return nil, fmt.Errorf("payment failed, stock released: %w", err)
 	}
-
-	return ctx.ExecuteActivity("ship", reserved)
+	return ctx.ExecuteActivity("ship-order", receipt)
 }</code></pre>
+    <p>
+      Payloads are bytes. For structured data, marshal JSON (as <code>examples/checkout</code>
+      does with its <code>Order</code> struct).
+    </p>
 
     <div class="callout">
       <strong>Step names matter.</strong> Each call's name is recorded in history and checked on
-      replay. Names must be stable and unique within a workflow — they are how the engine lines
+      replay. Names must be stable and unique within a workflow: they are how the engine lines
       your code up against the durable record.
     </div>
 
-    <h2 id="registering">Registering &amp; running your workflow</h2>
-    <div class="callout warn">
-      <strong>Today the engine is embedded, not a library.</strong> Go's <code>internal/</code>
-      rule means packages under <code>internal/</code> cannot be imported from outside this
-      module, so you register workflows by building the daemon from this repo. A properly
-      importable client/worker package is the Phase 5 deliverable.
-    </div>
+    <h2 id="registering">Workers &amp; clients</h2>
     <p>
-      Register your workflow in <code>cmd/workflowd/main.go</code>, in <code>runServe</code>,
-      before the engine starts serving:
+      A <strong>worker</strong> runs your workflows and activities in your own process. It
+      registers the workflow types with the engine, polls for decisions and activity tasks over
+      gRPC, and keeps no state of its own, so you can run several and restart them freely. A
+      <strong>client</strong> starts, signals, terminates and inspects workflows.
     </p>
-    <pre data-lang="go"><code>engine := server.NewEngine(store, logger)
-defer engine.Close()
-
-// Register a code-based workflow.
-engine.RegisterWorkflow("OrderWorkflow", sdk.Workflow{
-	Type: "OrderWorkflow",
-	Fn:   OrderWorkflow,
-})
-
-// Optional: retry policy for a specific activity, by step name.
-engine.SetRetryPolicy("charge", server.RetryPolicy{
-	MaxAttempts: 3,
-	Backoff:     200 * time.Millisecond,
-	MaxBackoff:  5 * time.Second,
-})
-
-// Rebuild state from disk before accepting traffic.
-if err := engine.Recover(); err != nil {
+    <pre data-lang="go"><code>c, err := client.Dial(client.Options{Addrs: []string{"localhost:7233"}})
+if err != nil {
 	return err
-}</code></pre>
-    <p>Then rebuild and run: <code>go build -o workflowd ./cmd/workflowd &amp;&amp; ./workflowd --serve</code>.</p>
+}
+defer c.Close()
 
-    <h2 id="workers">Writing a worker</h2>
+w := worker.New(c, worker.Options{})
+w.RegisterWorkflow("Checkout", Checkout)
+w.RegisterActivity("reserve-stock", reserveStock)
+w.RegisterActivity("release-stock", releaseStock)
+w.RegisterActivity("charge-card", chargeCard)
+w.RegisterActivity("ship-order", shipOrder)
+if err := w.Start(ctx); err != nil { // returns once the engine knows the types
+	return err
+}
+defer w.Stop()
+
+id, err := c.StartWorkflow(ctx, "Checkout", order, client.WithWorkflowID("order-7"))
+err = c.SignalWorkflow(ctx, id, "approval", []byte("approve"))
+desc, err := c.DescribeWorkflow(ctx, id) // status, steps, attempts, errors
+out, err := c.WaitForResult(ctx, id)     // blocks until it finishes</code></pre>
     <p>
-      A worker is any process that speaks the gRPC service. It long-polls for a task, does the
-      real work, and reports the result. Workers are stateless — all replay happens on the
-      engine — so you can run as many as you like.
+      Errors match sentinels with <code>errors.Is</code>: <code>client.ErrNotFound</code>,
+      <code>ErrAlreadyExists</code>, <code>ErrNotRunning</code>, <code>ErrInvalid</code>,
+      <code>ErrUnavailable</code>, and <code>ErrWorkflowFailed</code> from
+      <code>WaitForResult</code>. <code>w.Run(ctx)</code> is the blocking alternative to
+      <code>Start</code>/<code>Stop</code> and keeps retrying while the engine is down.
     </p>
     <p>
-      From outside this repo, generate your own stubs from <code>proto/service.proto</code>
-      (the proto file is the stable contract). The loop looks like this:
+      Against a <a href="#cluster">cluster</a>, put every node in <code>Addrs</code>. Calls follow
+      the leader hints followers return, and the worker registers its types again whenever the
+      engine it talks to changes.
     </p>
-    <pre data-lang="go"><code>for {
-	// Long-poll. Blocks until the engine has work.
-	resp, err := client.PollTask(ctx, &pb.PollTaskRequest{WorkerId: "worker-1"})
-	if err != nil {
-		return // context cancelled or engine gone
-	}
-	task := resp.GetTask()
 
-	// Do the actual work, dispatching on the step name.
-	output, execErr := run(task.GetStepName(), task.GetInput())
-
-	req := &pb.CompleteTaskRequest{
-		WorkflowId: task.GetWorkflowId(),
-		StepName:   task.GetStepName(),
-		Sequence:   task.GetSequence(),
-		LeaseToken: task.GetLeaseToken(), // proof you still own the task
-	}
-	if execErr != nil {
-		req.Result = &pb.CompleteTaskRequest_Error{Error: execErr.Error()}
-	} else {
-		req.Result = &pb.CompleteTaskRequest_Output{Output: output}
-	}
-	client.CompleteTask(ctx, req)
-}</code></pre>
-
-    <h3>Long-running activities must heartbeat</h3>
+    <h2 id="workers">Activities</h2>
     <p>
-      Every dispatched task carries a <code>lease_duration_ms</code>. If your activity will run
-      longer than that, call <code>Heartbeat</code> periodically (a third of the lease duration
-      is a sane interval). A rejected heartbeat means you lost the lease — stop working and
-      discard the result, because the task has been given to someone else.
+      An activity is a <code>worker.ActivityFunc</code>:
+      <code>func(ctx context.Context, input []byte) ([]byte, error)</code>. It can do anything:
+      HTTP calls, database writes, emails. Its result is recorded once, and a returned error is
+      what the workflow sees (after any engine-side retries).
+    </p>
+    <pre data-lang="go"><code>func chargeCard(ctx context.Context, input []byte) ([]byte, error) {
+	info, _ := worker.GetActivityInfo(ctx)
+	key := fmt.Sprintf("%s/%d", info.WorkflowID, info.Sequence) // stable per step
+	return payments.Charge(ctx, input, key)                     // idempotent on key
+}</code></pre>
+    <p>
+      Activities run <strong>at least once</strong>: a worker can die after doing the work but
+      before reporting it, and the step then runs again. Use the workflow id and step sequence as
+      an idempotency key, as above.
+    </p>
+
+    <h3>Long-running activities</h3>
+    <p>
+      Every dispatched task carries a lease (30 seconds by default). The worker heartbeats
+      every third of the lease while your activity runs, so long activities keep their task.
+      If a heartbeat is rejected the lease is gone (the task was given to another worker),
+      and the activity's <code>ctx</code> is cancelled.
+    </p>
+    <p>
+      Other languages can execute activities too: anything that speaks
+      <code>proto/service.proto</code> (<code>PollTask</code>, <code>CompleteTask</code>,
+      <code>Heartbeat</code>) or the <a href="#polyglot-protocol">HTTP protocol</a> is a worker.
     </p>
 
     <h2 id="retries">Retries &amp; Saga compensation</h2>
     <p>
-      Retries are handled by the engine and are invisible to your workflow. Register a policy
-      per activity step name:
+      Retries are handled by the engine and are invisible to your workflow. Today a policy is
+      set on the engine, per activity step name (the daemon sets one for the demo's
+      <code>charge</code> step; setting policies from the SDK is on the backlog):
     </p>
     <pre data-lang="go"><code>engine.SetRetryPolicy("charge", server.RetryPolicy{
 	MaxAttempts: 3,                      // counts the first try; 1 = no retry
@@ -398,8 +411,78 @@ if err := engine.Recover(); err != nil {
     </p>
     <p>
       <strong>Saga compensation needs no special machinery.</strong> Once retries are exhausted,
-      the activity error is returned to your Go code — so "undo" is just an ordinary error branch
-      that calls more activities, as in the <code>release</code> call in the example above.
+      the activity error is returned to your Go code, so "undo" is just an ordinary error branch
+      that calls more activities, as in the <code>release-stock</code> calls in the example above.
+    </p>
+
+    <h2 id="testing">Testing workflows</h2>
+    <p>
+      Package <code>testsuite</code> runs a workflow inside a unit test: no server, activities you
+      supply (real or mocked), and virtual time, so a workflow that sleeps for a week finishes in
+      milliseconds.
+    </p>
+    <pre data-lang="go"><code>func TestRejectedOrderReleasesStock(t *testing.T) {
+	env := testsuite.NewEnv()
+	env.RegisterActivity("reserve-stock", reserveStock)
+	env.RegisterActivity("release-stock", releaseStock)
+	env.SignalAfter(7*24*time.Hour, "approval", []byte("reject"))
+
+	_, err := env.ExecuteWorkflow(Checkout, order)
+	if !errors.Is(err, testsuite.ErrWorkflowFailed) {
+		t.Fatalf("got %v", err)
+	}
+	// env.Elapsed() == 168h of virtual time; the test took milliseconds.
+}</code></pre>
+    <ul>
+      <li>Timers skip ahead in virtual time; <code>ctx.Now()</code> follows the virtual clock.</li>
+      <li>Signals are scheduled in virtual time and buffered exactly as the engine buffers them.</li>
+      <li>A wait on a signal nobody will send returns <code>testsuite.ErrBlocked</code> instead of hanging.</li>
+      <li>History is recorded as the engine records it and replayed for every decision, so
+        non-deterministic code fails the test.</li>
+      <li>Engine-side retry policies are not simulated: a failed activity returns its error at once.</li>
+    </ul>
+
+    <h2 id="versioning">Changing running code</h2>
+    <p>
+      Workflows can run for weeks, so you will change code while executions are in flight. Adding,
+      removing or reordering steps would make those executions' histories disagree with the new
+      code. Wrap the change in <code>GetVersion</code>:
+    </p>
+    <pre data-lang="go"><code>if ctx.GetVersion("fraud-check", workflow.DefaultVersion, 1) == 1 {
+	ctx.ExecuteActivity("fraud-check", order)
+}</code></pre>
+    <ul>
+      <li>An execution reaching this point for the first time records version <code>1</code> as a
+        <code>MARKER</code> step and takes the new branch on every replay.</li>
+      <li>An execution that ran past this point before the deploy has no marker there, gets
+        <code>workflow.DefaultVersion</code>, and replays the old branch.</li>
+      <li>Once no execution can still need the old branch, raise <code>minSupported</code> and delete
+        the branch, but keep the call. An execution whose recorded version is out of range fails as
+        non-deterministic instead of silently taking the wrong path.</li>
+    </ul>
+    <div class="callout warn">
+      <strong>Rollback caveat.</strong> Binaries built before version markers existed cannot read a
+      history that contains one. Roll back only after such workflows have finished and been deleted.
+    </div>
+
+    <h2 id="embedding">Embedding the engine</h2>
+    <p>
+      For a single service that wants durable workflows without running another process, or for
+      integration tests, <code>embedded</code> runs the real engine inside your program on a local
+      data directory:
+    </p>
+    <pre data-lang="go"><code>srv, err := embedded.Start(embedded.Options{DataDir: "data"})
+if err != nil {
+	return err
+}
+defer srv.Close()
+
+w := worker.New(srv.Client(), worker.Options{})
+// ...register, then w.Start(ctx), then srv.Client().StartWorkflow(...)</code></pre>
+    <p>
+      Histories are fsync'd to <code>DataDir</code> and survive a restart of your process; workers
+      and clients use exactly the same code paths as against a remote engine. The data directory
+      must not be shared with another engine, and cluster mode is not embeddable.
     </p>
 
     <h2 id="polyglot">Polyglot workflows</h2>
@@ -411,7 +494,7 @@ if err := engine.Recover(); err != nil {
     <table>
       <thead><tr><th>SDK</th><th>Location</th><th>Status</th></tr></thead>
       <tbody>
-        <tr><td>Go</td><td><code>sdk/</code></td><td>In-process (compiled into the engine)</td></tr>
+        <tr><td>Go</td><td><code>workflow/</code>, <code>worker/</code>, <code>client/</code></td><td>Tested end to end, including leader failover (gRPC; see <a href="#registering">Workers &amp; clients</a>)</td></tr>
         <tr><td>TypeScript / Node</td><td><code>sdks/typescript/</code></td><td>Verified end-to-end</td></tr>
         <tr><td>Python</td><td><code>sdks/python/</code></td><td>Verified end-to-end</td></tr>
         <tr><td>Java</td><td><code>sdks/java/</code></td><td>Written but not yet compiled — reference implementation</td></tr>
@@ -531,7 +614,7 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
     <table>
       <thead><tr><th>Language</th><th>Mechanism</th><th>Why it's safe</th></tr></thead>
       <tbody>
-        <tr><td>Go</td><td><code>panic</code> / <code>recover</code></td><td>Recovered only in the SDK's own frame</td></tr>
+        <tr><td>Go</td><td><code>runtime.Goexit</code> on the workflow's own goroutine</td><td><code>recover()</code> cannot stop it, so workflow code that recovers panics can't swallow a suspension</td></tr>
         <tr><td>Python</td><td>subclass <code>BaseException</code></td><td><code>except Exception</code> doesn't catch it</td></tr>
         <tr><td>Java</td><td>subclass <code>Error</code></td><td><code>catch (Exception)</code> doesn't catch it</td></tr>
         <tr><td>TypeScript</td><td>a promise that <em>never settles</em></td><td><code>catch</code> catches everything in JS, so suspension must not be a throw at all</td></tr>
@@ -813,6 +896,7 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
       <li>If the leader dies, another node takes over within one to two election timeouts and resumes
         every workflow from the replicated history, exactly as a restarted single node would.</li>
       <li>A cluster survives losing any minority of nodes (one of three, two of five).</li>
+      <li>The Go client and worker follow leader hints: give <code>client.Options.Addrs</code> every node.</li>
     </ul>
     <div class="callout warn">
       <strong>Still at-least-once.</strong> An activity can run twice across a failover, and a write
@@ -821,7 +905,7 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
     </div>
 
     <h2 id="limitations">Limitations</h2>
-    <p>Known and deliberate, as of Weeks 1–14:</p>
+    <p>Known and deliberate, as of the end of the 17-week roadmap:</p>
     <ul>
       <li><strong>Clustering is young.</strong> Membership is fixed by <code>--peers</code>; the Raft
         port has no TLS or auth; every history write is a Raft commit under one engine lock, so a
@@ -829,19 +913,14 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
         leader hints yet; and a single-node data directory can't be moved into a cluster. A single
         node's data directory is its single point of failure; back it up.</li>
       <li><strong>No TLS</strong> on any port, and auth (when enabled) is a single shared bearer
-        token on the JSON API only — gRPC and metrics are unauthenticated. Keep ports private.</li>
-      <li><strong>Go workflows must be compiled into the engine binary</strong> (Go's
-        <code>internal/</code> rule). Workflows in TypeScript, Python and Java run out of
-        process via the <a href="#polyglot">SDK protocol</a> and have no such constraint; an
-        importable Go SDK is Phase 5.</li>
+        token on the JSON API only; gRPC and metrics are unauthenticated. Keep ports private.</li>
       <li><strong>Sequential steps.</strong> One step in flight per workflow; no parallel fan-out yet.</li>
-      <li><strong>At-least-once</strong> activity execution (see above).</li>
-      <li><strong>No workflow versioning</strong> yet — changing a running workflow's step
-        sequence breaks in-flight executions. <code>workflow.Version</code> is Phase 5.</li>
-      <li><strong>Listing is a full scan</strong> of the data directory; fine for thousands of
-        workflows, not for millions.</li>
-      <li><strong>One global lock</strong> and a full history re-read per operation, which caps
-        throughput. Per-workflow locks and a state cache are planned.</li>
+      <li><strong>At-least-once</strong> activity execution, and a signal retried across a leader
+        change can be recorded twice.</li>
+      <li><strong>Retry policies are engine-side only</strong>, and <code>GetVersion</code> /
+        <code>SideEffect</code> are Go-only (the TypeScript and Python SDKs don't have them yet).</li>
+      <li><strong>Listing is a full scan</strong> of the data directory, and there is <strong>one
+        global lock</strong> with a full history re-read per operation. It has not been load-tested.</li>
       <li><strong>No cron scheduling</strong> yet.</li>
     </ul>
 
@@ -861,9 +940,9 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
     <h3>What happens if I redeploy while workflows are running?</h3>
     <p>
       Workflows resume from history. That is safe as long as the step sequence your code produces
-      hasn't changed. Adding a step in the middle, renaming one, or reordering will be detected as
-      non-determinism and the affected executions will refuse to advance. Until versioning lands,
-      drain in-flight workflows before changing an existing workflow's shape.
+      hasn't changed for executions already in flight. Wrap changes in
+      <a href="#versioning"><code>GetVersion</code></a>; an unguarded change is detected as
+      non-determinism and the affected executions fail rather than take a wrong path.
     </p>
 
     <h3>How many workers should I run?</h3>
@@ -903,7 +982,7 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
 <footer>
   <div class="footer-inner">
     <div>
-      <strong>◆ workflowd</strong> — durable workflow engine for Go<br>
+      <strong>◆ workflowd</strong> · durable workflow engine<br>
       <span style="font-size:13px">Apache-2.0 · pre-alpha</span>
     </div>
     <div class="footer-links">
