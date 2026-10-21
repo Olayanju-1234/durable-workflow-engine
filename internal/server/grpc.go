@@ -68,7 +68,7 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):
 		return nil, s.notLeader(ctx, err)
-	case errors.Is(err, ErrUnknownType):
+	case errors.Is(err, ErrUnknownType), errors.Is(err, ErrInvalidArgument):
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	case errors.Is(err, ErrAlreadyExists):
 		return nil, status.Errorf(codes.AlreadyExists, "%v", err)

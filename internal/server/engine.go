@@ -75,7 +75,8 @@ type Engine struct {
 	wfs  map[string]*wfState // workflows in use or cached
 	idle *list.List          // cached workflows nobody holds, most recent first
 
-	idx visibilityIndex
+	idx   visibilityIndex
+	sched scheduler
 
 	closeOnce sync.Once
 	done      chan struct{} // closed by Close; ends long polls
@@ -151,6 +152,9 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 	e.decisionTimers.Start()
 	e.advanceRetries = timer.New(e.onAdvanceRetry)
 	e.advanceRetries.Start()
+	e.sched.retry = defaultScheduleRetry
+	e.sched.timers = timer.New(e.onScheduleDue)
+	e.sched.timers.Start()
 	return e
 }
 
@@ -165,6 +169,7 @@ func (e *Engine) Close() {
 		e.leaseTimers.Stop()
 		e.decisionTimers.Stop()
 		e.advanceRetries.Stop()
+		e.sched.timers.Stop()
 	})
 }
 
@@ -203,9 +208,6 @@ func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID str
 
 	if err := validateID(workflowID); err != nil {
 		return "", err
-	}
-	if isReservedID(workflowID) {
-		return "", fmt.Errorf("%w: workflow ids starting with %q are reserved", ErrInvalidArgument, reservedPrefix)
 	}
 	w := e.lockWorkflow(workflowID)
 	defer e.unlockWorkflow(w)
@@ -251,7 +253,15 @@ func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID str
 //
 // Completed steps are never re-run: Decide derives the next action from history,
 // and history already records them as done. Call Recover once, before serving.
-func (e *Engine) Recover() (err error) {
+func (e *Engine) Recover() error {
+	if err := e.recoverWorkflows(); err != nil {
+		return err
+	}
+	// After the index is built: a schedule that skips overlapping runs reads it.
+	return e.recoverSchedules()
+}
+
+func (e *Engine) recoverWorkflows() (err error) {
 	// The pass over every history also builds the visibility index.
 	if first, _ := e.startIndex(); first {
 		defer func() { e.finishIndex(err) }()
@@ -858,6 +868,9 @@ func (e *Engine) Stats() EngineStats {
 func validateID(workflowID string) error {
 	if workflowID == "" || workflowID == "." || workflowID == ".." || strings.ContainsAny(workflowID, `/\`) {
 		return fmt.Errorf("%w: invalid workflow id %q", ErrInvalidArgument, workflowID)
+	}
+	if isReservedID(workflowID) {
+		return fmt.Errorf("%w: ids starting with %q are reserved", ErrInvalidArgument, reservedPrefix)
 	}
 	return nil
 }

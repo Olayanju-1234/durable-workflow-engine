@@ -18,6 +18,8 @@ type engineMetrics struct {
 	timersFired       *metrics.Counter
 	stepDuration      *metrics.Histogram // dispatch (lease grant) → worker result
 	workflowsPurged   *metrics.Counter   // finished histories deleted by retention
+	schedulesFired    *metrics.Counter   // workflows started by a schedule
+	schedulesSkipped  *metrics.Counter   // fires skipped because a run was still going
 
 	// Polyglot: workflow decisions made by external SDK workers.
 	workflowTasksDispatched  *metrics.Counter
@@ -54,6 +56,10 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func
 			"Seconds from task dispatch to the worker's result.", nil),
 		workflowsPurged: reg.Counter("workflowd_workflows_purged_total",
 			"Finished workflow histories deleted by the retention policy."),
+		schedulesFired: reg.Counter("workflowd_schedule_runs_started_total",
+			"Workflows started by a cron schedule."),
+		schedulesSkipped: reg.Counter("workflowd_schedule_runs_skipped_total",
+			"Schedule fires skipped because an earlier run was still running."),
 		workflowTasksDispatched: reg.Counter("workflowd_workflow_tasks_dispatched_total",
 			"Workflow decisions handed to external SDK workers."),
 		workflowTasksCompleted: reg.Counter("workflowd_workflow_tasks_completed_total",
