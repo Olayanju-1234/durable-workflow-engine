@@ -20,11 +20,12 @@ import (
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/raft"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/replay"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
-	"github.com/olayanju-1234/durable-workflow-engine/sdk"
 	"github.com/olayanju-1234/durable-workflow-engine/web"
+	"github.com/olayanju-1234/durable-workflow-engine/workflow"
 )
 
 func main() {
@@ -274,7 +275,7 @@ func registerDemoTypes(engine *server.Engine) {
 	engine.Register(demoDef)
 	// A code-based Saga workflow (Phase 2): charge is retried up to 3× with backoff,
 	// and if it still fails the workflow releases the reservation (compensation).
-	engine.RegisterWorkflow("OrderSaga", sdk.Workflow{Type: "OrderSaga", Fn: orderSaga})
+	engine.RegisterWorkflow("OrderSaga", replay.Planner{Fn: orderSaga})
 	engine.SetRetryPolicy("charge", server.RetryPolicy{
 		MaxAttempts: 3, Backoff: 200 * time.Millisecond, MaxBackoff: 5 * time.Second,
 	})
@@ -291,7 +292,7 @@ var demoDef = state.WorkflowDefinition{
 // orderSaga is the Phase-2 code-based workflow: ordinary Go whose execution the
 // replay engine drives durably. reserve → sleep → charge (auto-retried) → ship; if
 // charge ultimately fails, release the reservation and fail with a wrapped error.
-func orderSaga(ctx sdk.Context, input []byte) ([]byte, error) {
+func orderSaga(ctx workflow.Context, input []byte) ([]byte, error) {
 	reserved, err := ctx.ExecuteActivity("reserve", input)
 	if err != nil {
 		return nil, err

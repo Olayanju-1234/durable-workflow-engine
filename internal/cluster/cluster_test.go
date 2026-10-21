@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
@@ -35,6 +37,10 @@ type testCluster struct {
 	members       map[string]*member
 	snapshotEvery uint64
 	mu            sync.Mutex // guards each member's c, read by worker goroutines
+
+	// Set by serveGRPC: each member serves the client API on a real address.
+	grpcAddrs   map[string]string
+	grpcServers map[string]*grpc.Server
 }
 
 // serving returns the engine of whichever member currently serves one.
@@ -62,13 +68,36 @@ func freeAddr(t *testing.T) string {
 }
 
 func newTestCluster(t *testing.T, n int, snapshotEvery uint64) *testCluster {
+	return newCluster(t, n, snapshotEvery, false)
+}
+
+func newCluster(t *testing.T, n int, snapshotEvery uint64, serveGRPC bool) *testCluster {
 	t.Helper()
 	tc := &testCluster{t: t, peers: map[string]string{}, members: map[string]*member{}, snapshotEvery: snapshotEvery}
+	if serveGRPC {
+		tc.grpcAddrs, tc.grpcServers = map[string]string{}, map[string]*grpc.Server{}
+	}
+	// Hold every listener until all ports are picked, so no two collide.
+	var held []net.Listener
+	reserve := func() string {
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, lis)
+		return lis.Addr().String()
+	}
 	base := t.TempDir()
 	for i := 1; i <= n; i++ {
 		id := fmt.Sprintf("n%d", i)
-		tc.peers[id] = freeAddr(t)
+		tc.peers[id] = reserve()
 		tc.members[id] = &member{id: id, dir: filepath.Join(base, id)}
+		if serveGRPC {
+			tc.grpcAddrs[id] = reserve()
+		}
+	}
+	for _, lis := range held {
+		lis.Close()
 	}
 	for id := range tc.members {
 		tc.start(id)
@@ -93,7 +122,7 @@ func (tc *testCluster) start(id string) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	c, err := Start(Config{
 		NodeID: id, Peers: tc.peers, RaftAddr: tc.peers[id],
-		GRPCAddr: "grpc-" + id, HTTPAddr: "http-" + id,
+		GRPCAddr: tc.grpcAddr(id), HTTPAddr: "http-" + id,
 		DataDir: m.dir, Store: store, Logger: logger,
 		TickInterval: 10 * time.Millisecond, ElectionTicks: 50, SnapshotEvery: tc.snapshotEvery,
 		NewEngine: func(l server.HistoryLog) *server.Engine {
@@ -108,6 +137,23 @@ func (tc *testCluster) start(id string) {
 	tc.mu.Lock()
 	m.store, m.c = store, c
 	tc.mu.Unlock()
+	if tc.grpcAddrs != nil {
+		lis, err := net.Listen("tcp", tc.grpcAddrs[id])
+		if err != nil {
+			tc.t.Fatal(err)
+		}
+		gs := grpc.NewServer()
+		server.RegisterWorkflowServiceServer(gs, server.NewGRPCServerFrom(c, logger))
+		go gs.Serve(lis)
+		tc.grpcServers[id] = gs
+	}
+}
+
+func (tc *testCluster) grpcAddr(id string) string {
+	if tc.grpcAddrs != nil {
+		return tc.grpcAddrs[id]
+	}
+	return "grpc-" + id
 }
 
 func (tc *testCluster) stop(id string) {
@@ -116,6 +162,10 @@ func (tc *testCluster) stop(id string) {
 	c := m.c
 	m.c = nil
 	tc.mu.Unlock()
+	if gs := tc.grpcServers[id]; gs != nil {
+		gs.Stop()
+		delete(tc.grpcServers, id)
+	}
 	if err := c.Stop(); err != nil {
 		tc.t.Errorf("stop %s: %v", id, err)
 	}

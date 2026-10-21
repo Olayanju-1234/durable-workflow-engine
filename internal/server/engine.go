@@ -251,15 +251,10 @@ func (e *Engine) Recover() error {
 		// Recovered live workflows re-enter the active gauge (it is in-memory and
 		// died with the old process); advancing below may immediately retire one.
 		e.metrics.workflowsActive.Inc()
-		planner, ok := e.planners[st.WorkflowType]
-		if !ok {
-			// We can't drive a workflow whose code isn't registered on this node.
-			// Leave it durable; a later deploy that registers the type recovers it.
-			e.log.Warn("recovery: skipping unregistered workflow type",
-				"workflow_id", id, "type", st.WorkflowType)
-			continue
-		}
 
+		// Resuming an in-flight step needs no planner, only deciding what comes
+		// next does. SDK workers register after recovery, so a remote workflow's
+		// activity, timer or signal must not wait for them.
 		switch st.Status {
 		case state.StatusWaiting:
 			// The in-flight step's kind is reconstructed from history, so recovery
@@ -301,6 +296,13 @@ func (e *Engine) Recover() error {
 					rearmed++
 					continue
 				}
+			}
+			planner, ok := e.planners[st.WorkflowType]
+			if !ok {
+				// Registering the type later resumes it (resumeTypeLocked).
+				e.log.Warn("recovery: workflow type not registered yet; waiting for a worker",
+					"workflow_id", id, "type", st.WorkflowType)
+				continue
 			}
 			if err := e.advanceLocked(id, planner); err != nil {
 				return fmt.Errorf("server: recover advance %s: %w", id, err)
@@ -346,11 +348,6 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 		return fmt.Errorf("server: result %s/seq%d does not match in-flight step %s/seq%d",
 			stepName, sequence, tail.Name, tail.Sequence)
 	}
-	planner, ok := e.planners[st.WorkflowType]
-	if !ok {
-		return fmt.Errorf("server: unknown workflow type %q", st.WorkflowType)
-	}
-
 	if failed {
 		failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 			StepFailed: &history.StepFailedEvent{
@@ -374,7 +371,7 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 			e.scheduleRetryLocked(workflowID, tail, policy.backoff(tail.Attempts))
 			return nil
 		}
-		return e.advanceLocked(workflowID, planner)
+		return e.advanceIfRegisteredLocked(workflowID, st.WorkflowType)
 	}
 
 	completed := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepCompleted{
@@ -387,7 +384,7 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 	e.metrics.taskResults.With("completed").Inc()
 	e.metrics.stepDuration.Observe(time.Since(claimedAt).Seconds())
 	e.log.Info("step completed", "workflow_id", workflowID, "step", stepName, "sequence", sequence)
-	return e.advanceLocked(workflowID, planner)
+	return e.advanceIfRegisteredLocked(workflowID, st.WorkflowType)
 }
 
 // PollTask blocks until a task is ready for a worker (or ctx is cancelled).
@@ -495,10 +492,6 @@ func (e *Engine) tryDeliverSignalLocked(workflowID string) error {
 	if err != nil {
 		return fmt.Errorf("server: reconstruct %s: %w", workflowID, err)
 	}
-	planner, ok := e.planners[st.WorkflowType]
-	if !ok {
-		return nil // no plan on this node: leave the signal buffered
-	}
 	payload, ok := deliverableSignal(st)
 	if !ok {
 		return nil // not waiting on a signal, or none has matched yet
@@ -511,7 +504,7 @@ func (e *Engine) tryDeliverSignalLocked(workflowID string) error {
 		return err
 	}
 	e.log.Info("signal delivered", "workflow_id", workflowID, "step", tail.Name, "sequence", tail.Sequence)
-	return e.advanceLocked(workflowID, planner)
+	return e.advanceIfRegisteredLocked(workflowID, st.WorkflowType)
 }
 
 // deliverableSignal reports the payload that satisfies the in-flight step, if that
@@ -568,11 +561,6 @@ func (e *Engine) onTimerFired(tm timer.Timer) {
 	if st.Status != state.StatusWaiting || tail == nil || tail.Sequence != tm.Sequence || tail.Name != tm.StepName {
 		return // already resolved; nothing to do
 	}
-	planner, ok := e.planners[st.WorkflowType]
-	if !ok {
-		e.log.Warn("timer fired for unregistered type", "workflow_id", tm.WorkflowID, "type", st.WorkflowType)
-		return
-	}
 	fired := &history.HistoryEvent{Attributes: &history.HistoryEvent_TimerFired{
 		TimerFired: &history.TimerFiredEvent{StepName: tm.StepName, Sequence: tm.Sequence},
 	}}
@@ -583,7 +571,7 @@ func (e *Engine) onTimerFired(tm timer.Timer) {
 	}
 	e.metrics.timersFired.Inc()
 	e.log.Info("timer fired", "workflow_id", tm.WorkflowID, "step", tm.StepName, "sequence", tm.Sequence)
-	e.advanceOrRetry(tm, tm.WorkflowID, planner)
+	e.advanceOrRetry(tm, tm.WorkflowID, st.WorkflowType)
 }
 
 // advanceLocked runs one turn of the decision loop: replay history, Decide, and
@@ -609,6 +597,19 @@ func (e *Engine) advanceLocked(workflowID string, planner Planner) error {
 		return fmt.Errorf("server: decide %s: %w", workflowID, err)
 	}
 	return e.applyDecisionLocked(workflowID, decision, int64(len(events)+1))
+}
+
+// advanceIfRegisteredLocked advances the workflow if its type has a planner on
+// this engine. If not, the workflow stays RUNNING with its latest result
+// recorded, and registering the type resumes it. The caller must hold e.mu.
+func (e *Engine) advanceIfRegisteredLocked(workflowID, workflowType string) error {
+	planner, ok := e.planners[workflowType]
+	if !ok {
+		e.log.Warn("workflow type not registered; waiting for a worker to register it",
+			"workflow_id", workflowID, "type", workflowType)
+		return nil
+	}
+	return e.advanceLocked(workflowID, planner)
 }
 
 // applyDecisionLocked records the event a decision implies and performs its side
@@ -747,8 +748,8 @@ func (e *Engine) rearmCallback(svc *timer.Service, tm timer.Timer) {
 // of leaving the workflow stranded between "event recorded" and "next step
 // dispatched". Advancing is idempotent — Decide derives everything from history —
 // so a blind retry is safe. The caller must hold e.mu.
-func (e *Engine) advanceOrRetry(tm timer.Timer, workflowID string, planner Planner) {
-	if err := e.advanceLocked(workflowID, planner); err != nil {
+func (e *Engine) advanceOrRetry(tm timer.Timer, workflowID, workflowType string) {
+	if err := e.advanceIfRegisteredLocked(workflowID, workflowType); err != nil {
 		e.log.Error("advance failed; scheduling retry", "workflow_id", workflowID, "err", err)
 		e.advanceRetries.Add(timer.Timer{WorkflowID: workflowID, FireAt: time.Now().Add(callbackRetryDelay)})
 	}

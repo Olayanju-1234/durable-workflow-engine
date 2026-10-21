@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -249,13 +250,19 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 		return fmt.Errorf("server: read history %s: %w", workflowID, err)
 	}
 	// The fence: the decision was computed from a snapshot of history. If a
-	// timer fired or a signal landed since, the command may be based on a stale
-	// view — reject it. Clearing the pending decision is safe here precisely
-	// because whatever advanced the history also dispatched a fresh task.
+	// signal landed since, the command may be based on a stale view, so reject
+	// it. A signal that satisfies no wait dispatches nothing, so if the
+	// workflow still needs a decision, hand out a fresh task here.
 	if int64(len(events)) != pending.historyLength {
 		delete(e.pendingDecisions, workflowID)
-		return fmt.Errorf("%w: history for %q advanced from %d to %d events while the task was outstanding",
+		stale := fmt.Errorf("%w: history for %q advanced from %d to %d events while the task was outstanding",
 			ErrStaleDecision, workflowID, pending.historyLength, len(events))
+		if st, err := state.Reconstruct(events); err == nil && st.Status == state.StatusRunning {
+			if err := e.dispatchWorkflowTaskLocked(workflowID, st.WorkflowType, events); err != nil {
+				return errors.Join(stale, err)
+			}
+		}
+		return stale
 	}
 
 	if replayError != "" {
@@ -323,6 +330,31 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 		return state.Decision{Type: state.DecideFailWorkflow, Error: c.FailWorkflow.GetError()}, nil
 	default:
 		return state.Decision{}, fmt.Errorf("server: unknown workflow command %T", c)
+	}
+}
+
+// CommandFromDecision is the inverse of decisionFromCommand: what a Go SDK
+// worker sends back for a decision its replay produced. A noop is a nil command.
+func CommandFromDecision(d state.Decision) *WorkflowCommand {
+	switch d.Type {
+	case state.DecideScheduleStep:
+		return &WorkflowCommand{Command: &WorkflowCommand_ScheduleActivity{ScheduleActivity: &ScheduleActivityCommand{
+			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input,
+		}}}
+	case state.DecideStartTimer:
+		return &WorkflowCommand{Command: &WorkflowCommand_StartTimer{StartTimer: &StartTimerCommand{
+			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, DelayMs: d.Delay.Milliseconds(),
+		}}}
+	case state.DecideAwaitSignal:
+		return &WorkflowCommand{Command: &WorkflowCommand_AwaitSignal{AwaitSignal: &AwaitSignalCommand{
+			StepName: d.StepName, Sequence: d.Sequence, SignalName: d.Signal, Input: d.Input,
+		}}}
+	case state.DecideCompleteWorkflow:
+		return &WorkflowCommand{Command: &WorkflowCommand_CompleteWorkflow{CompleteWorkflow: &CompleteWorkflowCommand{Output: d.Output}}}
+	case state.DecideFailWorkflow:
+		return &WorkflowCommand{Command: &WorkflowCommand_FailWorkflow{FailWorkflow: &FailWorkflowCommand{Error: d.Error}}}
+	default:
+		return nil
 	}
 }
 
