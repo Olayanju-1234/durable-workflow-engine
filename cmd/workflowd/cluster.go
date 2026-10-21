@@ -99,6 +99,7 @@ func runCluster(baseLogger *slog.Logger, dataDir string, serve serveConfig, cc c
 	if err != nil {
 		return err
 	}
+	defer storage.Close()
 	transport, err := raft.NewGRPCTransport(cc.nodeID, cc.peers, baseLogger)
 	if err != nil {
 		return err
@@ -106,7 +107,7 @@ func runCluster(baseLogger *slog.Logger, dataDir string, serve serveConfig, cc c
 	defer transport.Close()
 	node, err := raft.NewNode(raft.Config{
 		ID: cc.nodeID, Members: cc.members(), Storage: storage, Transport: transport,
-		Logger: baseLogger, TickInterval: cc.tick,
+		StateMachine: discard{}, Logger: baseLogger, TickInterval: cc.tick,
 	})
 	if err != nil {
 		return err
@@ -145,6 +146,12 @@ func runCluster(baseLogger *slog.Logger, dataDir string, serve serveConfig, cc c
 	}
 }
 
+// discard is the state machine of a Raft-only node: entries are replicated
+// and committed, then dropped.
+type discard struct{}
+
+func (discard) Apply(*raft.LogEntry) any { return nil }
+
 func writeHealth(w http.ResponseWriter, st raft.Status) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -152,6 +159,7 @@ func writeHealth(w http.ResponseWriter, st raft.Status) {
 		"version": version.Version,
 		"cluster": map[string]any{
 			"node_id": st.ID, "role": st.Role.String(), "term": st.Term, "leader_id": st.Leader,
+			"commit_index": st.Commit, "applied_index": st.Applied,
 		},
 	})
 }

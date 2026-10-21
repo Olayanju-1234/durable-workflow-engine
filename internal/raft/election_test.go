@@ -105,16 +105,15 @@ func TestForgottenVoteElectsTwoLeaders(t *testing.T) {
 		s.flush(a)
 		s.cores[b].campaign()
 		s.flush(b)
-		// c votes for a first; a wins term 1 with {a, c}.
-		s.inflight = reorder(s.inflight, a)
-		s.deliver(s.inflight[0])
-		s.inflight = s.inflight[1:]
-		s.deliverAll()
+		s.deliverOne(a, c) // c votes for a first...
+		s.deliverOne(c, a) // ...and a wins term 1 with {a, c}
 		if s.cores[a].role != Leader {
 			t.Fatalf("setup: %s should lead term 1\n%s", a, s.dump())
 		}
+		// Lose everything else in flight, including a's first AppendEntries: c's
+		// log stays empty, so only its vote record stands in b's way.
+		s.inflight = nil
 
-		// c restarts and b asks again for term 1.
 		s.crash(c)
 		s.restart(c)
 		s.send(b, c, &Envelope_RequestVote{RequestVote: &RequestVoteRequest{Term: 1, CandidateId: b}})
@@ -130,15 +129,17 @@ func TestForgottenVoteElectsTwoLeaders(t *testing.T) {
 	}
 }
 
-// reorder moves the first message from sender to the front of the queue.
-func reorder(msgs []*Envelope, from string) []*Envelope {
-	for i, m := range msgs {
-		if m.GetFrom() == from {
-			out := append([]*Envelope{m}, msgs[:i]...)
-			return append(out, msgs[i+1:]...)
+// deliverOne delivers the oldest in-flight message from one node to another.
+func (s *simCluster) deliverOne(from, to string) {
+	s.t.Helper()
+	for i, m := range s.inflight {
+		if m.GetFrom() == from && m.GetTo() == to {
+			s.inflight = append(s.inflight[:i], s.inflight[i+1:]...)
+			s.deliver(m)
+			return
 		}
 	}
-	return msgs
+	s.t.Fatalf("no message in flight from %s to %s", from, to)
 }
 
 func (s *simCluster) send(from, to string, body isEnvelope_Body) {

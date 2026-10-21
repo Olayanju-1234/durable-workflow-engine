@@ -23,6 +23,7 @@ type simCluster struct {
 	down     map[string]bool
 	cut      map[[2]string]bool // directed links that drop everything
 	inflight []*Envelope
+	applied  map[string][]*LogEntry // what each node's state machine applied since it last started
 	rand     *rand.Rand
 	logger   *slog.Logger
 
@@ -40,6 +41,7 @@ type simCluster struct {
 // else in the core does not.
 type simDisk struct {
 	hardState *HardState
+	entries   []*LogEntry
 }
 
 func newSimCluster(t testing.TB, n int, seed uint64) *simCluster {
@@ -56,6 +58,7 @@ func newSimClusterTicks(t testing.TB, n int, seed uint64, electionTick int) *sim
 		disk:          make(map[string]*simDisk),
 		down:          make(map[string]bool),
 		cut:           make(map[[2]string]bool),
+		applied:       make(map[string][]*LogEntry),
 		rand:          rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)),
 		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		electionTick:  electionTick,
@@ -86,27 +89,61 @@ func (s *simCluster) start(id string) {
 		heartbeatTick: s.heartbeatTick,
 		rand:          rand.New(rand.NewPCG(s.rand.Uint64(), s.rand.Uint64())),
 		logger:        s.logger,
-	}, persistedState{hardState: hs})
+	}, persistedState{hardState: hs, entries: slices.Clone(d.entries)})
 	if err != nil {
 		s.t.Fatalf("start %s: %v", id, err)
 	}
 	s.cores[id] = c
+	s.applied[id] = nil // the state machine is rebuilt by re-applying the log
 	delete(s.down, id)
 }
 
 // flush plays the driver for one node: persist the Ready, then put its
-// messages on the wire, then advance.
+// messages on the wire, then apply what committed, then advance.
 func (s *simCluster) flush(id string) {
 	c := s.cores[id]
 	for c.hasReady() {
 		rd := c.ready()
+		d := s.disk[id]
 		if rd.HardState != nil {
-			s.disk[id].hardState = proto.Clone(rd.HardState).(*HardState)
+			d.hardState = proto.Clone(rd.HardState).(*HardState)
+		}
+		if len(rd.Entries) > 0 {
+			first := rd.Entries[0].GetIndex()
+			d.entries = append(d.entries[:first-1], rd.Entries...)
 		}
 		s.inflight = append(s.inflight, rd.Messages...)
+		for _, e := range rd.CommittedEntries {
+			s.applied[id] = append(s.applied[id], e)
+			s.checker.applied(id, e)
+		}
 		c.advance(rd)
 	}
 	s.checker.observe(s)
+}
+
+// propose submits data on the current leader and returns its index.
+func (s *simCluster) propose(lead string, data string) uint64 {
+	s.t.Helper()
+	c := s.cores[lead]
+	idx, err := c.propose(c.term, []byte(data))
+	if err != nil {
+		s.t.Fatalf("propose on %s: %v", lead, err)
+	}
+	s.flush(lead)
+	return idx
+}
+
+// appliedData lists the payloads a node applied, skipping leaders' empty
+// term-opening entries.
+func (s *simCluster) appliedData(id string) []string {
+	var out []string
+	for _, e := range s.applied[id] {
+		if len(e.GetData()) > 0 {
+			out = append(out, string(e.GetData()))
+		}
+	}
+	return out
 }
 
 func (s *simCluster) tick(id string) {
@@ -135,9 +172,13 @@ func (s *simCluster) deliver(m *Envelope) {
 }
 
 // deliverAll delivers every in-flight message, including the ones those
-// deliveries produce, until the network is quiet.
+// deliveries produce, until the network is quiet. A network that never goes
+// quiet is a livelock (two nodes answering each other forever) and fails fast.
 func (s *simCluster) deliverAll() {
-	for len(s.inflight) > 0 {
+	for n := 0; len(s.inflight) > 0; n++ {
+		if n > 100_000 {
+			s.t.Fatalf("network never went quiet: livelock\n%s", s.dump())
+		}
 		m := s.inflight[0]
 		s.inflight = s.inflight[1:]
 		s.deliver(m)
@@ -246,7 +287,8 @@ func (s *simCluster) dump() string {
 	out := ""
 	for _, id := range s.ids {
 		c := s.cores[id]
-		out += fmt.Sprintf("  %s down=%v role=%s term=%d lead=%q vote=%q\n", id, s.down[id], c.role, c.term, c.lead, c.vote)
+		out += fmt.Sprintf("  %s down=%v role=%s term=%d lead=%q vote=%q last=%d commit=%d\n",
+			id, s.down[id], c.role, c.term, c.lead, c.vote, c.log.lastIndex(), c.log.committed)
 	}
 	return out
 }
@@ -255,12 +297,24 @@ func (s *simCluster) dump() string {
 // safety property it can see. It records rather than failing at once so the
 // teeth tests can assert that a deliberately broken cluster IS caught.
 type safetyChecker struct {
-	leaderOf   map[uint64]string // term -> the node that led it
+	leaderOf   map[uint64]string    // term -> the node that led it
+	appliedAt  map[uint64]*LogEntry // index -> the entry the first node applied there
 	violations []string
 }
 
 func newSafetyChecker() *safetyChecker {
-	return &safetyChecker{leaderOf: make(map[uint64]string)}
+	return &safetyChecker{leaderOf: make(map[uint64]string), appliedAt: make(map[uint64]*LogEntry)}
+}
+
+// applied checks State Machine Safety: once any node applies an entry at an
+// index, no node ever applies a different entry at that index.
+func (k *safetyChecker) applied(id string, e *LogEntry) {
+	if prev, ok := k.appliedAt[e.GetIndex()]; ok && !proto.Equal(prev, e) {
+		k.violate("state machine safety: %s applied %v at index %d, another node applied %v",
+			id, e, e.GetIndex(), prev)
+		return
+	}
+	k.appliedAt[e.GetIndex()] = e
 }
 
 func (k *safetyChecker) violate(format string, args ...any) {

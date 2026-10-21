@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -9,13 +11,16 @@ import (
 // safety checker watches every step. Each seed is a different, reproducible
 // schedule; a failure message names the seed so it can be replayed.
 type chaos struct {
-	s *simCluster
+	s        *simCluster
+	proposed *int
 }
 
 func (ch chaos) step() {
 	s := ch.s
 	r := s.rand
 	switch p := r.IntN(100); {
+	case p < 5:
+		ch.proposeAnywhere()
 	case p < 30:
 		s.tick(s.ids[r.IntN(len(s.ids))])
 	case p < 85:
@@ -38,6 +43,20 @@ func (ch chaos) step() {
 		ch.randomPartition()
 	default:
 		s.heal()
+	}
+}
+
+// proposeAnywhere submits a command to every node that thinks it leads; stale
+// leaders accept proposals too, and those are exactly the ones that must
+// never be applied.
+func (ch chaos) proposeAnywhere() {
+	for _, id := range ch.s.leaders() {
+		c := ch.s.cores[id]
+		*ch.proposed++
+		if _, err := c.propose(c.term, fmt.Appendf(nil, "cmd-%d", *ch.proposed)); err != nil {
+			panic(err) // leaders() only returns leaders
+		}
+		ch.s.flush(id)
 	}
 }
 
@@ -68,7 +87,8 @@ func (ch chaos) randomPartition() {
 }
 
 // settle ends the chaos: everyone up, network whole. Liveness then demands a
-// leader that everybody agrees on.
+// leader that everybody agrees on, and that a fresh command reaches every
+// state machine, by which point all of them must have applied the same log.
 func (ch chaos) settle(t *testing.T, seed uint64) {
 	t.Helper()
 	s := ch.s
@@ -78,23 +98,46 @@ func (ch chaos) settle(t *testing.T, seed uint64) {
 			s.restart(id)
 		}
 	}
+	lead := ""
 	for range 300 {
-		if s.stableLeader() != "" {
-			return
+		if lead = s.stableLeader(); lead != "" {
+			break
 		}
 		s.tickAll()
 		s.deliverAll()
 	}
-	t.Fatalf("seed %d: no stable leader after the chaos settled\n%s", seed, s.dump())
+	if lead == "" {
+		t.Fatalf("seed %d: no stable leader after the chaos settled\n%s", seed, s.dump())
+	}
+	s.propose(lead, "final")
+	for range 300 {
+		done := true
+		for _, id := range s.ids {
+			if d := s.appliedData(id); len(d) == 0 || d[len(d)-1] != "final" {
+				done = false
+			}
+		}
+		if done {
+			break
+		}
+		s.tickAll()
+		s.deliverAll()
+	}
+	want := s.appliedData(lead)
+	for _, id := range s.ids {
+		if got := s.appliedData(id); !slices.Equal(got, want) {
+			t.Fatalf("seed %d: %s applied %d commands, leader %s applied %d\n%s", seed, id, len(got), lead, len(want), s.dump())
+		}
+	}
 }
 
 // newChaos builds a cluster for a random schedule. Odd seeds get five nodes,
 // even seeds three, and a short election timeout so a run sees many elections.
 func newChaos(t *testing.T, seed uint64) chaos {
-	return chaos{s: newSimClusterTicks(t, 3+2*int(seed%2), seed, 3)}
+	return chaos{s: newSimClusterTicks(t, 3+2*int(seed%2), seed, 3), proposed: new(int)}
 }
 
-func TestRandomizedElectionSafety(t *testing.T) {
+func TestRandomizedSafety(t *testing.T) {
 	seeds, steps := uint64(200), 3000
 	if testing.Short() {
 		seeds = 20
