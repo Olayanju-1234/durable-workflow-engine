@@ -41,6 +41,7 @@ if len(set(found.values())) != 1:
 
 version = next(iter(found.values()))
 if "--release" in sys.argv[1:]:
-    if f"## [{version}]" not in (root / "CHANGELOG.md").read_text():
+    # Anchored to a line start: prose that merely mentions the heading must not count.
+    if not re.search(rf"^## \[{re.escape(version)}\]", (root / "CHANGELOG.md").read_text(), re.M):
         sys.exit(f"sdk-version: CHANGELOG.md has no '## [{version}]' section")
 print(version)

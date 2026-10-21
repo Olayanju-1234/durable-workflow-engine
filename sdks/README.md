@@ -243,9 +243,11 @@ your shell history.
    name can't be selected before it exists) and "bypass 2FA" ticked, so CI can publish.
    npm caps the lifetime of write tokens, so set a reminder to rotate it. The workflow
    publishes with `--provenance`, which links the package to the workflow run.
-2. **PyPI** (`PYPI_API_TOKEN`). Create a pypi.org account with 2FA, then an API token
-   scoped to the entire account (a project-scoped token needs the project to exist).
-   After the first upload, replace it with a token scoped to `workflowd`.
+2. **PyPI** (no secret: trusted publishing). Create a pypi.org account with 2FA. Under
+   Account settings → Publishing, add a pending GitHub publisher: project `workflowd`,
+   owner `Olayanju-1234`, repository `durable-workflow-engine`, workflow `release-sdks.yml`,
+   environment left blank. The workflow then proves who it is with GitHub's OIDC token,
+   and the first upload creates the project. No API token exists to leak or rotate.
 3. **Maven Central** (`MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
    `MAVEN_GPG_PRIVATE_KEY`, `MAVEN_GPG_PASSPHRASE`).
    - Sign in to central.sonatype.com with GitHub; that verifies the
@@ -263,8 +265,8 @@ your shell history.
 **Each release.**
 
 1. On `main`, bump the version in the six places `scripts/sdk-version.py` checks (the
-   three manifests and the `SDK_VERSION` strings; for 0.1.0 they are already set) and
-   rename `## [Unreleased]` in `CHANGELOG.md` to `## [0.1.0] - YYYY-MM-DD`. Merge that.
+   three manifests and the `SDK_VERSION` strings) and add a `## [<version>] - YYYY-MM-DD`
+   heading in `CHANGELOG.md` above that release's notes. Merge that.
 2. Dry run, which builds and validates everything and publishes nothing:
    `gh workflow run release-sdks.yml -R Olayanju-1234/durable-workflow-engine -f registries=all -f dry_run=true`
 3. Publish: the same command with `-f dry_run=false`. Use `-f registries=npm` (or
