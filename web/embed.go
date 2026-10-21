@@ -33,11 +33,17 @@ func FS() fs.FS {
 }
 
 // Handler serves the dashboard. Unknown paths fall back to index.html so the
-// single-page app owns its own routing.
+// single-page app owns its own routing. Static assets are read-only, so any
+// method but GET/HEAD gets a 405 instead of a misleading 200 + HTML shell.
 func Handler() http.Handler {
 	files := FS()
 	fileServer := http.FileServer(http.FS(files))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+			return
+		}
 		path := r.URL.Path
 		if path == "/" {
 			fileServer.ServeHTTP(w, r)

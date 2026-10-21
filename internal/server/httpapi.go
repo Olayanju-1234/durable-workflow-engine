@@ -71,6 +71,11 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
+	// Without this, unmatched /api paths would fall through to the dashboard's
+	// catch-all and answer 200 with HTML, which confuses API clients.
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no API route for %s %s", r.Method, r.URL.Path))
+	})
 	return mux
 }
 

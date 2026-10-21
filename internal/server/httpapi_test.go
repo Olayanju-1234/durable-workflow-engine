@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,5 +228,47 @@ func TestDashboardServed(t *testing.T) {
 	code, body := h.do(t, "GET", "/api/health", "")
 	if code != http.StatusOK || body["status"] != "ok" {
 		t.Errorf("health: %d %v", code, body)
+	}
+}
+
+// TestCatchAllRoutes pins what unmatched requests get: the SPA shell only for
+// GET/HEAD, 405 for other methods, and a JSON 404 under /api/.
+func TestCatchAllRoutes(t *testing.T) {
+	h := newAPIHarness(t)
+
+	tests := []struct {
+		method, path string
+		want         int
+		wantType     string
+	}{
+		{"GET", "/some/deep/route", http.StatusOK, "text/html"},
+		{"HEAD", "/", http.StatusOK, "text/html"},
+		{"POST", "/graphql", http.StatusMethodNotAllowed, "text/plain"},
+		{"PUT", "/", http.StatusMethodNotAllowed, "text/plain"},
+		{"GET", "/api/nope", http.StatusNotFound, "application/json"},
+		{"POST", "/api/workflows/x/explode", http.StatusNotFound, "application/json"},
+		{"DELETE", "/api/workflows", http.StatusNotFound, "application/json"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, h.srv.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res.Body.Close()
+			if res.StatusCode != tc.want {
+				t.Errorf("status = %d, want %d", res.StatusCode, tc.want)
+			}
+			if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, tc.wantType) {
+				t.Errorf("Content-Type = %q, want %s", ct, tc.wantType)
+			}
+			if tc.want == http.StatusMethodNotAllowed && res.Header.Get("Allow") != "GET, HEAD" {
+				t.Errorf("Allow = %q, want \"GET, HEAD\"", res.Header.Get("Allow"))
+			}
+		})
 	}
 }
