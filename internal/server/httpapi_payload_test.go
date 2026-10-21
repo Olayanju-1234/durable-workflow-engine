@@ -77,3 +77,24 @@ func TestHTTPProtocolBinaryPayloadsMarkersRetries(t *testing.T) {
 		t.Errorf("bad base64: HTTP %d, want 400", code)
 	}
 }
+
+func TestHTTPSchedules(t *testing.T) {
+	h := newAPIHarness(t)
+	if code, body := h.do(t, "POST", "/api/schedules", `{"schedule_id":"s","cron":"nonsense","workflow_type":"T"}`); code != http.StatusBadRequest {
+		t.Fatalf("bad cron: HTTP %d %v", code, body)
+	}
+	if code, body := h.do(t, "POST", "/api/schedules", `{"schedule_id":"s","cron":"0 9 * * MON-FRI","timezone":"Europe/London","workflow_type":"T","input":"x"}`); code != http.StatusCreated {
+		t.Fatalf("create: HTTP %d %v", code, body)
+	}
+	_, body := h.do(t, "GET", "/api/schedules", "")
+	list := body["schedules"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["next_fire_at"] == "" || list[0].(map[string]any)["timezone"] != "Europe/London" {
+		t.Fatalf("list: %v", body)
+	}
+	if code, _ := h.do(t, "DELETE", "/api/schedules/s", ""); code != http.StatusOK {
+		t.Fatalf("delete: HTTP %d", code)
+	}
+	if code, _ := h.do(t, "DELETE", "/api/schedules/s", ""); code != http.StatusNotFound {
+		t.Fatalf("delete again: HTTP %d, want 404", code)
+	}
+}

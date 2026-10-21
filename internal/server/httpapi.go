@@ -127,6 +127,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
+	a.registerScheduleRoutes(mux)
 	// Without this, unmatched /api paths would fall through to the dashboard's
 	// catch-all and answer 200 with HTML, which confuses API clients.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
@@ -380,7 +381,7 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrNotLeader):
 		a.writeNotLeader(w, err)
 		return
-	case errors.Is(err, ErrUnknownType):
+	case errors.Is(err, ErrUnknownType), errors.Is(err, ErrInvalidArgument):
 		// The caller must fix the request: the type is not registered here.
 		writeError(w, http.StatusBadRequest, err)
 		return

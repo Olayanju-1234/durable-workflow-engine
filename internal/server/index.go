@@ -30,6 +30,9 @@ func isReservedID(id string) bool { return strings.HasPrefix(id, reservedPrefix)
 
 // indexLocked records w's current summary. The caller holds w.mu.
 func (e *Engine) indexLocked(w *wfState) {
+	if isReservedID(w.id) {
+		return
+	}
 	var sum *WorkflowSummary
 	switch {
 	case !w.loaded:

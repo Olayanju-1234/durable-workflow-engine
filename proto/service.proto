@@ -63,6 +63,61 @@ service WorkflowService {
   rpc RegisterWorkflowType(RegisterWorkflowTypeRequest) returns (RegisterWorkflowTypeResponse);
   rpc PollWorkflowTask(PollWorkflowTaskRequest) returns (PollWorkflowTaskResponse);
   rpc CompleteWorkflowTask(CompleteWorkflowTaskRequest) returns (CompleteWorkflowTaskResponse);
+
+  // ---- Schedules ---------------------------------------------------------
+  //
+  // A schedule starts a workflow every time a cron expression fires. Schedules
+  // are durable (recorded in the engine's history, replicated in a cluster)
+  // and fire on the leader only. Each fire starts the workflow under the id
+  // "<schedule_id>-<fire time, UTC, 20060102T150405Z>", so a fire retried
+  // after a restart or a leader change can never start a second run.
+  //
+  //   CreateSchedule — create, or replace one with the same id.
+  //   DeleteSchedule — stop firing; runs already started carry on.
+  //   ListSchedules  — every schedule and when it fires next.
+  rpc CreateSchedule(CreateScheduleRequest) returns (CreateScheduleResponse);
+  rpc DeleteSchedule(DeleteScheduleRequest) returns (DeleteScheduleResponse);
+  rpc ListSchedules(ListSchedulesRequest) returns (ListSchedulesResponse);
+}
+
+message Schedule {
+  // Unique, and the prefix of every run's workflow id.
+  string schedule_id = 1;
+  // Five-field cron ("*/15 9-17 * * MON-FRI"), a macro (@hourly, @daily,
+  // @weekly, @monthly, @yearly) or "@every <duration>" (at least 1s).
+  string cron = 2;
+  // IANA time zone for the cron fields, e.g. "Europe/London"; empty is UTC.
+  string timezone = 3;
+  string workflow_type = 4;
+  bytes input = 5;
+  // Skip a fire while an earlier run of this schedule is still running.
+  bool skip_if_running = 6;
+}
+
+message ScheduleInfo {
+  Schedule schedule = 1;
+  // Unix nanoseconds.
+  int64 created_at = 2;
+  // Unix nanoseconds of the next fire; zero if it never fires again.
+  int64 next_fire_at = 3;
+}
+
+message CreateScheduleRequest {
+  Schedule schedule = 1;
+}
+
+message CreateScheduleResponse {}
+
+message DeleteScheduleRequest {
+  string schedule_id = 1;
+}
+
+message DeleteScheduleResponse {}
+
+message ListSchedulesRequest {}
+
+message ListSchedulesResponse {
+  repeated ScheduleInfo schedules = 1;
 }
 
 message RegisterWorkflowTypeRequest {

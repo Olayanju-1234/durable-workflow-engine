@@ -30,6 +30,9 @@ const (
 	WorkflowService_RegisterWorkflowType_FullMethodName = "/workflow.v1.WorkflowService/RegisterWorkflowType"
 	WorkflowService_PollWorkflowTask_FullMethodName     = "/workflow.v1.WorkflowService/PollWorkflowTask"
 	WorkflowService_CompleteWorkflowTask_FullMethodName = "/workflow.v1.WorkflowService/CompleteWorkflowTask"
+	WorkflowService_CreateSchedule_FullMethodName       = "/workflow.v1.WorkflowService/CreateSchedule"
+	WorkflowService_DeleteSchedule_FullMethodName       = "/workflow.v1.WorkflowService/DeleteSchedule"
+	WorkflowService_ListSchedules_FullMethodName        = "/workflow.v1.WorkflowService/ListSchedules"
 )
 
 // WorkflowServiceClient is the client API for WorkflowService service.
@@ -88,6 +91,20 @@ type WorkflowServiceClient interface {
 	RegisterWorkflowType(ctx context.Context, in *RegisterWorkflowTypeRequest, opts ...grpc.CallOption) (*RegisterWorkflowTypeResponse, error)
 	PollWorkflowTask(ctx context.Context, in *PollWorkflowTaskRequest, opts ...grpc.CallOption) (*PollWorkflowTaskResponse, error)
 	CompleteWorkflowTask(ctx context.Context, in *CompleteWorkflowTaskRequest, opts ...grpc.CallOption) (*CompleteWorkflowTaskResponse, error)
+	// ---- Schedules ---------------------------------------------------------
+	//
+	// A schedule starts a workflow every time a cron expression fires. Schedules
+	// are durable (recorded in the engine's history, replicated in a cluster)
+	// and fire on the leader only. Each fire starts the workflow under the id
+	// "<schedule_id>-<fire time, UTC, 20060102T150405Z>", so a fire retried
+	// after a restart or a leader change can never start a second run.
+	//
+	//	CreateSchedule — create, or replace one with the same id.
+	//	DeleteSchedule — stop firing; runs already started carry on.
+	//	ListSchedules  — every schedule and when it fires next.
+	CreateSchedule(ctx context.Context, in *CreateScheduleRequest, opts ...grpc.CallOption) (*CreateScheduleResponse, error)
+	DeleteSchedule(ctx context.Context, in *DeleteScheduleRequest, opts ...grpc.CallOption) (*DeleteScheduleResponse, error)
+	ListSchedules(ctx context.Context, in *ListSchedulesRequest, opts ...grpc.CallOption) (*ListSchedulesResponse, error)
 }
 
 type workflowServiceClient struct {
@@ -208,6 +225,36 @@ func (c *workflowServiceClient) CompleteWorkflowTask(ctx context.Context, in *Co
 	return out, nil
 }
 
+func (c *workflowServiceClient) CreateSchedule(ctx context.Context, in *CreateScheduleRequest, opts ...grpc.CallOption) (*CreateScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateScheduleResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_CreateSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowServiceClient) DeleteSchedule(ctx context.Context, in *DeleteScheduleRequest, opts ...grpc.CallOption) (*DeleteScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteScheduleResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_DeleteSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowServiceClient) ListSchedules(ctx context.Context, in *ListSchedulesRequest, opts ...grpc.CallOption) (*ListSchedulesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSchedulesResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_ListSchedules_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkflowServiceServer is the server API for WorkflowService service.
 // All implementations must embed UnimplementedWorkflowServiceServer
 // for forward compatibility.
@@ -264,6 +311,20 @@ type WorkflowServiceServer interface {
 	RegisterWorkflowType(context.Context, *RegisterWorkflowTypeRequest) (*RegisterWorkflowTypeResponse, error)
 	PollWorkflowTask(context.Context, *PollWorkflowTaskRequest) (*PollWorkflowTaskResponse, error)
 	CompleteWorkflowTask(context.Context, *CompleteWorkflowTaskRequest) (*CompleteWorkflowTaskResponse, error)
+	// ---- Schedules ---------------------------------------------------------
+	//
+	// A schedule starts a workflow every time a cron expression fires. Schedules
+	// are durable (recorded in the engine's history, replicated in a cluster)
+	// and fire on the leader only. Each fire starts the workflow under the id
+	// "<schedule_id>-<fire time, UTC, 20060102T150405Z>", so a fire retried
+	// after a restart or a leader change can never start a second run.
+	//
+	//	CreateSchedule — create, or replace one with the same id.
+	//	DeleteSchedule — stop firing; runs already started carry on.
+	//	ListSchedules  — every schedule and when it fires next.
+	CreateSchedule(context.Context, *CreateScheduleRequest) (*CreateScheduleResponse, error)
+	DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error)
+	ListSchedules(context.Context, *ListSchedulesRequest) (*ListSchedulesResponse, error)
 	mustEmbedUnimplementedWorkflowServiceServer()
 }
 
@@ -306,6 +367,15 @@ func (UnimplementedWorkflowServiceServer) PollWorkflowTask(context.Context, *Pol
 }
 func (UnimplementedWorkflowServiceServer) CompleteWorkflowTask(context.Context, *CompleteWorkflowTaskRequest) (*CompleteWorkflowTaskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CompleteWorkflowTask not implemented")
+}
+func (UnimplementedWorkflowServiceServer) CreateSchedule(context.Context, *CreateScheduleRequest) (*CreateScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateSchedule not implemented")
+}
+func (UnimplementedWorkflowServiceServer) DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSchedule not implemented")
+}
+func (UnimplementedWorkflowServiceServer) ListSchedules(context.Context, *ListSchedulesRequest) (*ListSchedulesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSchedules not implemented")
 }
 func (UnimplementedWorkflowServiceServer) mustEmbedUnimplementedWorkflowServiceServer() {}
 func (UnimplementedWorkflowServiceServer) testEmbeddedByValue()                         {}
@@ -526,6 +596,60 @@ func _WorkflowService_CompleteWorkflowTask_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkflowService_CreateSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).CreateSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_CreateSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).CreateSchedule(ctx, req.(*CreateScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowService_DeleteSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).DeleteSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_DeleteSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).DeleteSchedule(ctx, req.(*DeleteScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowService_ListSchedules_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSchedulesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).ListSchedules(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_ListSchedules_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).ListSchedules(ctx, req.(*ListSchedulesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkflowService_ServiceDesc is the grpc.ServiceDesc for WorkflowService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -576,6 +700,18 @@ var WorkflowService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CompleteWorkflowTask",
 			Handler:    _WorkflowService_CompleteWorkflowTask_Handler,
+		},
+		{
+			MethodName: "CreateSchedule",
+			Handler:    _WorkflowService_CreateSchedule_Handler,
+		},
+		{
+			MethodName: "DeleteSchedule",
+			Handler:    _WorkflowService_DeleteSchedule_Handler,
+		},
+		{
+			MethodName: "ListSchedules",
+			Handler:    _WorkflowService_ListSchedules_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
