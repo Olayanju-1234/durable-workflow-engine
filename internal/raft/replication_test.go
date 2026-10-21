@@ -317,6 +317,9 @@ func figure8(t *testing.T, knobs testingKnobs) *simCluster {
 	// term-3 entry to n2, and X (term 1) to n3: X is now on n1, n2 and n3.
 	s.restart(n1)
 	s.elect(n1, n2, n3, n4)
+	// elect dropped n1's first broadcast, which (pipelining) already moved
+	// next past it; put next back where the lost messages leave it.
+	s.cores[n1].progress[n2].next = 3
 	s.cores[n1].sendAppend(n2)
 	s.flush(n1)
 	s.deliverOne(n1, n2) // n2 takes index 3
@@ -352,4 +355,45 @@ func TestCommitCappedAtLastNewEntry(t *testing.T) {
 	if got := c.log.committed; got != 3 {
 		t.Fatalf("follower committed up to %d, want 3: entries 4-5 were never checked", got)
 	}
+}
+
+// Heartbeats must not re-send entries already on their way to a follower.
+// Before pipelining, a follower whose acknowledgements lagged got the same
+// entries on every heartbeat, and each copy's acknowledgement triggered yet
+// another send: on a busy machine the duplicates filled the transport queue
+// and every commit waited about a second behind them.
+func TestHeartbeatsDoNotResendInflightEntries(t *testing.T) {
+	s := newSimCluster(t, 3, 50)
+	lead := electLeader(t, s)
+	s.inflight = nil
+	s.propose(lead, "x")
+	for range 10 {
+		s.tick(lead) // ten heartbeats; nothing is delivered yet
+	}
+	withEntries := map[string]int{}
+	for _, m := range s.inflight {
+		if ae := m.GetAppendEntries(); ae != nil && len(ae.GetEntries()) > 0 {
+			withEntries[m.GetTo()]++
+		}
+	}
+	for _, id := range s.others(lead) {
+		if withEntries[id] != 1 {
+			t.Fatalf("%s was sent the new entry %d times in 10 heartbeats, want once", id, withEntries[id])
+		}
+	}
+	s.deliverAll()
+	s.runUntil(20, "the entry to apply everywhere", func() bool { return s.allApplied([]string{"x"}) })
+}
+
+// A pipelined message that is lost is recovered: the follower rejects the
+// next message, whose prev entry it lacks, and the leader backs up.
+func TestLostPipelinedEntryIsResent(t *testing.T) {
+	s := newSimCluster(t, 3, 51)
+	lead := electLeader(t, s)
+	s.inflight = nil
+	s.propose(lead, "lost")
+	s.inflight = nil // the network loses it
+	s.propose(lead, "after")
+	s.runUntil(50, "both entries to apply everywhere", func() bool { return s.allApplied([]string{"lost", "after"}) })
+	s.checker.assertClean(t)
 }

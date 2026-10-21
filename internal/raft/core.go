@@ -17,10 +17,12 @@ import (
 var ErrNotLeader = errors.New("raft: not the leader")
 
 // Limits on one AppendEntries message, so catching up a far-behind follower is
-// a stream of bounded messages rather than one enormous one.
+// a stream of bounded messages rather than one enormous one, and on how many
+// entries may be sent to a follower ahead of its acknowledgements.
 const (
-	maxEntriesPerMsg = 256
-	maxBytesPerMsg   = 1 << 20
+	maxEntriesPerMsg   = 256
+	maxBytesPerMsg     = 1 << 20
+	maxInflightEntries = 4 * maxEntriesPerMsg
 )
 
 // Role is a node's position in the cluster at a moment in time.
@@ -372,6 +374,15 @@ func (c *core) broadcastAppend() {
 // sendAppend sends one follower the entries from its next index onward (none,
 // for a follower that is up to date: then it is a pure heartbeat). A follower
 // that needs entries already compacted into a snapshot gets the snapshot.
+//
+// Sending is pipelined: next moves past what was just sent, so a heartbeat
+// doesn't re-send entries still on their way. Without that, a follower whose
+// acknowledgements lag by more than a heartbeat gets the same entries again
+// and again, each copy draws another acknowledgement, and the duplicates
+// snowball until its transport queue is full. A message that does get lost is
+// noticed when the follower rejects the next one (it lacks that message's
+// prev entry), and next backs up then; messages to one peer arrive in order,
+// so a rejection is never just a message overtaking another.
 func (c *core) sendAppend(to string) {
 	pr := c.progress[to]
 	prev := pr.next - 1
@@ -383,17 +394,24 @@ func (c *core) sendAppend(to string) {
 		c.sendSnapshot(to)
 		return
 	}
-	hi := min(c.log.lastIndex()+1, pr.next+maxEntriesPerMsg)
+	var ents []*LogEntry
+	if prev-pr.match < maxInflightEntries { // flow control: bounded entries in flight
+		hi := min(c.log.lastIndex()+1, pr.next+maxEntriesPerMsg)
+		// A copy: the log's backing array may be overwritten after a later
+		// conflict while this message still waits in a transport queue.
+		ents = slices.Clone(c.log.slice(pr.next, hi, maxBytesPerMsg))
+	}
 	c.send(to, &Envelope_AppendEntries{AppendEntries: &AppendEntriesRequest{
 		Term:         c.term,
 		LeaderId:     c.id,
 		PrevLogIndex: prev,
 		PrevLogTerm:  prevTerm,
-		// A copy: the log's backing array may be overwritten after a later
-		// conflict while this message still waits in a transport queue.
-		Entries:      slices.Clone(c.log.slice(pr.next, hi, maxBytesPerMsg)),
+		Entries:      ents,
 		LeaderCommit: c.log.committed,
 	}})
+	if n := len(ents); n > 0 {
+		pr.next = ents[n-1].GetIndex() + 1
+	}
 }
 
 // sendSnapshot sends the leader's latest snapshot. While one is in flight it

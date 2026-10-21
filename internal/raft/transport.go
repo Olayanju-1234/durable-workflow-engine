@@ -17,9 +17,11 @@ import (
 
 const (
 	// peerQueueSize bounds the messages waiting for one peer. When a peer is
-	// down its queue fills and newer messages are dropped, which Raft absorbs:
-	// the leader re-sends whatever a follower is missing on the next heartbeat.
-	peerQueueSize = 1024
+	// down or slow its queue fills and newer messages are dropped, which Raft
+	// absorbs: a follower that misses entries rejects the next message and the
+	// leader backs up. Kept short because every queued message is latency
+	// added to the ones behind it.
+	peerQueueSize = 256
 	// sendTimeout bounds one Send call, so a hung peer can't stall the queue.
 	sendTimeout = 10 * time.Second
 	// maxMessageSize admits a whole snapshot in one InstallSnapshot message
