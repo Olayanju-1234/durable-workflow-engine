@@ -9,6 +9,7 @@ that supersedes the old one.
 | [0001](0001-record-format.md) | Append-only, CRC-framed record format for the history store | Accepted |
 | [0002](0002-protobuf-events.md) | Protocol Buffers for events and the gRPC API | Accepted |
 | [0003](0003-single-binary-embedded.md) | Single-binary, zero-dependency, embeddable engine | Accepted |
+| [0004](0004-replicated-history-leader-only-engine.md) | Replicate history through Raft; run the engine on the leader only | Accepted |
 
 ## Template
 
