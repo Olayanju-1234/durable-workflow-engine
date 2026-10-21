@@ -61,7 +61,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      # JDK 21 compiles with --release 11, so the SDK's Java 11 floor is checked too.
+      # JDK 21 compiles with --release 11 and lint warnings as errors (serial lint
+      # off: the SDK's exceptions are never serialized), so Java 11 is checked too.
       - if: matrix.sdk == 'java'
         uses: actions/setup-java@v4
         with:

@@ -59,7 +59,7 @@ case "$lang" in
     ;;
   java)
     type=JavaOrder
-    javac --release 11 -Xlint:all -Werror -d "$work/classes" "$root/sdks/java/Workflowd.java" "$root/sdks/java/Example.java"
+    javac --release 11 -Xlint:all,-serial -Werror -d "$work/classes" "$root/sdks/java/Workflowd.java" "$root/sdks/java/Example.java"
     (exec env WORKFLOWD_ADDR="$addr" ${worker_env[@]+"${worker_env[@]}"} java -cp "$work/classes" Example) >"$work/worker.log" 2>&1 &
     ;;
   *) echo "unknown SDK: $lang" >&2; exit 2 ;;
