@@ -5,6 +5,45 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 17: Drop the append handle when a write fails
+
+Side session to close the torn-write bug found in Session 16. PR #7, merged and
+deployed (`966b991`).
+
+**Done:**
+- `HistoryStore.Append` now releases the cached handle when the write or the fsync
+  fails, through a new `releaseLocked` helper (the caller already holds `s.mu`, and
+  Go mutexes aren't re-entrant). `Release` and `Delete` share the helper. The
+  original error is still returned. The next `Append` reopens through `fileLocked`,
+  which truncates the partial record before writing.
+- Short writes need no extra check: `os.File.Write` documents and enforces a non-nil
+  error whenever `n != len(b)` (it falls back to `io.ErrShortWrite`).
+- Test seam: `HistoryStore.writeFile` (default `(*os.File).Write`).
+  `TestAppendAfterFailedWriteRecovers` has two cases: a real half-record write
+  followed by `syscall.ENOSPC`, and stray tail bytes plus the cached fd closed
+  underneath the store (a real `os.ErrClosed`). Before the fix, the ENOSPC case
+  read back `record at offset 57: corrupt record (CRC mismatch)` and the second
+  case failed every retry with `file already closed`.
+
+**Prod verification:** fresh backup `data-20261021T070259Z.tar.gz` before the restart;
+`workflowd.prev` is now the `4c8b42a` build. `/api/health` reports `966b991`, recovery
+replayed 4 workflows, the site and dashboard URLs all return 200, and the 3 listeners are
+on 127.0.0.1. A smoke OrderSaga completed (10 events), holding 1 `.history` fd while
+live and 0 afterwards.
+
+**Next:** `--retention` in prod still awaits the owner's OK. Then Phase 4 / Week 11, Raft.
+
+**Gotchas:**
+- After a failed fsync the record is already complete in the file, so the reopen keeps
+  it: `Append` returned an error but the event is visible to the next `ReadAll`. The
+  engine re-reads history per op, so it treats the event as committed. This is unchanged
+  from before.
+- Before this fix, a restart could heal a torn tail only if it happened before the next
+  append. Once a retry landed after the garbage, `recoverTornTail` hit a mid-log CRC
+  error and refused to truncate, so the workflow was unreadable for good.
+
+---
+
 ## 2026-10-21 — Session 16: Release history handles when workflows finish
 
 Side session spun off from Session 15 to close the fd-leak backlog item. PR #5,

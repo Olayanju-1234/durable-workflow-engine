@@ -72,6 +72,9 @@ Records are appended and fsync'd one at a time:
   error; a short read (torn header/payload from a crash mid-append) is treated as end-of-log.
 - **fsync per append** → an event is only "committed" once durable. Correctness over
   performance for now; Phase 4 batches writes to amortize fsync.
+- **Torn-tail truncation on open** → the append handle is cached per workflow, and opening it
+  truncates any partial trailing record. A failed write or fsync drops the cached handle, so
+  a live process recovers on its next append the same way a restarted one does.
 
 See [ADR-0001](adr/0001-record-format.md). Protobuf rationale: [ADR-0002](adr/0002-protobuf-events.md).
 

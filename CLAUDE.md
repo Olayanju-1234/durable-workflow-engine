@@ -96,6 +96,9 @@ authoritative.
 
 Session 15 hardened the public demo: activity tasks are routed by step name, and an
 in-process `--demo-worker` plus opt-in `--retention` were added (see SESSION_LOG).
+Sessions 16–17 hardened the history store's cached append handles: released when a
+workflow finishes, and dropped on a failed write or fsync so the reopen truncates the
+torn record.
 
 **Polyglot invariants worth not breaking:** SDK decisions are fenced by history
 length (stale → reject); a malformed command must leave the task *pending* or the
