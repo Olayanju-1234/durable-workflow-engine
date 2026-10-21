@@ -43,7 +43,7 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 }
 
 func (s *GRPCServer) PollTask(ctx context.Context, req *PollTaskRequest) (*PollTaskResponse, error) {
-	task, err := s.engine.PollTask(ctx, req.GetWorkerId())
+	task, err := s.engine.PollTask(ctx, req.GetWorkerId(), req.GetStepNames()...)
 	if err != nil {
 		// A cancelled/expired context is the worker leaving or the poll timing
 		// out, not a server fault: translate it to the matching gRPC status.

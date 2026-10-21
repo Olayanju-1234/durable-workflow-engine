@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ func main() {
 		metricsAddr = flag.String("metrics-addr", ":9090", "HTTP listen address for /metrics (serve mode; empty disables)")
 		httpAddr    = flag.String("http-addr", ":8233", "HTTP listen address for the dashboard + JSON API (serve mode; empty disables)")
 		authToken   = flag.String("auth-token", "", "require this bearer token on mutating /api routes (empty disables auth)")
+		demoWorker  = flag.Bool("demo-worker", false, "run an in-process worker for the built-in demo activities (reserve, charge, ship, release)")
 	)
 	flag.Parse()
 
@@ -62,7 +64,11 @@ func main() {
 	}
 
 	if *serve {
-		if err := runServe(logger, store, *addr, *metricsAddr, *httpAddr, *authToken); err != nil {
+		cfg := serveConfig{
+			addr: *addr, metricsAddr: *metricsAddr, httpAddr: *httpAddr,
+			authToken: *authToken, demoWorker: *demoWorker,
+		}
+		if err := runServe(logger, store, cfg); err != nil {
 			logger.Error("server stopped", "err", err)
 			os.Exit(1)
 		}
@@ -77,21 +83,23 @@ func main() {
 // can't hang shutdown indefinitely.
 const shutdownGracePeriod = 10 * time.Second
 
+// serveConfig is the --serve flag set.
+type serveConfig struct {
+	addr, metricsAddr, httpAddr, authToken string
+	demoWorker                             bool
+}
+
+// demoWorkerConcurrency is how many demo activities run at once.
+const demoWorkerConcurrency = 4
+
 // runServe starts the gRPC workflow server (plus the /metrics HTTP endpoint)
 // and blocks until SIGINT/SIGTERM, then drains in-flight RPCs with
 // GracefulStop. The engine is wired to the same store the daemon opened, and
 // the Phase-1 workflow types are registered up front.
-func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAddr, httpAddr, authToken string) error {
+func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig) error {
 	engine := server.NewEngine(store, logger)
 	defer engine.Close()
-	engine.Register(demoDef)
-
-	// A code-based Saga workflow (Phase 2): charge is retried up to 3× with backoff,
-	// and if it still fails the workflow releases the reservation (compensation).
-	engine.RegisterWorkflow("OrderSaga", sdk.Workflow{Type: "OrderSaga", Fn: orderSaga})
-	engine.SetRetryPolicy("charge", server.RetryPolicy{
-		MaxAttempts: 3, Backoff: 200 * time.Millisecond, MaxBackoff: 5 * time.Second,
-	})
+	registerDemoTypes(engine)
 
 	// Rebuild runtime state from disk before accepting traffic: re-enqueue steps
 	// that were in flight when we last died, and advance any workflow caught
@@ -100,8 +108,21 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 		return fmt.Errorf("recover: %w", err)
 	}
 
+	// Deferred before stop(), so it runs after it: stop cancels ctx, which ends the
+	// background workers, and they finish before the engine and store close.
+	var bg sync.WaitGroup
+	defer bg.Wait()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if cfg.demoWorker {
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			newDemoWorker(engine, logger).run(ctx, demoWorkerConcurrency)
+		}()
+		logger.Info("demo worker running", "steps", demoSteps, "concurrency", demoWorkerConcurrency)
+	}
 
 	// Two HTTP listeners, deliberately separate from each other and from gRPC:
 	// the dashboard + JSON API are for humans and operators, while /metrics is
@@ -109,28 +130,32 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 	// can be disabled with an empty address.
 	var httpSrvs []*http.Server
 
-	if httpAddr != "" {
-		api := server.NewHTTPAPI(engine, logger, server.WithAuthToken(authToken))
+	if cfg.httpAddr != "" {
+		opts := []server.HTTPOption{server.WithAuthToken(cfg.authToken)}
+		if cfg.demoWorker {
+			opts = append(opts, server.WithDemoWorker())
+		}
+		api := server.NewHTTPAPI(engine, logger, opts...)
 		mux := api.Handler()
 		mux.Handle("/", web.Handler()) // embedded dashboard; API routes win by specificity
-		if authToken == "" {
+		if cfg.authToken == "" {
 			logger.Warn("API auth is disabled; anyone who can reach the HTTP port can start, signal and terminate workflows",
 				"hint", "pass --auth-token to require a bearer token")
 		}
-		httpSrvs = append(httpSrvs, startHTTP(ctx, httpAddr, api.Wrap(mux), "dashboard", logger))
-		logger.Info("dashboard listening", "addr", httpAddr, "url", browseURL(httpAddr))
+		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.httpAddr, api.Wrap(mux), "dashboard", logger))
+		logger.Info("dashboard listening", "addr", cfg.httpAddr, "url", browseURL(cfg.httpAddr))
 	}
 
-	if metricsAddr != "" {
+	if cfg.metricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", engine.Metrics().Handler())
-		httpSrvs = append(httpSrvs, startHTTP(ctx, metricsAddr, mux, "metrics", logger))
-		logger.Info("metrics endpoint listening", "addr", metricsAddr, "path", "/metrics")
+		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.metricsAddr, mux, "metrics", logger))
+		logger.Info("metrics endpoint listening", "addr", cfg.metricsAddr, "path", "/metrics")
 	}
 
-	lis, err := net.Listen("tcp", addr)
+	lis, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
+		return fmt.Errorf("listen %s: %w", cfg.addr, err)
 	}
 
 	gs := grpc.NewServer()
@@ -157,7 +182,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 		}
 	}()
 
-	logger.Info("gRPC server listening", "addr", addr, "version", version.Version)
+	logger.Info("gRPC server listening", "addr", cfg.addr, "version", version.Version)
 	if err := gs.Serve(lis); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -195,6 +220,17 @@ func browseURL(addr string) string {
 		host = "localhost"
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+// registerDemoTypes registers the built-in example workflows every node runs.
+func registerDemoTypes(engine *server.Engine) {
+	engine.Register(demoDef)
+	// A code-based Saga workflow (Phase 2): charge is retried up to 3× with backoff,
+	// and if it still fails the workflow releases the reservation (compensation).
+	engine.RegisterWorkflow("OrderSaga", sdk.Workflow{Type: "OrderSaga", Fn: orderSaga})
+	engine.SetRetryPolicy("charge", server.RetryPolicy{
+		MaxAttempts: 3, Backoff: 200 * time.Millisecond, MaxBackoff: 5 * time.Second,
+	})
 }
 
 // demoDef is the Phase-1 stand-in for "workflow code": a fixed, ordered pipeline.

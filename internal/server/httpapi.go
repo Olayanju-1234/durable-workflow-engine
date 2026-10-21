@@ -38,7 +38,9 @@ type HTTPAPI struct {
 	// authToken guards every mutating /api route when set (Authorization:
 	// Bearer <token>). Empty disables auth entirely — the pre-existing default.
 	authToken string
-	startedAt time.Time
+	// demoWorker is reported by /api/health so the dashboard can guide visitors.
+	demoWorker bool
+	startedAt  time.Time
 }
 
 func NewHTTPAPI(engine *Engine, logger *slog.Logger, opts ...HTTPOption) *HTTPAPI {
@@ -57,6 +59,12 @@ type HTTPOption func(*HTTPAPI)
 // stay open; every other /api route requires "Authorization: Bearer <token>".
 func WithAuthToken(token string) HTTPOption {
 	return func(a *HTTPAPI) { a.authToken = token }
+}
+
+// WithDemoWorker reports in /api/health that an in-process demo worker is
+// executing the built-in demo activities on this node.
+func WithDemoWorker() HTTPOption {
+	return func(a *HTTPAPI) { a.demoWorker = true }
 }
 
 // Handler returns the API routes. Go 1.22+ method+wildcard patterns keep the
@@ -178,6 +186,7 @@ func (a *HTTPAPI) health(w http.ResponseWriter, _ *http.Request) {
 		"workflows_active":          st.ActiveWorkflows,
 		"task_queue_depth":          st.TaskQueueDepth,
 		"workflow_task_queue_depth": st.WorkflowTaskQueueDepth,
+		"demo_worker":               a.demoWorker,
 	})
 }
 

@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"slices"
-	"sync"
 	"time"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
@@ -60,67 +58,18 @@ type decisionTask struct {
 	dispatchedAt  time.Time
 }
 
-// workflowTaskQueue holds workflow tasks awaiting an SDK worker. Unlike the
-// activity queue (a plain channel), pollers here filter by workflow type — a
-// TypeScript worker must not receive a Python workflow's task — so it is a
-// slice guarded by a mutex, with a broadcast channel to wake waiters.
-type workflowTaskQueue struct {
-	mu      sync.Mutex
-	pending []*WorkflowTask
-	// ready is closed (and replaced) on every enqueue, waking every poller so
-	// each can re-check for a task matching its own types.
-	ready chan struct{}
-}
+// workflowTaskQueue holds workflow tasks awaiting an SDK worker, routed by
+// workflow type: a TypeScript worker must not receive a Python workflow's task.
+type workflowTaskQueue = routedQueue[*WorkflowTask]
 
 func newWorkflowTaskQueue() *workflowTaskQueue {
-	return &workflowTaskQueue{ready: make(chan struct{})}
+	return newRoutedQueue((*WorkflowTask).GetWorkflowType)
 }
 
-func (q *workflowTaskQueue) enqueue(t *WorkflowTask) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.pending = append(q.pending, t)
-	close(q.ready)
-	q.ready = make(chan struct{})
-}
-
-// drop removes any pending task for a workflow — used when a decision is
-// applied or superseded, so a stale task is never handed out.
-func (q *workflowTaskQueue) drop(workflowID string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.pending = slices.DeleteFunc(q.pending, func(t *WorkflowTask) bool {
-		return t.GetWorkflowId() == workflowID
-	})
-}
-
-func (q *workflowTaskQueue) depth() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.pending)
-}
-
-// poll blocks until a task matching one of types is available, or ctx ends.
-// Passing no types accepts any task.
-func (q *workflowTaskQueue) poll(ctx context.Context, types []string) (*WorkflowTask, error) {
-	for {
-		q.mu.Lock()
-		for i, t := range q.pending {
-			if len(types) == 0 || slices.Contains(types, t.GetWorkflowType()) {
-				q.pending = slices.Delete(q.pending, i, i+1)
-				q.mu.Unlock()
-				return t, nil
-			}
-		}
-		wait := q.ready
-		q.mu.Unlock()
-
-		select {
-		case <-wait:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
+// dropWorkflow removes any pending task for a workflow — used when a decision
+// is applied or superseded, so a stale task is never handed out.
+func dropWorkflow(q *workflowTaskQueue, workflowID string) {
+	q.dropWhere(func(t *WorkflowTask) bool { return t.GetWorkflowId() == workflowID })
 }
 
 // RegisterWorkflowTypes marks workflow types as executed by an external SDK and
@@ -212,7 +161,7 @@ func (e *Engine) dispatchWorkflowTaskLocked(workflowID, workflowType string, eve
 		dispatchedAt:  time.Now(),
 	}
 	// Replace any task from an earlier position; only the newest can apply.
-	e.workflowQueue.drop(workflowID)
+	dropWorkflow(e.workflowQueue, workflowID)
 	e.workflowQueue.enqueue(task)
 	e.metrics.workflowTasksDispatched.Inc()
 
@@ -305,7 +254,7 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 
 	if replayError != "" {
 		delete(e.pendingDecisions, workflowID)
-		e.workflowQueue.drop(workflowID)
+		dropWorkflow(e.workflowQueue, workflowID)
 		e.metrics.workflowTaskReplayErrors.Inc()
 		e.log.Error("sdk replay failed", "workflow_id", workflowID, "err", replayError)
 		return e.applyDecisionLocked(workflowID, state.Decision{
@@ -328,7 +277,7 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 	}
 
 	delete(e.pendingDecisions, workflowID)
-	e.workflowQueue.drop(workflowID)
+	dropWorkflow(e.workflowQueue, workflowID)
 	if decision.Type == state.DecideNoop {
 		return nil // SDK says the workflow is blocked; nothing to record
 	}

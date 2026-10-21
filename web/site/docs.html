@@ -481,12 +481,19 @@ worker.run()</code></pre>
 
     <h2 id="polyglot-protocol">The SDK protocol</h2>
     <p>
-      Three HTTP endpoints. If your language isn't listed above, this is everything you need
+      Five HTTP endpoints. If your language isn't listed above, this is everything you need
       to add it — a complete SDK is about 250 lines.
     </p>
     <pre data-lang="sh"><code>POST /api/workflow-types            {"workflow_types":["OrderWorkflow"],"worker_id":"w1"}
 GET  /api/workflow-tasks?types=OrderWorkflow    (long-poll; 204 = nothing yet)
-POST /api/workflow-tasks/complete   {"workflow_id":...,"task_token":...,"command":{...}}</code></pre>
+POST /api/workflow-tasks/complete   {"workflow_id":...,"task_token":...,"command":{...}}
+GET  /api/activity-tasks?activities=reserve,charge   (long-poll; 204 = nothing yet)
+POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence":...,"lease_token":...,"output":...,"error":...}</code></pre>
+    <p>
+      Always pass <code>types</code> and <code>activities</code>: a poll without a filter receives
+      <em>any</em> task, including ones only another worker can run. Workers that register the
+      same activity name share its queue, so they must implement it the same way.
+    </p>
     <p>
       A workflow task carries the <em>already-reconstructed</em> state — input, steps in order
       with their results, and buffered signals — so your SDK never has to implement the history
@@ -563,6 +570,7 @@ POST /api/workflow-tasks/complete   {"workflow_id":...,"task_token":...,"command
         <tr><td><code>--metrics-addr</code></td><td><code>:9090</code></td><td>Prometheus <code>/metrics</code>. Empty string disables.</td></tr>
         <tr><td><code>--demo</code></td><td><code>false</code></td><td>Drive a sample workflow to completion against a real store, then exit.</td></tr>
         <tr><td><code>--auth-token</code></td><td>empty</td><td>Require this bearer token on mutating <code>/api</code> routes (<code>Authorization: Bearer &lt;token&gt;</code>). Empty disables auth. <code>/api/health</code> and the dashboard's static assets stay open.</td></tr>
+        <tr><td><code>--demo-worker</code></td><td><code>false</code></td><td>Run an in-process worker for the built-in demo activities (<code>reserve</code>, <code>charge</code>, <code>ship</code>, <code>release</code>), so <code>OrderSaga</code> and <code>OrderWorkflow</code> run with no separate worker. An input containing <code>decline</code> makes <code>charge</code> fail for good, which shows the saga compensating.</td></tr>
         <tr><td><code>--version</code></td><td>—</td><td>Print version and exit.</td></tr>
       </tbody>
     </table>

@@ -194,6 +194,9 @@ message PollTaskRequest {
   // Identifies the worker; recorded on the lease and in engine logs, so a lease
   // expiry names the worker that went dark.
   string worker_id = 1;
+  // Only receive tasks for these activities (step names). Empty means any task,
+  // which is only safe when a single worker implements every activity.
+  repeated string step_names = 2;
 }
 
 // Task is one unit of work dispatched to exactly one worker, under a lease.
