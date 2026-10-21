@@ -196,7 +196,14 @@ func (s *GRPCServer) CompleteWorkflowTask(ctx context.Context, req *CompleteWork
 	if err != nil {
 		return nil, err
 	}
-	err = e.CompleteWorkflowTask(req.GetWorkflowId(), req.GetTaskToken(), req.GetCommand(), req.GetReplayError())
+	cmds := req.GetCommands()
+	if req.GetCommand() != nil {
+		if len(cmds) > 0 {
+			return nil, status.Error(codes.InvalidArgument, "complete workflow task: set command or commands, not both")
+		}
+		cmds = []*WorkflowCommand{req.GetCommand()}
+	}
+	err = e.CompleteWorkflowTask(req.GetWorkflowId(), req.GetTaskToken(), cmds, req.GetReplayError())
 	switch {
 	case errors.Is(err, ErrNotLeader):
 		return nil, s.notLeader(ctx, err)

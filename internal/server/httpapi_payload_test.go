@@ -98,3 +98,34 @@ func TestHTTPSchedules(t *testing.T) {
 		t.Fatalf("delete again: HTTP %d, want 404", code)
 	}
 }
+
+// TestHTTPBatchCommands: an SDK returns several commands at once and every
+// activity is dispatched before any completes.
+func TestHTTPBatchCommands(t *testing.T) {
+	h := newAPIHarness(t)
+	h.do(t, "POST", "/api/workflow-types", `{"workflow_types":["Fan"],"worker_id":"w"}`)
+	_, start := h.do(t, "POST", "/api/workflows", `{"type":"Fan"}`)
+	id := start["workflow_id"].(string)
+	_, task := h.do(t, "GET", "/api/workflow-tasks?types=Fan", "")
+	both := fmt.Sprintf(`{"workflow_id":%q,"task_token":%q,"command":{"type":"noop"},"commands":[{"type":"noop"}]}`, id, task["task_token"])
+	if code, _ := h.do(t, "POST", "/api/workflow-tasks/complete", both); code != http.StatusBadRequest {
+		t.Fatalf("command and commands together: HTTP %d, want 400", code)
+	}
+	batch := fmt.Sprintf(`{"workflow_id":%q,"task_token":%q,"commands":[
+		{"type":"schedule_activity","step_name":"x","sequence":1,"input":"1"},
+		{"type":"schedule_activity","step_name":"y","sequence":2,"input":"2"}]}`, id, task["task_token"])
+	if code, body := h.do(t, "POST", "/api/workflow-tasks/complete", batch); code != http.StatusOK {
+		t.Fatalf("batch: HTTP %d %v", code, body)
+	}
+	_, x := h.do(t, "GET", "/api/activity-tasks?activities=x", "")
+	_, y := h.do(t, "GET", "/api/activity-tasks?activities=y", "")
+	if x["input"] != "1" || y["input"] != "2" {
+		t.Fatalf("activity tasks %v %v; want both dispatched at once", x, y)
+	}
+	h.do(t, "POST", "/api/activity-tasks/complete", fmt.Sprintf(`{"workflow_id":%q,"step_name":"y","sequence":2,"lease_token":%q,"output":"Y"}`, id, y["lease_token"]))
+	_, task = h.do(t, "GET", "/api/workflow-tasks?types=Fan", "")
+	steps := task["steps"].([]any)
+	if steps[0].(map[string]any)["status"] != "SCHEDULED" || steps[1].(map[string]any)["resolved_event_id"] == nil {
+		t.Fatalf("steps %v: x still in flight, y resolved with its event id", steps)
+	}
+}

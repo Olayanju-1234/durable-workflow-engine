@@ -27,6 +27,26 @@ def reserve(payload):
 worker.run()
 ```
 
+More of the API:
+
+```python
+# Run activities in parallel; race a signal against a deadline.
+stock, price = ctx.wait_all(ctx.activity_async("stock", sku), ctx.activity_async("price", sku))
+late = ctx.wait_any(ctx.wait_for_signal_async("reply", "approved"), ctx.sleep_async("sla", 3600)) == 1
+
+# Retry a failed attempt before the workflow sees the error; JSON and bytes payloads.
+receipt = ctx.activity("charge", {"amount": 42}, retry=RetryPolicy(max_attempts=3, initial_backoff=0.5), decode="json")
+
+# Change code safely while executions are in flight; record a non-deterministic value once.
+if ctx.get_version("fraud-check", DEFAULT_VERSION, 1) == 1:
+    ctx.activity("fraud-check", receipt)
+order_id = ctx.side_effect("id", lambda: str(uuid.uuid4()))
+```
+
+A cluster: `Worker(addresses=["http://n1:8233", "http://n2:8233", "http://n3:8233"])` follows
+the leader. Activities longer than the lease heartbeat automatically; an activity taking a
+second `info` argument can check `info["lease_lost"]`.
+
 For an engine with auth and TLS: `Worker(address="https://…:8233", token=..., ca_file=...)`
 (`ca_file` only for a private CA).
 

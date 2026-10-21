@@ -30,3 +30,8 @@ type Workflow struct {
 func (w Workflow) Decide(events []*history.HistoryEvent) (state.Decision, error) {
 	return replay.Decide(w.Fn, events, nil)
 }
+
+// DecideAll returns every decision the workflow made (parallel steps).
+func (w Workflow) DecideAll(events []*history.HistoryEvent) ([]state.Decision, error) {
+	return replay.DecideAll(w.Fn, events, nil)
+}

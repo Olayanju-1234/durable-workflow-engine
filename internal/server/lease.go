@@ -41,10 +41,16 @@ func newLeaseToken() string {
 	return fmt.Sprintf("%016x%016x", rand.Uint64(), rand.Uint64())
 }
 
+// leaseKey names one in-flight step: a workflow can have several activities
+// in flight at once, each under its own lease.
+type leaseKey struct {
+	workflowID string
+	sequence   int64
+}
+
 // claim grants a lease on a just-dequeued task: mints the token, stamps it onto
 // the task the worker receives, and arms the expiry timer. The caller holds the
-// workflow's lock. One in-flight step per workflow means one lease per
-// workflow, so the map is keyed by workflow id.
+// workflow's lock.
 func (e *Engine) claim(t *Task, workerID string) *lease {
 	now := time.Now()
 	le := &lease{
@@ -57,7 +63,12 @@ func (e *Engine) claim(t *Task, workerID string) *lease {
 		deadline:   now.Add(e.leaseDuration),
 	}
 	e.mu.Lock()
-	e.leases[le.workflowID] = le
+	key := leaseKey{le.workflowID, le.sequence}
+	if old, ok := e.leases[key]; ok {
+		delete(e.leaseTokens, old.token)
+	}
+	e.leases[key] = le
+	e.leaseTokens[le.token] = le
 	e.mu.Unlock()
 	e.metrics.tasksDispatched.Inc()
 	t.LeaseToken = le.token
@@ -69,24 +80,40 @@ func (e *Engine) claim(t *Task, workerID string) *lease {
 	return le
 }
 
-// checkLeaseLocked verifies that token is the current lease on the workflow's
-// in-flight task. The caller must hold e.mu.
-func (e *Engine) checkLeaseLocked(workflowID, token string) error {
-	le, ok := e.leases[workflowID]
+// checkLeaseLocked verifies that token is the current lease on the step's
+// task and returns it. The caller must hold e.mu.
+func (e *Engine) checkLeaseLocked(workflowID string, sequence int64, token string) (*lease, error) {
+	le, ok := e.leases[leaseKey{workflowID, sequence}]
 	if !ok {
-		return fmt.Errorf("server: no active lease for workflow %q (lease expired, task reassigned, or engine restarted)", workflowID)
+		return nil, fmt.Errorf("server: no active lease for workflow %q step %d (lease expired, task reassigned, or engine restarted)", workflowID, sequence)
 	}
 	if le.token != token {
-		return fmt.Errorf("server: stale lease token for workflow %q: the task was reassigned to worker %q", workflowID, le.workerID)
+		return nil, fmt.Errorf("server: stale lease token for workflow %q: the task was reassigned to worker %q", workflowID, le.workerID)
 	}
-	return nil
+	return le, nil
 }
 
-// dropLease forgets the workflow's lease once its attempt is over.
-func (e *Engine) dropLease(workflowID string) {
+// dropLease forgets a step's lease once its attempt is over.
+func (e *Engine) dropLease(workflowID string, sequence int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	delete(e.leases, workflowID)
+	if le, ok := e.leases[leaseKey{workflowID, sequence}]; ok {
+		delete(e.leaseTokens, le.token)
+		delete(e.leases, leaseKey{workflowID, sequence})
+	}
+}
+
+// dropLeases forgets every lease of a finished workflow, so workers still
+// running its steps are turned away when they report.
+func (e *Engine) dropLeases(workflowID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for key, le := range e.leases {
+		if key.workflowID == workflowID {
+			delete(e.leaseTokens, le.token)
+			delete(e.leases, key)
+		}
+	}
 }
 
 // Heartbeat extends the caller's lease, proving the worker is still alive. It
@@ -97,11 +124,10 @@ func (e *Engine) dropLease(workflowID string) {
 func (e *Engine) Heartbeat(workflowID, token string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	if err := e.checkLeaseLocked(workflowID, token); err != nil {
-		return err
+	le, ok := e.leaseTokens[token]
+	if !ok || le.workflowID != workflowID {
+		return fmt.Errorf("server: no active lease for workflow %q with this token (lease expired, task reassigned, or engine restarted)", workflowID)
 	}
-	le := e.leases[workflowID]
 	le.deadline = time.Now().Add(e.leaseDuration)
 	e.log.Debug("lease extended", "workflow_id", workflowID, "worker_id", le.workerID,
 		"step", le.stepName, "sequence", le.sequence, "deadline", le.deadline)
@@ -127,15 +153,16 @@ func (e *Engine) Heartbeat(workflowID, token string) error {
 func (e *Engine) onLeaseExpired(tm timer.Timer) {
 	w := e.lockWorkflow(tm.WorkflowID)
 	defer e.unlockWorkflow(w)
+	key := leaseKey{tm.WorkflowID, tm.Sequence}
 
 	e.mu.Lock()
-	cur, ok := e.leases[tm.WorkflowID]
+	cur, ok := e.leases[key]
 	var le lease
 	if ok {
 		le = *cur
 	}
 	e.mu.Unlock()
-	if !ok || le.stepName != tm.StepName || le.sequence != tm.Sequence {
+	if !ok || le.stepName != tm.StepName {
 		return // resolved or superseded; stale fire
 	}
 	if now := time.Now(); now.Before(le.deadline) {
@@ -158,30 +185,34 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 	}
 	e.mu.Lock()
 	// A heartbeat may have landed since the copy above; it rescues the lease.
-	if cur := e.leases[tm.WorkflowID]; cur == nil || cur.token != le.token || time.Now().Before(cur.deadline) {
+	if cur := e.leases[key]; cur == nil || cur.token != le.token || time.Now().Before(cur.deadline) {
 		e.mu.Unlock()
 		if cur != nil && cur.token == le.token {
 			e.leaseTimers.Add(timer.Timer{WorkflowID: le.workflowID, StepName: le.stepName, Sequence: le.sequence, FireAt: cur.deadline})
 		}
 		return
 	}
-	delete(e.leases, tm.WorkflowID)
+	delete(e.leaseTokens, le.token)
+	delete(e.leases, key)
 	e.mu.Unlock()
 
-	tail := *st.Tail()
-	workflowType := st.WorkflowType
 	// Belt and braces: only reclaim if history still shows this exact step in
 	// flight. Anything else means the workflow moved on without the lease map
 	// noticing (shouldn't happen; dropping the lease above is the safe recovery).
-	if st.Status != state.StatusWaiting ||
-		tail.Sequence != le.sequence || tail.Name != le.stepName || tail.Status != state.StepScheduled {
+	step := st.Step(le.sequence)
+	if st.Status.IsTerminal() || step == nil || step.Name != le.stepName ||
+		step.Kind != state.KindActivity || step.Status != state.StepScheduled {
 		return
 	}
+	attempt := *step
+	workflowType := st.WorkflowType
+	policy := e.retryPolicy(&attempt)
+	willRetry := attempt.Attempts < policy.MaxAttempts
 	failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 		StepFailed: &history.StepFailedEvent{
 			StepName: le.stepName, Sequence: le.sequence,
 			Error:      fmt.Sprintf("lease expired: worker %q missed its deadline", le.workerID),
-			RetryCount: int32(tail.Attempts),
+			RetryCount: int32(attempt.Attempts), WillRetry: willRetry,
 		},
 	}}
 	if err := e.appendLocked(w, failedEv, int64(len(events)+1)); err != nil {
@@ -191,17 +222,15 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		e.log.Error("lease expired: append failed; re-enqueueing task", "workflow_id", tm.WorkflowID, "err", err)
 		e.queue.enqueue(&Task{
 			WorkflowId: le.workflowID, StepName: le.stepName,
-			Sequence: le.sequence, Input: tail.Input,
+			Sequence: le.sequence, Input: attempt.Input,
 		})
 		return
 	}
 	e.metrics.leasesExpired.Inc()
 	e.log.Warn("lease expired; reclaiming task", "workflow_id", tm.WorkflowID,
-		"worker_id", le.workerID, "step", le.stepName, "sequence", le.sequence, "attempt", tail.Attempts)
-
-	policy := e.retryPolicy(&tail)
-	if tail.Kind == state.KindActivity && tail.Attempts < policy.MaxAttempts {
-		e.scheduleRetryLocked(tm.WorkflowID, &tail, policy.Delay(tail.Attempts))
+		"worker_id", le.workerID, "step", le.stepName, "sequence", le.sequence, "attempt", attempt.Attempts)
+	if willRetry {
+		e.scheduleRetryLocked(tm.WorkflowID, &attempt, policy.Delay(attempt.Attempts))
 		return
 	}
 	e.advanceOrRetry(w, workflowType)

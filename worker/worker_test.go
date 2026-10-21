@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -393,5 +394,46 @@ func TestVersionedDeploy(t *testing.T) {
 	d, _ := c.DescribeWorkflow(ctx, fresh)
 	if d.Steps[1].Kind != "MARKER" || d.Steps[1].Name != "fraud-check" || string(d.Steps[1].Output) != "1" {
 		t.Fatalf("new execution step 2 = %+v, want the version marker", d.Steps[1])
+	}
+}
+
+// TestParallelActivitiesThroughTheWorker: a Go workflow fans out over gRPC
+// (the commands field) and its activities run at the same time.
+func TestParallelActivitiesThroughTheWorker(t *testing.T) {
+	srv := startEmbedded(t, embedded.Options{})
+	c := srv.Client()
+	ctx := testCtx(t)
+	w := worker.New(c, worker.Options{ActivityConcurrency: 3})
+	w.RegisterWorkflow("Fan", func(ctx workflow.Context, in []byte) ([]byte, error) {
+		fs := []workflow.Future{
+			ctx.ExecuteActivityAsync("part", []byte("1")),
+			ctx.ExecuteActivityAsync("part", []byte("2")),
+			ctx.ExecuteActivityAsync("part", []byte("3")),
+		}
+		var out []byte
+		for _, f := range fs {
+			r, err := f.Get()
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, r...)
+		}
+		return out, nil
+	})
+	var running sync.WaitGroup
+	running.Add(3)
+	w.RegisterActivity("part", func(_ context.Context, in []byte) ([]byte, error) {
+		running.Done()
+		running.Wait() // all three in flight at once
+		return in, nil
+	})
+	run(t, w)
+	id, err := c.StartWorkflow(ctx, "Fan", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := c.WaitForResult(ctx, id)
+	if err != nil || string(out) != "123" {
+		t.Fatalf("got %q, %v; want 123", out, err)
 	}
 }

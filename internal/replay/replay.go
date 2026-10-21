@@ -39,30 +39,45 @@ type Planner struct {
 	Logger *slog.Logger // for ctx.Logger(); nil discards
 }
 
-// Decide replays the function against events and returns the next decision.
+// Decide replays the function against events and returns the first decision.
 func (p Planner) Decide(events []*history.HistoryEvent) (state.Decision, error) {
 	return Decide(p.Fn, events, p.Logger)
 }
 
-// Decide replays fn against a workflow's history and returns the single next
-// decision: schedule the first step history has no record of, wait (noop) while
-// a step is in flight, or complete/fail once the function returns.
+// DecideAll replays the function and returns every decision it made.
+func (p Planner) DecideAll(events []*history.HistoryEvent) ([]state.Decision, error) {
+	return DecideAll(p.Fn, events, p.Logger)
+}
+
+// Decide is DecideAll for callers that take one decision at a time: the first
+// command the code issued, or a noop.
 func Decide(fn workflow.Func, events []*history.HistoryEvent, logger *slog.Logger) (state.Decision, error) {
+	ds, err := DecideAll(fn, events, logger)
+	if err != nil || len(ds) == 0 {
+		return state.Decision{Type: state.DecideNoop}, err
+	}
+	return ds[0], nil
+}
+
+// DecideAll replays fn against a workflow's history and returns what happens
+// next: every new step the code started before it blocked on one without a
+// result (several, with the Async calls), then completion or failure if the
+// function returned. A single noop means it is waiting on steps in flight.
+func DecideAll(fn workflow.Func, events []*history.HistoryEvent, logger *slog.Logger) ([]state.Decision, error) {
 	st, err := state.Reconstruct(events)
 	if err != nil {
-		return state.Decision{}, fmt.Errorf("replay: %w", err)
+		return nil, fmt.Errorf("replay: %w", err)
 	}
-	// Terminal, or waiting on a step in flight: re-running the code would reach
-	// the same open step and decide nothing.
-	if st.Status != state.StatusRunning {
-		return state.Decision{Type: state.DecideNoop}, nil
+	// Terminal, or never started: there is nothing to run.
+	if st.Status.IsTerminal() || st.Status == state.StatusNotStarted {
+		return []state.Decision{{Type: state.DecideNoop}}, nil
 	}
 	return newContext(st, events, logger).run(fn)
 }
 
 // replayContext walks the workflow's steps in call order. next is the 1-based
-// sequence of the command being issued; it must line up with the steps history
-// recorded, which is exactly the determinism check.
+// sequence of the latest command issued; it must line up with the steps
+// history recorded, which is exactly the determinism check.
 type replayContext struct {
 	st         *state.State
 	info       workflow.Info
@@ -71,10 +86,13 @@ type replayContext struct {
 	next       int64
 	logger     *slog.Logger
 	versions   map[string]workflow.Version // changeID -> version, fixed by the first GetVersion call
-	retry      *state.RetryPolicy          // the current ExecuteActivity call's policy
+	pending    []state.Decision            // new steps issued during this replay
+
+	latestResolved int64 // the newest step result in history (event id)
+	observed       int64 // the newest step result the code has seen
 
 	suspended bool
-	decision  state.Decision
+	decisions []state.Decision
 	err       error
 }
 
@@ -102,6 +120,9 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 		}
 		c.resolvedAt[seq] = ev.GetTimestamp() // a retried step keeps its last result's time
 	}
+	for i := range st.Steps {
+		c.latestResolved = max(c.latestResolved, st.Steps[i].ResolvedEventID)
+	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -112,7 +133,7 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 
 // run executes fn on its own goroutine so a suspension can end it with
 // runtime.Goexit, which unlike a panic cannot be recovered by workflow code.
-func (c *replayContext) run(fn workflow.Func) (state.Decision, error) {
+func (c *replayContext) run(fn workflow.Func) ([]state.Decision, error) {
 	var (
 		out      []byte
 		fnErr    error
@@ -132,23 +153,36 @@ func (c *replayContext) run(fn workflow.Func) (state.Decision, error) {
 
 	switch {
 	case c.suspended:
-		return c.decision, c.err
+		return c.decisions, c.err
 	case panicked != nil:
-		return state.Decision{}, panicked
+		return nil, panicked
 	case fnErr != nil:
-		return state.Decision{Type: state.DecideFailWorkflow, Error: fnErr.Error()}, nil
+		return append(c.pending, state.Decision{Type: state.DecideFailWorkflow, Error: fnErr.Error()}), nil
 	default:
-		return state.Decision{Type: state.DecideCompleteWorkflow, Output: out}, nil
+		return append(c.pending, state.Decision{Type: state.DecideCompleteWorkflow, Output: out}), nil
 	}
 }
 
 // suspend stops the workflow goroutine. The first suspension wins: a durable
 // call made while the goroutine unwinds (from a deferred function) only exits.
-func (c *replayContext) suspend(d state.Decision, err error) {
+func (c *replayContext) suspend(ds []state.Decision, err error) {
 	if !c.suspended {
-		c.suspended, c.decision, c.err = true, d, err
+		c.suspended, c.decisions, c.err = true, ds, err
 	}
 	runtime.Goexit()
+}
+
+// block suspends because the code waits on a step with no result yet: what it
+// started so far is the decision, or a noop if it started nothing new.
+func (c *replayContext) block() {
+	if len(c.pending) == 0 {
+		c.suspend([]state.Decision{{Type: state.DecideNoop}}, nil)
+	}
+	c.suspend(c.pending, nil)
+}
+
+func (c *replayContext) nondeterministic(format string, args ...any) {
+	c.suspend(nil, fmt.Errorf("%w"+format, append([]any{ErrNondeterminism}, args...)...))
 }
 
 func (c *replayContext) live() {
@@ -169,8 +203,11 @@ func (c *replayContext) Now() time.Time {
 }
 
 func (c *replayContext) ExecuteActivity(name string, input []byte, opts ...workflow.ActivityOption) ([]byte, error) {
-	c.retry = retryPolicy(opts)
-	return c.command(state.KindActivity, name, "", input, 0)
+	return c.ExecuteActivityAsync(name, input, opts...).Get()
+}
+
+func (c *replayContext) ExecuteActivityAsync(name string, input []byte, opts ...workflow.ActivityOption) workflow.Future {
+	return c.issue(state.Decision{Type: state.DecideScheduleStep, StepName: name, Input: input, Retry: retryPolicy(opts)})
 }
 
 // retryPolicy is the engine form of the call's options, nil when unset.
@@ -190,12 +227,42 @@ func retryPolicy(opts []workflow.ActivityOption) *state.RetryPolicy {
 }
 
 func (c *replayContext) Sleep(name string, d time.Duration) {
-	_, _ = c.command(state.KindTimer, name, "", nil, d)
+	_, _ = c.NewTimer(name, d).Get()
+}
+
+func (c *replayContext) NewTimer(name string, d time.Duration) workflow.Future {
+	return c.issue(state.Decision{Type: state.DecideStartTimer, StepName: name, Delay: d})
 }
 
 func (c *replayContext) WaitForSignal(name, signal string) []byte {
-	out, _ := c.command(state.KindSignal, name, signal, nil, 0)
+	out, _ := c.WaitForSignalAsync(name, signal).Get()
 	return out
+}
+
+func (c *replayContext) WaitForSignalAsync(name, signal string) workflow.Future {
+	return c.issue(state.Decision{Type: state.DecideAwaitSignal, StepName: name, Signal: signal})
+}
+
+// WaitAny returns the index of the future whose step got its result first in
+// history. That order is fixed once recorded, so every replay picks the same
+// one, whatever has resolved since.
+func (c *replayContext) WaitAny(fs ...workflow.Future) int {
+	c.live()
+	best, bestID := -1, int64(0)
+	for i, f := range fs {
+		ff, ok := f.(*future)
+		if !ok || ff.c != c {
+			panic("workflow: WaitAny takes futures from this workflow's Context")
+		}
+		if rec := c.st.Step(ff.seq); rec != nil && !rec.Open() && (best < 0 || rec.ResolvedEventID < bestID) {
+			best, bestID = i, rec.ResolvedEventID
+		}
+	}
+	if best < 0 {
+		c.block()
+	}
+	c.observe(fs[best].(*future).seq)
+	return best
 }
 
 func (c *replayContext) GetVersion(changeID string, minSupported, maxSupported workflow.Version) workflow.Version {
@@ -206,8 +273,8 @@ func (c *replayContext) GetVersion(changeID string, minSupported, maxSupported w
 		c.versions[changeID] = v
 	}
 	if v < minSupported || v > maxSupported {
-		c.suspend(state.Decision{}, fmt.Errorf("%w: execution recorded version %d of %q, but the code supports %d..%d",
-			ErrNondeterminism, v, changeID, minSupported, maxSupported))
+		c.nondeterministic(": execution recorded version %d of %q, but the code supports %d..%d",
+			v, changeID, minSupported, maxSupported)
 	}
 	return v
 }
@@ -219,85 +286,110 @@ func (c *replayContext) version(changeID string, max workflow.Version) workflow.
 	seq := c.next + 1
 	if int(seq) > len(c.st.Steps) {
 		c.next = seq
-		c.suspend(state.Decision{
+		c.pending = append(c.pending, state.Decision{
 			Type: state.DecideRecordMarker, StepName: changeID, Sequence: seq,
 			Marker: state.MarkerVersion, Output: []byte(strconv.Itoa(int(max))),
-		}, nil)
+		})
+		return max
 	}
 	rec := c.st.Steps[seq-1]
 	if rec.Kind != state.KindMarker || rec.Marker != state.MarkerVersion || rec.Name != changeID {
 		return workflow.DefaultVersion // this execution ran past here before the change
 	}
 	c.next = seq
-	c.now = c.resolvedAt[seq]
+	c.observe(seq)
 	v, err := strconv.Atoi(string(rec.Output))
 	if err != nil {
-		c.suspend(state.Decision{}, fmt.Errorf("replay: version marker %q at step %d holds %q: %w", changeID, seq, rec.Output, err))
+		c.suspend(nil, fmt.Errorf("replay: version marker %q at step %d holds %q: %w", changeID, seq, rec.Output, err))
 	}
 	return workflow.Version(v)
 }
 
 func (c *replayContext) SideEffect(name string, fn func() []byte) []byte {
 	c.live()
-	seq := c.next + 1
-	if int(seq) > len(c.st.Steps) {
+	if seq := c.next + 1; int(seq) > len(c.st.Steps) {
 		c.next = seq
 		data := fn()
-		c.suspend(state.Decision{
+		c.pending = append(c.pending, state.Decision{
 			Type: state.DecideRecordMarker, StepName: name, Sequence: seq,
 			Marker: state.MarkerSideEffect, Output: data,
-		}, nil)
+		})
+		return data
 	}
-	out, _ := c.command(state.KindMarker, name, "", nil, 0)
+	out, _ := c.issue(state.Decision{Type: state.DecideRecordMarker, StepName: name, Marker: state.MarkerSideEffect}).Get()
 	return out
 }
 
-// command is the heart of replay. For the next step in call order it returns
-// the recorded result, waits (noop) if the step is still in flight, or suspends
-// with the decision that creates the step if history has none yet.
-func (c *replayContext) command(kind state.StepKind, name, signal string, input []byte, delay time.Duration) ([]byte, error) {
+// issue is the heart of replay. It gives the next durable call its sequence
+// and checks it against the step history recorded there (the determinism
+// check); a call history has no step for yet becomes a new decision. Either
+// way the caller gets a future for the step's result.
+func (c *replayContext) issue(d state.Decision) *future {
 	c.live()
 	c.next++
 	seq := c.next
-
+	kind := kindOf(d.Type)
 	if int(seq) <= len(c.st.Steps) {
 		rec := c.st.Steps[seq-1]
-		if rec.Kind != kind || rec.Name != name || (kind == state.KindMarker && rec.Marker != state.MarkerSideEffect) {
-			c.suspend(state.Decision{}, fmt.Errorf("%w at step %d: workflow issued %s %q but history has %s %q",
-				ErrNondeterminism, seq, kind, name, rec.Kind, rec.Name))
+		if rec.Kind != kind || rec.Name != d.StepName || (kind == state.KindMarker && rec.Marker != state.MarkerSideEffect) {
+			c.nondeterministic(" at step %d: workflow issued %s %q but history has %s %q",
+				seq, kind, d.StepName, rec.Kind, rec.Name)
 		}
-		switch rec.Status {
-		case state.StepCompleted:
-			c.now = c.resolvedAt[seq]
-			return rec.Output, nil
-		case state.StepFailed:
-			c.now = c.resolvedAt[seq]
-			return nil, errors.New(rec.Error)
-		default:
-			c.suspend(state.Decision{Type: state.DecideNoop}, nil) // in flight: wait
-		}
+		return &future{c: c, seq: seq}
 	}
+	d.Sequence = seq
+	c.pending = append(c.pending, d)
+	return &future{c: c, seq: seq}
+}
 
-	d := state.Decision{StepName: name, Sequence: seq, Input: input}
-	switch kind {
-	case state.KindActivity:
-		d.Type = state.DecideScheduleStep
-		d.Retry = c.retry
-	case state.KindTimer:
-		d.Type = state.DecideStartTimer
-		d.Delay = delay
-	case state.KindSignal:
-		d.Type = state.DecideAwaitSignal
-		d.Signal = signal
+func kindOf(t state.DecisionType) state.StepKind {
+	switch t {
+	case state.DecideStartTimer:
+		return state.KindTimer
+	case state.DecideAwaitSignal:
+		return state.KindSignal
+	case state.DecideRecordMarker:
+		return state.KindMarker
+	default:
+		return state.KindActivity
 	}
-	c.suspend(d, nil)
-	return nil, nil // unreachable: suspend exits the goroutine
+}
+
+// observe moves the workflow clock to a step's result as the code sees it.
+func (c *replayContext) observe(seq int64) {
+	c.now = max(c.now, c.resolvedAt[seq])
+	if rec := c.st.Step(seq); rec != nil {
+		c.observed = max(c.observed, rec.ResolvedEventID)
+	}
+}
+
+// future is a durable call's eventual result.
+type future struct {
+	c   *replayContext
+	seq int64
+}
+
+// Get returns the step's recorded result, or suspends the workflow until it
+// has one. A step the engine is still retrying has no result yet.
+func (f *future) Get() ([]byte, error) {
+	c := f.c
+	c.live()
+	rec := c.st.Step(f.seq)
+	if rec == nil || rec.Open() {
+		c.block()
+	}
+	c.observe(f.seq)
+	if rec.Status == state.StepFailed {
+		return nil, errors.New(rec.Error)
+	}
+	return rec.Output, nil
 }
 
 // replaying reports whether the code is still re-running steps history already
-// resolved, i.e. whether anything it logs now was logged before.
+// resolved, i.e. whether anything it logs now was logged before: it has not
+// yet reached the last recorded step, or not yet seen the newest result.
 func (c *replayContext) replaying() bool {
-	return c.next < int64(len(c.st.Steps))
+	return c.next < int64(len(c.st.Steps)) || c.observed < c.latestResolved
 }
 
 // replayHandler drops log records emitted while replaying.

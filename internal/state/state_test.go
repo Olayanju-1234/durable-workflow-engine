@@ -297,12 +297,13 @@ func TestReconstructRejectsBadHistory(t *testing.T) {
 	}{
 		{"started not first", withIDs(scheduled("a", 1, "x"), started("T", "in")), "before WorkflowStarted"},
 		{"completion with nothing in flight", withIDs(started("T", "in"), completed("a", 1, "out")), "no step in flight"},
-		{"double schedule without result", withIDs(started("T", "in"), scheduled("a", 1, "x"), scheduled("b", 2, "y")), "still in flight"},
+		{"result for a step never scheduled", withIDs(started("T", "in"), scheduled("a", 1, "x"), completed("b", 2, "o")), "no step in flight at sequence 2"},
+		{"retry of a completed step", withIDs(started("T", "in"), scheduled("a", 1, "x"), completed("a", 1, "o"), scheduled("a", 1, "x")), "not a failed activity"},
 		{"sequence gap", withIDs(started("T", "in"), scheduled("a", 1, "x"), completed("a", 1, "o"), scheduled("b", 3, "y")), "want 2"},
-		{"result sequence mismatch", withIDs(started("T", "in"), scheduled("a", 1, "x"), completed("a", 2, "o")), "in-flight step has 1"},
+		{"result sequence mismatch", withIDs(started("T", "in"), scheduled("a", 1, "x"), completed("a", 2, "o")), "no step in flight at sequence 2"},
 		{"result name mismatch", withIDs(started("T", "in"), scheduled("a", 1, "x"), completed("b", 1, "o")), "in-flight step is \"a\""},
 		{"event after terminal", withIDs(started("T", "in"), wfFailed("boom"), scheduled("a", 1, "x")), "follows a terminal event"},
-		{"complete with step in flight", withIDs(started("T", "in"), scheduled("a", 1, "x"), wfCompleted("out")), "still in flight"},
+		{"double result", withIDs(started("T", "in"), scheduled("a", 1, "x"), completed("a", 1, "o"), completed("a", 1, "o")), "no step in flight"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -314,5 +315,79 @@ func TestReconstructRejectsBadHistory(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err.Error(), tt.wantSub)
 			}
 		})
+	}
+}
+
+// --- parallel steps --------------------------------------------------------
+
+func failedRetrying(name string, seq int64, errMsg string) *history.HistoryEvent {
+	ev := failed(name, seq, errMsg)
+	ev.GetStepFailed().WillRetry = true
+	return ev
+}
+
+func TestParallelSteps(t *testing.T) {
+	evs := withIDs(started("T", "in"),
+		scheduled("a", 1, "x"), timerStarted("t", 2, 99, ""), scheduled("b", 3, "y"), // all at once
+		completed("b", 3, "B"),
+		failedRetrying("a", 1, "flaky"),
+		timerFired("t", 2),
+	)
+	st, err := Reconstruct(evs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != StatusWaiting || !st.Steps[0].Retrying || st.Steps[0].Open() != true {
+		t.Fatalf("a retrying: status %s, step %+v; want WAITING with a open", st.Status, st.Steps[0])
+	}
+	if !st.LastEventResolves || !st.OwesDecision() {
+		t.Fatal("a timer just fired: the workflow owes a decision")
+	}
+	if st.Steps[2].ResolvedEventID != 5 || st.Steps[1].ResolvedEventID != 7 || st.Steps[0].ResolvedEventID != 0 {
+		t.Fatalf("resolution ids %d %d %d, want 0 7 5", st.Steps[0].ResolvedEventID, st.Steps[1].ResolvedEventID, st.Steps[2].ResolvedEventID)
+	}
+
+	evs = append(evs, scheduled("a", 1, "x"))
+	evs[len(evs)-1].EventId = int64(len(evs))
+	st, _ = Reconstruct(evs)
+	if a := st.Steps[0]; a.Status != StepScheduled || a.Attempts != 2 || a.Retrying {
+		t.Fatalf("after the retry is scheduled: %+v", a)
+	}
+	if st.OwesDecision() {
+		t.Fatal("scheduling a retry gives the workflow nothing new to decide")
+	}
+	evs = append(evs, completed("a", 1, "A"), wfCompleted("done"))
+	st, err = Reconstruct(withIDs(evs...))
+	if err != nil || st.Status != StatusCompleted {
+		t.Fatalf("got %v, %v", st, err)
+	}
+}
+
+func TestCompleteWithStepsInFlight(t *testing.T) {
+	// A workflow may finish without waiting for everything it started.
+	st, err := Reconstruct(withIDs(started("T", "in"), timerStarted("t", 1, 99, ""), wfCompleted("out")))
+	if err != nil || st.Status != StatusCompleted {
+		t.Fatalf("got %v, %v; want COMPLETED", st, err)
+	}
+}
+
+func TestParallelSignalWaitsServedInOrder(t *testing.T) {
+	waitFor := func(name string, seq int64, sig string) *history.HistoryEvent {
+		ev := scheduled(name, seq, "")
+		ev.GetStepScheduled().AwaitsSignal, ev.GetStepScheduled().SignalName = true, sig
+		return ev
+	}
+	st, err := Reconstruct(withIDs(started("T", "in"), waitFor("w1", 1, "go"), waitFor("w2", 2, "go"), signalReceived("go", "first")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, payload, ok := st.NextSignalDelivery()
+	if !ok || w.Sequence != 1 || string(payload) != "first" {
+		t.Fatalf("delivery = %v %q %v; want the first wait to get the first signal", w, payload, ok)
+	}
+	st, _ = Reconstruct(withIDs(started("T", "in"), waitFor("w1", 1, "go"), waitFor("w2", 2, "go"), signalReceived("go", "first"),
+		completed("w1", 1, "first"), signalReceived("go", "second")))
+	if w, payload, ok := st.NextSignalDelivery(); !ok || w.Sequence != 2 || string(payload) != "second" {
+		t.Fatalf("second delivery = %v %q %v", w, payload, ok)
 	}
 }

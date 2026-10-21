@@ -148,12 +148,17 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		Signals:       make([]*signalDTO, 0, len(st.Signals)),
 	}
 	for _, s := range st.Steps {
+		status := s.Status.String()
+		if s.Retrying {
+			status = state.StepScheduled.String() // not a result yet: replay must wait on it
+		}
 		dto.Steps = append(dto.Steps, &stepDTO{
 			StepName: s.Name, Sequence: s.Sequence,
-			Kind: s.Kind.String(), Status: s.Status.String(),
+			Kind: s.Kind.String(), Status: status,
 			Attempts: int32(s.Attempts), Error: s.Error,
 			Output: string(s.Output), OutputBase64: base64Twin(s.Output),
 			FireAt: formatNanos(s.FireAt), SignalName: s.Signal, Marker: s.Marker,
+			ResolvedEventID: s.ResolvedEventID,
 		})
 	}
 	for _, sig := range st.Signals {
@@ -192,27 +197,42 @@ type retryPolicyDTO struct {
 
 func (a *HTTPAPI) completeWorkflowTask(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		WorkflowID  string      `json:"workflow_id"`
-		TaskToken   string      `json:"task_token"`
-		Command     *commandDTO `json:"command"`
-		ReplayError string      `json:"replay_error"`
+		WorkflowID string      `json:"workflow_id"`
+		TaskToken  string      `json:"task_token"`
+		Command    *commandDTO `json:"command"`
+		// Several commands at once (parallel steps); use this or command.
+		Commands    []*commandDTO `json:"commands"`
+		ReplayError string        `json:"replay_error"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-
-	cmd, err := commandFromDTO(body.Command)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
+	dtos := body.Commands
+	if body.Command != nil {
+		if len(dtos) > 0 {
+			writeError(w, http.StatusBadRequest, errors.New("set command or commands, not both"))
+			return
+		}
+		dtos = []*commandDTO{body.Command}
+	}
+	var cmds []*WorkflowCommand
+	for _, dto := range dtos {
+		cmd, err := commandFromDTO(dto)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	e := a.engine(w)
 	if e == nil {
 		return
 	}
-	err = e.CompleteWorkflowTask(body.WorkflowID, body.TaskToken, cmd, body.ReplayError)
+	err := e.CompleteWorkflowTask(body.WorkflowID, body.TaskToken, cmds, body.ReplayError)
 	switch {
 	case errors.Is(err, ErrNotLeader):
 		a.writeNotLeader(w, err)

@@ -1281,7 +1281,11 @@ type CompleteWorkflowTaskRequest struct {
 	// Set when the SDK could not replay the history — e.g. the workflow code no
 	// longer matches the recorded run (non-determinism). The engine records this
 	// as a workflow failure rather than looping on a task it can never complete.
-	ReplayError   string `protobuf:"bytes,4,opt,name=replay_error,json=replayError,proto3" json:"replay_error,omitempty"`
+	ReplayError string `protobuf:"bytes,4,opt,name=replay_error,json=replayError,proto3" json:"replay_error,omitempty"`
+	// Several commands at once, applied in order (parallel steps). Use either
+	// this or command; SDKs send a single command in command so engines that
+	// predate this field still understand them.
+	Commands      []*WorkflowCommand `protobuf:"bytes,5,rep,name=commands,proto3" json:"commands,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1342,6 +1346,13 @@ func (x *CompleteWorkflowTaskRequest) GetReplayError() string {
 		return x.ReplayError
 	}
 	return ""
+}
+
+func (x *CompleteWorkflowTaskRequest) GetCommands() []*WorkflowCommand {
+	if x != nil {
+		return x.Commands
+	}
+	return nil
 }
 
 type CompleteWorkflowTaskResponse struct {
@@ -2617,14 +2628,15 @@ const file_service_proto_rawDesc = "" +
 	"\x11complete_workflow\x18\x04 \x01(\v2$.workflow.v1.CompleteWorkflowCommandH\x00R\x10completeWorkflow\x12G\n" +
 	"\rfail_workflow\x18\x05 \x01(\v2 .workflow.v1.FailWorkflowCommandH\x00R\ffailWorkflow\x12G\n" +
 	"\rrecord_marker\x18\x06 \x01(\v2 .workflow.v1.RecordMarkerCommandH\x00R\frecordMarkerB\t\n" +
-	"\acommand\"\xb8\x01\n" +
+	"\acommand\"\xf2\x01\n" +
 	"\x1bCompleteWorkflowTaskRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1d\n" +
 	"\n" +
 	"task_token\x18\x02 \x01(\tR\ttaskToken\x126\n" +
 	"\acommand\x18\x03 \x01(\v2\x1c.workflow.v1.WorkflowCommandR\acommand\x12!\n" +
-	"\freplay_error\x18\x04 \x01(\tR\vreplayError\"\x1e\n" +
+	"\freplay_error\x18\x04 \x01(\tR\vreplayError\x128\n" +
+	"\bcommands\x18\x05 \x03(\v2\x1c.workflow.v1.WorkflowCommandR\bcommands\"\x1e\n" +
 	"\x1cCompleteWorkflowTaskResponse\"r\n" +
 	"\x14StartWorkflowRequest\x12#\n" +
 	"\rworkflow_type\x18\x01 \x01(\tR\fworkflowType\x12\x14\n" +
@@ -2814,45 +2826,46 @@ var file_service_proto_depIdxs = []int32{
 	19, // 10: workflow.v1.WorkflowCommand.fail_workflow:type_name -> workflow.v1.FailWorkflowCommand
 	17, // 11: workflow.v1.WorkflowCommand.record_marker:type_name -> workflow.v1.RecordMarkerCommand
 	20, // 12: workflow.v1.CompleteWorkflowTaskRequest.command:type_name -> workflow.v1.WorkflowCommand
-	26, // 13: workflow.v1.PollTaskResponse.task:type_name -> workflow.v1.Task
-	0,  // 14: workflow.v1.ListWorkflowsRequest.status_filter:type_name -> workflow.v1.WorkflowStatus
-	0,  // 15: workflow.v1.WorkflowSummary.status:type_name -> workflow.v1.WorkflowStatus
-	35, // 16: workflow.v1.ListWorkflowsResponse.workflows:type_name -> workflow.v1.WorkflowSummary
-	35, // 17: workflow.v1.GetWorkflowResponse.summary:type_name -> workflow.v1.WorkflowSummary
-	38, // 18: workflow.v1.GetWorkflowResponse.steps:type_name -> workflow.v1.StepInfo
-	23, // 19: workflow.v1.WorkflowService.StartWorkflow:input_type -> workflow.v1.StartWorkflowRequest
-	25, // 20: workflow.v1.WorkflowService.PollTask:input_type -> workflow.v1.PollTaskRequest
-	28, // 21: workflow.v1.WorkflowService.CompleteTask:input_type -> workflow.v1.CompleteTaskRequest
-	32, // 22: workflow.v1.WorkflowService.SignalWorkflow:input_type -> workflow.v1.SignalWorkflowRequest
-	30, // 23: workflow.v1.WorkflowService.Heartbeat:input_type -> workflow.v1.HeartbeatRequest
-	34, // 24: workflow.v1.WorkflowService.ListWorkflows:input_type -> workflow.v1.ListWorkflowsRequest
-	37, // 25: workflow.v1.WorkflowService.GetWorkflow:input_type -> workflow.v1.GetWorkflowRequest
-	40, // 26: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
-	9,  // 27: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
-	11, // 28: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
-	21, // 29: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
-	3,  // 30: workflow.v1.WorkflowService.CreateSchedule:input_type -> workflow.v1.CreateScheduleRequest
-	5,  // 31: workflow.v1.WorkflowService.DeleteSchedule:input_type -> workflow.v1.DeleteScheduleRequest
-	7,  // 32: workflow.v1.WorkflowService.ListSchedules:input_type -> workflow.v1.ListSchedulesRequest
-	24, // 33: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
-	27, // 34: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
-	29, // 35: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
-	33, // 36: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
-	31, // 37: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
-	36, // 38: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
-	39, // 39: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
-	41, // 40: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
-	10, // 41: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
-	13, // 42: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
-	22, // 43: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
-	4,  // 44: workflow.v1.WorkflowService.CreateSchedule:output_type -> workflow.v1.CreateScheduleResponse
-	6,  // 45: workflow.v1.WorkflowService.DeleteSchedule:output_type -> workflow.v1.DeleteScheduleResponse
-	8,  // 46: workflow.v1.WorkflowService.ListSchedules:output_type -> workflow.v1.ListSchedulesResponse
-	33, // [33:47] is the sub-list for method output_type
-	19, // [19:33] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	20, // 13: workflow.v1.CompleteWorkflowTaskRequest.commands:type_name -> workflow.v1.WorkflowCommand
+	26, // 14: workflow.v1.PollTaskResponse.task:type_name -> workflow.v1.Task
+	0,  // 15: workflow.v1.ListWorkflowsRequest.status_filter:type_name -> workflow.v1.WorkflowStatus
+	0,  // 16: workflow.v1.WorkflowSummary.status:type_name -> workflow.v1.WorkflowStatus
+	35, // 17: workflow.v1.ListWorkflowsResponse.workflows:type_name -> workflow.v1.WorkflowSummary
+	35, // 18: workflow.v1.GetWorkflowResponse.summary:type_name -> workflow.v1.WorkflowSummary
+	38, // 19: workflow.v1.GetWorkflowResponse.steps:type_name -> workflow.v1.StepInfo
+	23, // 20: workflow.v1.WorkflowService.StartWorkflow:input_type -> workflow.v1.StartWorkflowRequest
+	25, // 21: workflow.v1.WorkflowService.PollTask:input_type -> workflow.v1.PollTaskRequest
+	28, // 22: workflow.v1.WorkflowService.CompleteTask:input_type -> workflow.v1.CompleteTaskRequest
+	32, // 23: workflow.v1.WorkflowService.SignalWorkflow:input_type -> workflow.v1.SignalWorkflowRequest
+	30, // 24: workflow.v1.WorkflowService.Heartbeat:input_type -> workflow.v1.HeartbeatRequest
+	34, // 25: workflow.v1.WorkflowService.ListWorkflows:input_type -> workflow.v1.ListWorkflowsRequest
+	37, // 26: workflow.v1.WorkflowService.GetWorkflow:input_type -> workflow.v1.GetWorkflowRequest
+	40, // 27: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
+	9,  // 28: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
+	11, // 29: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
+	21, // 30: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
+	3,  // 31: workflow.v1.WorkflowService.CreateSchedule:input_type -> workflow.v1.CreateScheduleRequest
+	5,  // 32: workflow.v1.WorkflowService.DeleteSchedule:input_type -> workflow.v1.DeleteScheduleRequest
+	7,  // 33: workflow.v1.WorkflowService.ListSchedules:input_type -> workflow.v1.ListSchedulesRequest
+	24, // 34: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
+	27, // 35: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
+	29, // 36: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
+	33, // 37: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
+	31, // 38: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
+	36, // 39: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
+	39, // 40: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
+	41, // 41: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
+	10, // 42: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
+	13, // 43: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
+	22, // 44: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
+	4,  // 45: workflow.v1.WorkflowService.CreateSchedule:output_type -> workflow.v1.CreateScheduleResponse
+	6,  // 46: workflow.v1.WorkflowService.DeleteSchedule:output_type -> workflow.v1.DeleteScheduleResponse
+	8,  // 47: workflow.v1.WorkflowService.ListSchedules:output_type -> workflow.v1.ListSchedulesResponse
+	34, // [34:48] is the sub-list for method output_type
+	20, // [20:34] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_service_proto_init() }
