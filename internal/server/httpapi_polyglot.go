@@ -82,7 +82,15 @@ func (a *HTTPAPI) registerWorkflowTypes(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := a.engine.RegisterWorkflowTypes(body.WorkflowTypes, body.WorkerID, body.SDK); err != nil {
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	if err := e.RegisterWorkflowTypes(body.WorkflowTypes, body.WorkerID, body.SDK); err != nil {
+		if errors.Is(err, ErrNotLeader) {
+			a.writeNotLeader(w, err)
+			return
+		}
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -93,10 +101,18 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 	types := splitCSV(r.URL.Query().Get("types"))
 	workerID := r.URL.Query().Get("worker_id")
 
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
 	ctx, cancel := contextWithPollTimeout(r)
 	defer cancel()
 
-	task, err := a.engine.PollWorkflowTask(ctx, workerID, types)
+	task, err := e.PollWorkflowTask(ctx, workerID, types)
+	if errors.Is(err, ErrNotLeader) {
+		a.writeNotLeader(w, err)
+		return
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusNoContent) // long-poll expired; client re-polls
 		return
@@ -166,8 +182,14 @@ func (a *HTTPAPI) completeWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = a.engine.CompleteWorkflowTask(body.WorkflowID, body.TaskToken, cmd, body.ReplayError)
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	err = e.CompleteWorkflowTask(body.WorkflowID, body.TaskToken, cmd, body.ReplayError)
 	switch {
+	case errors.Is(err, ErrNotLeader):
+		a.writeNotLeader(w, err)
 	case errors.Is(err, ErrStaleDecision):
 		// 409: the SDK should discard this decision and poll again. Routine
 		// under re-dispatch, so it is not an error the SDK should log loudly.
@@ -219,11 +241,19 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 }
 
 func (a *HTTPAPI) pollActivityTask(w http.ResponseWriter, r *http.Request) {
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
 	ctx, cancel := contextWithPollTimeout(r)
 	defer cancel()
 
-	task, err := a.engine.PollTask(ctx, r.URL.Query().Get("worker_id"),
+	task, err := e.PollTask(ctx, r.URL.Query().Get("worker_id"),
 		splitCSV(r.URL.Query().Get("activities"))...)
+	if errors.Is(err, ErrNotLeader) {
+		a.writeNotLeader(w, err)
+		return
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -264,8 +294,16 @@ func (a *HTTPAPI) completeActivityTask(w http.ResponseWriter, r *http.Request) {
 		output = decoded
 	}
 
-	if err := a.engine.CompleteTask(body.WorkflowID, body.StepName, body.Sequence,
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	if err := e.CompleteTask(body.WorkflowID, body.StepName, body.Sequence,
 		body.LeaseToken, output, body.Error, body.Error != ""); err != nil {
+		if errors.Is(err, ErrNotLeader) {
+			a.writeNotLeader(w, err)
+			return
+		}
 		// Lost lease, or a result that doesn't match the in-flight step.
 		writeError(w, http.StatusConflict, err)
 		return

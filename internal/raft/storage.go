@@ -2,12 +2,12 @@ package raft
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -23,6 +23,15 @@ const (
 	// state machine's data as a second record.
 	snapshotFile = "snapshot"
 )
+
+// unsafeNoFsync turns off the log's fsync; see UnsafeDisableFsyncForTests.
+var unsafeNoFsync atomic.Bool
+
+// UnsafeDisableFsyncForTests stops fsyncing the Raft log, so log writes no
+// longer survive a machine crash. Only tests that kill processes (whose page
+// cache still reaches the disk) may call it, to run in reasonable time on
+// laptops where fsync costs tens of milliseconds. Production never does.
+func UnsafeDisableFsyncForTests() { unsafeNoFsync.Store(true) }
 
 // DiskStorage keeps a node's Raft state durable in one directory, using the
 // same CRC-framed, fsync'd records as the workflow histories. It is used by a
@@ -114,7 +123,7 @@ func (s *DiskStorage) openLog() ([]*LogEntry, error) {
 		return nil, fmt.Errorf("raft: open log: %w", err)
 	}
 	if errors.Is(statErr, os.ErrNotExist) {
-		if err := syncDir(s.dir); err != nil {
+		if err := record.SyncDir(s.dir); err != nil {
 			f.Close()
 			return nil, err
 		}
@@ -211,8 +220,10 @@ func (s *DiskStorage) appendEntries(ents []*LogEntry) error {
 	if _, err := s.log.Write(buf); err != nil {
 		return fmt.Errorf("raft: write log: %w", err)
 	}
-	if err := s.log.Sync(); err != nil {
-		return fmt.Errorf("raft: fsync log: %w", err)
+	if !unsafeNoFsync.Load() {
+		if err := s.log.Sync(); err != nil {
+			return fmt.Errorf("raft: fsync log: %w", err)
+		}
 	}
 	s.offsets = append(s.offsets, offsets...)
 	s.end += int64(len(buf))
@@ -247,8 +258,8 @@ func (s *DiskStorage) compactLog(index uint64) error {
 	if _, err := s.log.ReadAt(kept, keepFrom); err != nil {
 		return fmt.Errorf("raft: read log for compaction: %w", err)
 	}
-	if err := writeFileAtomic(s.dir, logFile, kept); err != nil {
-		return err
+	if err := record.ReplaceFile(s.dir, logFile, kept); err != nil {
+		return fmt.Errorf("raft: rewrite compacted log: %w", err)
 	}
 	f, err := os.OpenFile(filepath.Join(s.dir, logFile), os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
@@ -264,19 +275,12 @@ func (s *DiskStorage) compactLog(index uint64) error {
 }
 
 func (s *DiskStorage) loadSnapshot() (*Snapshot, error) {
-	data, err := os.ReadFile(filepath.Join(s.dir, snapshotFile))
+	payloads, err := record.ReadFile(filepath.Join(s.dir, snapshotFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("raft: read snapshot: %w", err)
-	}
-	var payloads [][]byte
-	if _, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), func(p []byte) error {
-		payloads = append(payloads, p)
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("raft: snapshot: %w", err)
 	}
 	if len(payloads) != 2 {
 		return nil, fmt.Errorf("raft: snapshot file holds %d records, want 2", len(payloads))
@@ -295,34 +299,20 @@ func (s *DiskStorage) saveSnapshot(snap *Snapshot) error {
 	if err != nil {
 		return fmt.Errorf("raft: encode snapshot meta: %w", err)
 	}
-	head, err := record.Encode(meta)
-	if err != nil {
-		return fmt.Errorf("raft: snapshot meta: %w", err)
+	if err := record.WriteFile(s.dir, snapshotFile, meta, snap.Data); err != nil {
+		return fmt.Errorf("raft: save snapshot: %w", err)
 	}
-	body, err := record.Encode(snap.Data)
-	if err != nil {
-		return fmt.Errorf("raft: snapshot data: %w", err)
-	}
-	return writeFileAtomic(s.dir, snapshotFile, append(head, body...))
+	return nil
 }
 
 func (s *DiskStorage) loadHardState() (*HardState, error) {
-	data, err := os.ReadFile(filepath.Join(s.dir, hardStateFile))
+	payloads, err := record.ReadFile(filepath.Join(s.dir, hardStateFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return &HardState{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("raft: read hard state: %w", err)
-	}
-	var payloads [][]byte
-	if _, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), func(p []byte) error {
-		payloads = append(payloads, p)
-		return nil
-	}); err != nil {
 		return nil, fmt.Errorf("raft: hard state: %w", err)
 	}
-	// The file is only ever replaced whole, by rename, so anything other than
-	// exactly one record is damage, never a crash mid-write.
 	if len(payloads) != 1 {
 		return nil, fmt.Errorf("raft: hard state file holds %d records, want 1", len(payloads))
 	}
@@ -340,47 +330,8 @@ func (s *DiskStorage) saveHardState(hs *HardState) error {
 	if err != nil {
 		return fmt.Errorf("raft: encode hard state: %w", err)
 	}
-	rec, err := record.Encode(payload)
-	if err != nil {
-		return fmt.Errorf("raft: hard state: %w", err)
-	}
-	return writeFileAtomic(s.dir, hardStateFile, rec)
-}
-
-// writeFileAtomic replaces dir/name with data so that a crash leaves either the
-// old file or the new one, never a mix: write a temp file, fsync it, rename it
-// over the target, then fsync the directory so the rename itself is durable.
-func writeFileAtomic(dir, name string, data []byte) error {
-	tmp := filepath.Join(dir, name+".tmp")
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("raft: create %s: %w", tmp, err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return fmt.Errorf("raft: write %s: %w", tmp, err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return fmt.Errorf("raft: fsync %s: %w", tmp, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("raft: close %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		return fmt.Errorf("raft: rename %s: %w", tmp, err)
-	}
-	return syncDir(dir)
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("raft: open dir: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("raft: fsync dir: %w", err)
+	if err := record.WriteFile(s.dir, hardStateFile, payload); err != nil {
+		return fmt.Errorf("raft: save hard state: %w", err)
 	}
 	return nil
 }

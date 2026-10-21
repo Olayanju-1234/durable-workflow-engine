@@ -43,23 +43,27 @@ type GRPCTransport struct {
 
 // NewGRPCTransport builds a transport from this node to each peer, keyed by
 // node id. Connections are made lazily and re-established automatically.
-func NewGRPCTransport(self string, peerAddrs map[string]string, logger *slog.Logger) (*GRPCTransport, error) {
+// extra dial options are added to every peer connection (an interceptor that
+// attaches metadata, for example).
+func NewGRPCTransport(self string, peerAddrs map[string]string, logger *slog.Logger, extra ...grpc.DialOption) (*GRPCTransport, error) {
 	t := &GRPCTransport{logger: logger.With("node_id", self), peers: make(map[string]*peerSender)}
 	for id, addr := range peerAddrs {
 		if id == self {
 			continue
 		}
-		conn, err := grpc.NewClient(addr,
+		opts := append([]grpc.DialOption{
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(maxMessageSize)),
 			// gRPC's default reconnect backoff grows to two minutes. A peer that
-			// restarts or comes back from a partition must be heard from within an
-			// election timeout, so cap the backoff at a second.
+			// restarts or comes back from a partition must hear from the leader
+			// within an election timeout (1 s at the defaults), or it starts a
+			// needless election; so the backoff is capped well below that.
 			grpc.WithConnectParams(grpc.ConnectParams{
-				Backoff:           backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: time.Second},
+				Backoff:           backoff.Config{BaseDelay: 50 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: 500 * time.Millisecond},
 				MinConnectTimeout: time.Second,
 			}),
-		)
+		}, extra...)
+		conn, err := grpc.NewClient(addr, opts...)
 		if err != nil {
 			t.Close()
 			return nil, fmt.Errorf("raft: dial peer %s at %s: %w", id, addr, err)

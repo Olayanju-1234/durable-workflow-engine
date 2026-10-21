@@ -29,6 +29,10 @@ type HistoryEvent struct {
 	EventId int64 `protobuf:"varint,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
 	// Wall-clock time the event was recorded, unix nanoseconds.
 	Timestamp int64 `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// In cluster mode, the Raft log index that committed this event; it lets a
+	// node re-apply its log after a restart without writing an event twice.
+	// Zero in single-node mode. Older binaries ignore it.
+	RaftIndex uint64 `protobuf:"varint,3,opt,name=raft_index,json=raftIndex,proto3" json:"raft_index,omitempty"`
 	// Exactly one attributes message is set per event; the field that is present
 	// determines the event type. New event types get new oneof fields, which is
 	// how the schema evolves without breaking old logs.
@@ -89,6 +93,13 @@ func (x *HistoryEvent) GetEventId() int64 {
 func (x *HistoryEvent) GetTimestamp() int64 {
 	if x != nil {
 		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *HistoryEvent) GetRaftIndex() uint64 {
+	if x != nil {
+		return x.RaftIndex
 	}
 	return 0
 }
@@ -790,10 +801,12 @@ var File_event_proto protoreflect.FileDescriptor
 const file_event_proto_rawDesc = "" +
 	"\n" +
 	"\vevent.proto\x12\n" +
-	"history.v1\"\xe9\x05\n" +
+	"history.v1\"\x88\x06\n" +
 	"\fHistoryEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\x03R\aeventId\x12\x1c\n" +
-	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12M\n" +
+	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x1d\n" +
+	"\n" +
+	"raft_index\x18\x03 \x01(\x04R\traftIndex\x12M\n" +
 	"\x10workflow_started\x18\n" +
 	" \x01(\v2 .history.v1.WorkflowStartedEventH\x00R\x0fworkflowStarted\x12G\n" +
 	"\x0estep_scheduled\x18\v \x01(\v2\x1e.history.v1.StepScheduledEventH\x00R\rstepScheduled\x12G\n" +

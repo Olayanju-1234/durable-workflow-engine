@@ -11,7 +11,8 @@ tools:
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
 # Regenerate Go bindings from proto/*.proto into their go_package dirs.
-# event.proto -> message types; service.proto -> messages + gRPC stubs.
+# event.proto -> message types; service.proto -> messages + gRPC stubs;
+# raft.proto -> peer protocol; cluster.proto -> replicated history commands.
 proto:
 	PATH="$(GOBIN):$$PATH" protoc \
 		--proto_path=proto \
@@ -19,7 +20,7 @@ proto:
 		--go_opt=module=$(MODULE) \
 		--go-grpc_out=. \
 		--go-grpc_opt=module=$(MODULE) \
-		proto/event.proto proto/service.proto proto/raft.proto
+		proto/event.proto proto/service.proto proto/raft.proto proto/cluster.proto
 
 fmt:
 	gofmt -w .

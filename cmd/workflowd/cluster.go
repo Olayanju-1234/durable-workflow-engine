@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,16 +9,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
 
-	"github.com/olayanju-1234/durable-workflow-engine/internal/raft"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/cluster"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
+	"github.com/olayanju-1234/durable-workflow-engine/web"
 )
 
 // clusterConfig is the clustering flag set. Clustering is opt-in: without
@@ -88,80 +90,90 @@ func (c clusterConfig) members() []string {
 	return ids
 }
 
-// runCluster runs this node as a member of a Raft cluster until SIGINT/SIGTERM.
-// For now the node takes part in elections only: the workflow API is not
-// replicated yet, so it is not served in this mode.
-func runCluster(baseLogger *slog.Logger, dataDir string, serve serveConfig, cc clusterConfig) error {
-	logger := baseLogger.With("node_id", cc.nodeID) // package raft tags its own lines
-	logger.Warn("cluster mode is experimental: this node runs Raft only and does not serve the workflow API yet")
-
-	storage, err := raft.OpenDiskStorage(filepath.Join(dataDir, "raft"))
-	if err != nil {
-		return err
+// runCluster runs this node as a member of a Raft cluster until SIGINT/SIGTERM
+// (ADR-0004). Every node serves the same API; only the leader runs an engine,
+// and the others answer with a hint naming it.
+func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string, cfg serveConfig, cc clusterConfig) error {
+	if cfg.retention < 0 {
+		return fmt.Errorf("--retention must not be negative, got %s", cfg.retention)
 	}
-	defer storage.Close()
-	transport, err := raft.NewGRPCTransport(cc.nodeID, cc.peers, baseLogger)
-	if err != nil {
-		return err
-	}
-	defer transport.Close()
-	node, err := raft.NewNode(raft.Config{
-		ID: cc.nodeID, Members: cc.members(), Storage: storage, Transport: transport,
-		StateMachine: discard{}, Logger: baseLogger, TickInterval: cc.tick,
-	})
-	if err != nil {
-		return err
-	}
-
-	lis, err := net.Listen("tcp", cc.raftAddr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", cc.raftAddr, err)
-	}
-	gs := grpc.NewServer(raft.ServerOptions()...)
-	raft.RegisterServer(gs, node)
-	go func() { _ = gs.Serve(lis) }()
-	defer gs.Stop()
-	node.Start()
-	logger.Info("raft listening", "addr", cc.raftAddr, "members", cc.members(), "version", version.Version)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if serve.httpAddr != "" {
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
-			writeHealth(w, node.Status())
-		})
-		srv := startHTTP(ctx, serve.httpAddr, mux, "health", logger)
-		defer srv.Close()
-		logger.Info("health endpoint listening", "url", browseURL(serve.httpAddr)+"/api/health")
-	}
-
-	select {
-	case <-ctx.Done():
-		logger.Info("shutdown signal received; stopping raft node")
-		return node.Stop()
-	case <-node.Done():
-		return fmt.Errorf("raft node stopped: %w", node.Err())
-	}
-}
-
-// discard is the state machine of a Raft-only node: entries are replicated
-// and committed, then dropped.
-type discard struct{}
-
-func (discard) Apply(*raft.LogEntry) any     { return nil }
-func (discard) Snapshot() ([]byte, error)    { return nil, nil }
-func (discard) Restore(*raft.Snapshot) error { return nil }
-
-func writeHealth(w http.ResponseWriter, st raft.Status) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":  "ok",
-		"version": version.Version,
-		"cluster": map[string]any{
-			"node_id": st.ID, "role": st.Role.String(), "term": st.Term, "leader_id": st.Leader,
-			"commit_index": st.Commit, "applied_index": st.Applied,
+	selfHost, _, _ := net.SplitHostPort(cc.peers[cc.nodeID])
+	cl, err := cluster.Start(cluster.Config{
+		NodeID: cc.nodeID, Peers: cc.peers, RaftAddr: cc.raftAddr,
+		GRPCAddr: advertised(cfg.addr, selfHost), HTTPAddr: advertised(cfg.httpAddr, selfHost),
+		DataDir: dataDir, Store: store, Logger: logger, TickInterval: cc.tick,
+		NewEngine: func(hl server.HistoryLog) *server.Engine {
+			e := server.NewEngine(store, logger, server.WithHistoryLog(hl))
+			registerDemoTypes(e)
+			return e
+		},
+		OnEngine: func(ctx context.Context, e *server.Engine) {
+			var bg sync.WaitGroup
+			startEngineServices(ctx, &bg, e, logger, cfg)
+			bg.Wait()
 		},
 	})
+	if err != nil {
+		return err
+	}
+	// Deferred first, so it runs last: the API servers drain before Raft stops.
+	defer cl.Stop()
+	logger.Info("cluster member running", "node_id", cc.nodeID, "raft_addr", cc.raftAddr, "version", version.Version)
+
+	var httpSrvs []*http.Server
+	if cfg.httpAddr != "" {
+		opts := []server.HTTPOption{
+			server.WithAuthToken(cfg.authToken), server.WithEngineSource(cl), server.WithClusterStatus(cl.StatusMap),
+		}
+		if cfg.demoWorker {
+			opts = append(opts, server.WithDemoWorker())
+		}
+		api := server.NewHTTPAPI(nil, logger, opts...)
+		mux := api.Handler()
+		mux.Handle("/", web.Handler())
+		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.httpAddr, api.Wrap(mux), "dashboard", logger))
+		logger.Info("dashboard listening", "addr", cfg.httpAddr, "url", browseURL(cfg.httpAddr))
+	}
+	if cfg.metricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", cl.MetricsHandler())
+		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.metricsAddr, mux, "metrics", logger))
+	}
+	lis, err := net.Listen("tcp", cfg.addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", cfg.addr, err)
+	}
+	gs := grpc.NewServer()
+	server.RegisterWorkflowServiceServer(gs, server.NewGRPCServerFrom(cl, logger))
+	go func() { _ = gs.Serve(lis) }()
+	logger.Info("gRPC server listening", "addr", cfg.addr)
+
+	var stopErr error
+	select {
+	case <-ctx.Done():
+		logger.Info("shutdown signal received; draining servers", "grace", shutdownGracePeriod)
+	case <-cl.Done():
+		stopErr = fmt.Errorf("raft node stopped: %w", cl.Err())
+	}
+	drainServers(logger, httpSrvs, gs)
+	return stopErr
+}
+
+// advertised turns a listen address into one peers can hand to clients: a
+// wildcard or empty host becomes this node's host from --peers.
+func advertised(listen, selfHost string) string {
+	if listen == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = selfHost
+	}
+	return net.JoinHostPort(host, port)
 }

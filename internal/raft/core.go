@@ -106,6 +106,11 @@ type Ready struct {
 	// log and state: persist it before Entries and install it into the state
 	// machine before CommittedEntries.
 	Snapshot *Snapshot
+	// LeaderAppend means Messages are a leader's AppendEntries and nothing
+	// else changed durably: they may be sent while the leader's own Entries
+	// are still being written (paper §10.2.1). The leader counts itself
+	// towards a majority only once advance confirms its copy is on disk.
+	LeaderAppend bool
 }
 
 // Status is a read-only snapshot of a node's volatile state.
@@ -706,6 +711,7 @@ func (c *core) ready() Ready {
 	if hs := c.hardState(); !proto.Equal(hs, c.lastHard) {
 		rd.HardState = hs
 	}
+	rd.LeaderAppend = c.role == Leader && rd.HardState == nil && rd.Snapshot == nil
 	return rd
 }
 

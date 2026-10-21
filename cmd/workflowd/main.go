@@ -55,7 +55,7 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	cluster, clustered, err := parseClusterFlags(*nodeID, *peers, *raftAddr, *raftTick)
+	clusterCfg, clustered, err := parseClusterFlags(*nodeID, *peers, *raftAddr, *raftTick)
 	if err != nil {
 		logger.Error("invalid cluster flags", "err", err)
 		os.Exit(2)
@@ -83,7 +83,7 @@ func main() {
 			authToken: *authToken, demoWorker: *demoWorker, retention: *retention,
 		}
 		if clustered {
-			if err := runCluster(logger, *dataDir, cfg, cluster); err != nil {
+			if err := runCluster(logger, store, *dataDir, cfg, clusterCfg); err != nil {
 				logger.Error("cluster node stopped", "err", err)
 				os.Exit(1)
 			}
@@ -140,23 +140,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if cfg.demoWorker {
-		bg.Add(1)
-		go func() {
-			defer bg.Done()
-			newDemoWorker(engine, logger).run(ctx, demoWorkerConcurrency)
-		}()
-		logger.Info("demo worker running", "steps", demoSteps, "concurrency", demoWorkerConcurrency)
-	}
-	if cfg.retention > 0 {
-		interval := min(max(cfg.retention/10, time.Minute), time.Hour)
-		bg.Add(1)
-		go func() {
-			defer bg.Done()
-			engine.RunRetention(ctx, cfg.retention, interval)
-		}()
-		logger.Info("retention enabled", "keep", cfg.retention, "interval", interval)
-	}
+	startEngineServices(ctx, &bg, engine, logger, cfg)
 
 	// Two HTTP listeners, deliberately separate from each other and from gRPC:
 	// the dashboard + JSON API are for humans and operators, while /metrics is
@@ -198,22 +182,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 	go func() {
 		<-ctx.Done()
 		logger.Info("shutdown signal received; draining servers", "grace", shutdownGracePeriod)
-		sctx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
-		defer cancel()
-		for _, srv := range httpSrvs {
-			_ = srv.Shutdown(sctx)
-		}
-		// GracefulStop waits for in-flight RPCs, but an idle worker parked on a
-		// long-poll PollTask never returns on its own. Bound the drain and force a
-		// stop so shutdown can't hang on idle pollers.
-		drained := make(chan struct{})
-		go func() { gs.GracefulStop(); close(drained) }()
-		select {
-		case <-drained:
-		case <-time.After(shutdownGracePeriod):
-			logger.Warn("graceful drain timed out; forcing stop")
-			gs.Stop()
-		}
+		drainServers(logger, httpSrvs, gs)
 	}()
 
 	logger.Info("gRPC server listening", "addr", cfg.addr, "version", version.Version)
@@ -221,6 +190,50 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// startEngineServices runs the in-process helpers an engine may have (the demo
+// worker, retention) until ctx ends; bg tracks them. In a cluster they run on
+// the leader only, for as long as its engine does.
+func startEngineServices(ctx context.Context, bg *sync.WaitGroup, engine *server.Engine, logger *slog.Logger, cfg serveConfig) {
+	if cfg.demoWorker {
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			newDemoWorker(engine, logger).run(ctx, demoWorkerConcurrency)
+		}()
+		logger.Info("demo worker running", "steps", demoSteps, "concurrency", demoWorkerConcurrency)
+	}
+	if cfg.retention > 0 {
+		interval := min(max(cfg.retention/10, time.Minute), time.Hour)
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			engine.RunRetention(ctx, cfg.retention, interval)
+		}()
+		logger.Info("retention enabled", "keep", cfg.retention, "interval", interval)
+	}
+}
+
+// drainServers shuts the HTTP servers down and drains gRPC, bounded by
+// shutdownGracePeriod.
+func drainServers(logger *slog.Logger, httpSrvs []*http.Server, gs *grpc.Server) {
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
+	defer cancel()
+	for _, srv := range httpSrvs {
+		_ = srv.Shutdown(sctx)
+	}
+	// GracefulStop waits for in-flight RPCs, but an idle worker parked on a
+	// long-poll PollTask never returns on its own. Bound the drain and force a
+	// stop so shutdown can't hang on idle pollers.
+	drained := make(chan struct{})
+	go func() { gs.GracefulStop(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(shutdownGracePeriod):
+		logger.Warn("graceful drain timed out; forcing stop")
+		gs.Stop()
+	}
 }
 
 // startHTTP runs an HTTP server in the background, logging (but not fatally

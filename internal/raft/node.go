@@ -46,8 +46,11 @@ type StateMachine interface {
 	// Apply applies one committed entry and returns a result for the proposer,
 	// if it is waiting on this node. After a restart Apply sees again every
 	// entry since the latest snapshot, so a state machine that persists its own
-	// state must recognise entries it already applied.
-	Apply(entry *LogEntry) any
+	// state must recognise entries it already applied. A non-nil error means
+	// this node's copy of the state can no longer be trusted (a failed disk
+	// write, say) and stops the node; an outcome to report to the proposer,
+	// like a rejected command, belongs in the result instead.
+	Apply(entry *LogEntry) (any, error)
 	// Snapshot serializes the state as of the last applied entry.
 	Snapshot() ([]byte, error)
 	// Restore replaces the whole state with a snapshot's: at startup, and when
@@ -422,7 +425,9 @@ drain:
 
 // flush handles every pending Ready: persist, then send, then queue for apply.
 // The order is the whole point: nothing leaves this node, and nothing is
-// applied, until the state it reflects is durable.
+// applied, until the state it reflects is durable. The one exception is a
+// leader's AppendEntries (Ready.LeaderAppend), which replicates entries the
+// leader is still writing; its own copy counts only once written.
 func (n *Node) flush() error {
 	for n.core.hasReady() {
 		rd := n.core.ready()
@@ -442,13 +447,22 @@ func (n *Node) flush() error {
 			}
 			n.enqueueApply(applyItem{snap: rd.Snapshot})
 		}
+		if rd.LeaderAppend {
+			// Followers write their copies while we write ours: one fsync of
+			// latency per commit instead of two.
+			for _, m := range rd.Messages {
+				n.transport.Send(m)
+			}
+		}
 		if len(rd.Entries) > 0 {
 			if err := n.storage.appendEntries(rd.Entries); err != nil {
 				return fmt.Errorf("raft: persist entries: %w", err)
 			}
 		}
-		for _, m := range rd.Messages {
-			n.transport.Send(m)
+		if !rd.LeaderAppend {
+			for _, m := range rd.Messages {
+				n.transport.Send(m)
+			}
 		}
 		for _, e := range rd.CommittedEntries {
 			n.enqueueApply(applyItem{entry: e})
@@ -493,7 +507,11 @@ func (n *Node) applyLoop() {
 			}
 			var v any
 			if len(it.entry.GetData()) > 0 {
-				v = n.sm.Apply(it.entry)
+				var err error
+				if v, err = n.sm.Apply(it.entry); err != nil {
+					n.fail(fmt.Errorf("raft: apply entry %d: %w", it.entry.GetIndex(), err))
+					return
+				}
 			}
 			n.appliedTerm = it.entry.GetTerm()
 			n.applied1(it.entry, v)

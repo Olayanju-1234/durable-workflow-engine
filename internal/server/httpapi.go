@@ -33,18 +33,20 @@ import (
 //	POST /api/workflows/{id}/terminate       {"reason"}
 //	POST /api/workflows/{id}/signal          {"name","payload"}
 type HTTPAPI struct {
-	engine *Engine
-	log    *slog.Logger
+	src EngineSource
+	log *slog.Logger
 	// authToken guards every mutating /api route when set (Authorization:
 	// Bearer <token>). Empty disables auth entirely — the pre-existing default.
 	authToken string
 	// demoWorker is reported by /api/health so the dashboard can guide visitors.
 	demoWorker bool
-	startedAt  time.Time
+	// clusterStatus, when set, is reported by /api/health under "cluster".
+	clusterStatus func() map[string]any
+	startedAt     time.Time
 }
 
 func NewHTTPAPI(engine *Engine, logger *slog.Logger, opts ...HTTPOption) *HTTPAPI {
-	a := &HTTPAPI{engine: engine, log: logger, startedAt: time.Now()}
+	a := &HTTPAPI{src: staticSource{engine}, log: logger, startedAt: time.Now()}
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -65,6 +67,45 @@ func WithAuthToken(token string) HTTPOption {
 // executing the built-in demo activities on this node.
 func WithDemoWorker() HTTPOption {
 	return func(a *HTTPAPI) { a.demoWorker = true }
+}
+
+// WithEngineSource serves whichever engine src resolves per request instead
+// of a fixed one: in a cluster, the leader's, and a leader hint elsewhere.
+func WithEngineSource(src EngineSource) HTTPOption {
+	return func(a *HTTPAPI) { a.src = src }
+}
+
+// WithClusterStatus adds this node's cluster view to /api/health.
+func WithClusterStatus(fn func() map[string]any) HTTPOption {
+	return func(a *HTTPAPI) { a.clusterStatus = fn }
+}
+
+// engine returns the engine for this request, or answers 503 with a leader
+// hint and returns nil.
+func (a *HTTPAPI) engine(w http.ResponseWriter) *Engine {
+	e, err := a.src.Engine()
+	if err != nil {
+		a.writeNotLeader(w, err)
+		return nil
+	}
+	return e
+}
+
+// writeNotLeader answers 503: the request was fine, this node just isn't the
+// one that can serve it. The body and a header say where the leader is.
+func (a *HTTPAPI) writeNotLeader(w http.ResponseWriter, err error) {
+	h := leaderHint(a.src, err)
+	if h.ID != "" {
+		w.Header().Set("X-Workflowd-Leader", h.ID)
+	} else {
+		w.Header().Set("Retry-After", "1")
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+		"error":       (&NotLeaderError{Leader: h}).Error(),
+		"leader_id":   h.ID,
+		"leader_grpc": h.GRPCAddr,
+		"leader_http": h.HTTPAddr,
+	})
 }
 
 // Handler returns the API routes. Go 1.22+ method+wildcard patterns keep the
@@ -177,9 +218,13 @@ type workflowDTO struct {
 	Steps  []*stepDTO `json:"steps"`
 }
 
+// health is answered by every node, leader or not: a follower is healthy too.
 func (a *HTTPAPI) health(w http.ResponseWriter, _ *http.Request) {
-	st := a.engine.Stats()
-	writeJSON(w, http.StatusOK, map[string]any{
+	var st EngineStats
+	if e, err := a.src.Engine(); err == nil {
+		st = e.Stats()
+	}
+	body := map[string]any{
 		"status":                    "ok",
 		"version":                   version.Version,
 		"uptime_seconds":            int64(time.Since(a.startedAt).Seconds()),
@@ -187,7 +232,11 @@ func (a *HTTPAPI) health(w http.ResponseWriter, _ *http.Request) {
 		"task_queue_depth":          st.TaskQueueDepth,
 		"workflow_task_queue_depth": st.WorkflowTaskQueueDepth,
 		"demo_worker":               a.demoWorker,
-	})
+	}
+	if a.clusterStatus != nil {
+		body["cluster"] = a.clusterStatus()
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // listWorkflows supports status filtering (engine-side), a case-insensitive
@@ -219,7 +268,11 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	}
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
-	summaries, err := a.engine.ListWorkflows(filter)
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	summaries, err := e.ListWorkflows(filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -249,7 +302,11 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
-	resp, err := a.engine.GetWorkflow(r.PathValue("id"))
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	resp, err := e.GetWorkflow(r.PathValue("id"))
 	switch {
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
@@ -291,9 +348,16 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	id, err := a.engine.StartWorkflow(body.Type, []byte(body.Input), body.WorkflowID)
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	id, err := e.StartWorkflow(body.Type, []byte(body.Input), body.WorkflowID)
 	switch {
 	case err == nil:
+	case errors.Is(err, ErrNotLeader):
+		a.writeNotLeader(w, err)
+		return
 	case errors.Is(err, ErrUnknownType):
 		// The caller must fix the request: the type is not registered here.
 		writeError(w, http.StatusBadRequest, err)
@@ -321,8 +385,14 @@ func (a *HTTPAPI) terminateWorkflow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	err := a.engine.TerminateWorkflow(r.PathValue("id"), body.Reason)
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	err := e.TerminateWorkflow(r.PathValue("id"), body.Reason)
 	switch {
+	case errors.Is(err, ErrNotLeader):
+		a.writeNotLeader(w, err)
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, ErrAlreadyTerminal):
@@ -343,8 +413,14 @@ func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := a.engine.SignalWorkflow(r.PathValue("id"), body.Name, []byte(body.Payload)); err != nil {
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	if err := e.SignalWorkflow(r.PathValue("id"), body.Name, []byte(body.Payload)); err != nil {
 		switch {
+		case errors.Is(err, ErrNotLeader):
+			a.writeNotLeader(w, err)
 		case errors.Is(err, ErrInvalidArgument):
 			writeError(w, http.StatusBadRequest, err)
 		case errors.Is(err, ErrNotFound):
