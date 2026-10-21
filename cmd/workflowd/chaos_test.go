@@ -213,7 +213,14 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 			}
 			if t.Failed() {
 				lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-				t.Logf("--- %s log (last 30 lines) ---\n%s", id, strings.Join(lines[max(0, len(lines)-30):], "\n"))
+				var notable []string
+				for _, l := range lines {
+					if strings.Contains(l, "level=WARN") || strings.Contains(l, "level=ERROR") || strings.Contains(l, "raft: status") || strings.Contains(l, "cluster:") {
+						notable = append(notable, l)
+					}
+				}
+				t.Logf("--- %s: warnings and role changes (%d) ---\n%s", id, len(notable), strings.Join(notable[max(0, len(notable)-60):], "\n"))
+				t.Logf("--- %s log (last 40 lines) ---\n%s", id, strings.Join(lines[max(0, len(lines)-40):], "\n"))
 			}
 		}
 	})

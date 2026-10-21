@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"slices"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -733,6 +734,20 @@ func (c *core) advance(rd Ready) {
 		c.pendingInstall = nil
 	}
 	c.msgs = c.msgs[len(rd.Messages):]
+}
+
+// progressSummary describes replication to each follower, for diagnostics.
+func (c *core) progressSummary() string {
+	if c.role != Leader {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "last=%d stabled=%d commit=%d", c.log.lastIndex(), c.log.stabled, c.log.committed)
+	for _, id := range c.peers {
+		pr := c.progress[id]
+		fmt.Fprintf(&b, " %s{match=%d next=%d active=%t}", id, pr.match, pr.next, pr.recentActive)
+	}
+	return b.String()
 }
 
 // status reports Applied as what the core has handed out, which is exact for

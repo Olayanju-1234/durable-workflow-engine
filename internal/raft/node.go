@@ -19,6 +19,12 @@ const (
 	// DefaultSnapshotEvery is how many applied entries pile up before a node
 	// snapshots its state machine and compacts its log.
 	DefaultSnapshotEvery = 8192
+
+	// slowCommit and slowFlush are the thresholds above which a commit or a
+	// persist-and-send round is logged as a warning: a sign of a slow disk, an
+	// overloaded node, or a follower that can't keep up.
+	slowCommit = time.Second
+	slowFlush  = 500 * time.Millisecond
 )
 
 var (
@@ -111,11 +117,12 @@ type Node struct {
 	appliedTerm uint64 // term of the last applied entry
 	snapIndex   uint64 // index of the latest snapshot this node has
 
-	mu      sync.Mutex
-	status  Status
-	applied uint64
-	changed chan struct{}        // closed and replaced whenever status changes
-	waiters map[uint64]*proposal // log index -> proposal waiting for it
+	mu       sync.Mutex
+	status   Status
+	progress string // leader's view of replication, refreshed each round (diagnostics)
+	applied  uint64
+	changed  chan struct{}        // closed and replaced whenever status changes
+	waiters  map[uint64]*proposal // log index -> proposal waiting for it
 }
 
 // applyItem is one unit of work for the applier, in log order: a committed
@@ -293,8 +300,16 @@ func (n *Node) Propose(ctx context.Context, term uint64, data []byte) (any, erro
 	case <-n.done:
 		return nil, ErrStopped
 	}
+	start := time.Now()
 	select {
 	case r := <-p.result:
+		if took := time.Since(start); took > slowCommit {
+			n.mu.Lock()
+			st, progress := n.status, n.progress
+			n.mu.Unlock()
+			n.logger.Warn("raft: slow commit", "index", p.index, "took", took,
+				"term", st.Term, "applied", st.Applied, "progress", progress)
+		}
 		return r.value, r.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -429,6 +444,12 @@ drain:
 // leader's AppendEntries (Ready.LeaderAppend), which replicates entries the
 // leader is still writing; its own copy counts only once written.
 func (n *Node) flush() error {
+	start := time.Now()
+	defer func() {
+		if took := time.Since(start); took > slowFlush {
+			n.logger.Warn("raft: slow persist-and-send round", "took", took)
+		}
+	}()
 	for n.core.hasReady() {
 		rd := n.core.ready()
 		if rd.HardState != nil {
@@ -569,8 +590,10 @@ func (n *Node) applied1(e *LogEntry, v any) {
 
 func (n *Node) publish() {
 	st := n.core.status()
+	progress := n.core.progressSummary()
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.progress = progress
 	st.Applied = n.applied
 	if st == n.status {
 		return

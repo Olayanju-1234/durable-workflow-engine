@@ -116,7 +116,8 @@ type peerSender struct {
 	done     chan struct{}
 	logger   *slog.Logger
 
-	unreachable bool // logged on change, so a dead peer is one line, not thousands
+	unreachable bool      // logged on change, so a dead peer is one line, not thousands
+	slowLogged  time.Time // last "slow send" warning, so a slow peer is rate-limited too
 }
 
 func (p *peerSender) run() {
@@ -134,7 +135,12 @@ func (p *peerSender) run() {
 func (p *peerSender) deliver(m *Envelope) {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
+	start := time.Now()
 	_, err := p.client.Send(ctx, m)
+	if took := time.Since(start); took > 500*time.Millisecond && time.Since(p.slowLogged) > 10*time.Second {
+		p.slowLogged = time.Now()
+		p.logger.Warn("raft: slow send to peer", "addr", p.addr, "took", took, "err", err)
+	}
 	switch {
 	case err != nil && !p.unreachable:
 		p.unreachable = true
