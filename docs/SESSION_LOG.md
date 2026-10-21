@@ -5,6 +5,63 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 15: Unsticking the public demo + ops hardening
+
+First session driven by a production review of the VPS (see the handoff in the local,
+git-ignored `CLAUDE.local.md`). Also the first session to use branches + PRs (#1–#3)
+instead of pushing to `main`. All three merged and deployed (`9b1f777`).
+
+**Done (code):**
+- **PR #1, housekeeping.** SPA fallback serves only GET/HEAD (405 otherwise; scanner
+  `POST /graphql` used to get 200 + HTML). Unmatched `/api/*` → JSON 404. Dashboard
+  `http.Server` now drained on SIGTERM; request contexts come from the signal context
+  (`BaseContext`) so SDK long-polls end with 204 immediately. Fixed the
+  `url=http://localhost127.0.0.1:8233` log line (`browseURL`).
+- **PR #2, activity routing + `--demo-worker`.** The activity queue was global, and the SDKs
+  fail tasks they don't implement, so any second worker with different activities
+  would steal and fail tasks. `PollTask(ctx, workerID, stepNames...)`, proto
+  `PollTaskRequest.step_names`, HTTP `?activities=`. Both queues now share a generic
+  `routedQueue[T]`. SDKs pass their names and skip a loop when nothing is registered
+  (empty filter = "any"). `--demo-worker` runs reserve/charge/ship/release in-process
+  (0.8–2 s per step; 25 % of first charges fail transiently; "decline" in the input
+  fails charge for good, so the saga compensates). `/api/health` has `demo_worker`; the
+  dashboard pre-fills OrderSaga and explains "decline".
+- **PR #3, `--retention`.** Deletes completed/failed/terminated histories whose last
+  event is older than the window (startup pass, then every retention/10 clamped
+  to [1m, 1h]). Never touches live workflows. `HistoryStore.Delete` closes the cached
+  handle, removes the file, and fsyncs the dir. `workflowd_workflows_purged_total`. List
+  skips histories that vanish mid-scan. **Built but NOT enabled in prod** (needs the
+  owner's OK, because it deletes data).
+
+**Done (prod, VPS):**
+- Binary `9b1f777` deployed, version-stamped; `workflowd.prev` now exists for rollback.
+- Unit ExecStart gains `--demo-worker` (old unit backed up in `/root/workflowd.service.*`).
+- The workflow stuck since 2026-10-07 completed seconds after restart.
+- nginx (`side-projects`, shared with Hookdash, backup in `/root/side-projects.*`):
+  `map`+`limit_req_zone workflowd_demo_write` (10 r/m per IP, burst 20, 429) on the
+  demo vhost only. It covers writes; GET/HEAD and SDK `*/complete` calls are exempt.
+  `client_max_body_size 16k`. Verified: 24/30 parallel writes → 429, GETs untouched,
+  20 KB body → 413, Hookdash still 200.
+- `workflowd-backup.timer` (daily 03:30 UTC) → `/usr/local/sbin/workflowd-backup` tars
+  `/opt/durable/data` into root-only `/var/backups/workflowd`, keeps 14 days. Same disk,
+  so it covers mistakes and corruption, not losing the disk.
+
+**Next:** decide on `--retention` for prod (suggest `168h`). Then Phase 4 / Week 11, Raft.
+
+**Gotchas:**
+- Workers registering the same activity name share its queue *by design*. With the TS/
+  Python examples connected to a `--demo-worker` engine, their `charge` can take the
+  demo's retry (so a "decline" order can complete). Don't rename the demo steps: live
+  histories already record `reserve`, and replay would break.
+- The history store caches one open append handle per workflow and only releases it on
+  `Delete`/`Close`. Without retention that is a slow fd leak (finished workflows keep
+  theirs). Follow-up: release on terminal.
+- Foreground `sleep` is blocked in the agent shell; drive timing tests from Python.
+- Sequential curl from the laptop takes ~0.8 s per request, which is slow enough to refill
+  a 10 r/m bucket. Test rate limits with parallel requests.
+
+---
+
 ## 2026-08-21 — Session 14: UI revamp ("The Loom") + backend hardening
 
 **Done (UI):**
