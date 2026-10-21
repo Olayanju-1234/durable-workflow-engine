@@ -5,6 +5,46 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 16: Release history handles when workflows finish
+
+Side session spun off from Session 15 to close the fd-leak backlog item. PR #5,
+merged and deployed (`4c8b42a`).
+
+**Done:**
+- `HistoryStore.Release(id)` closes and forgets the cached append handle and leaves the
+  file alone. A later `Append` reopens it, and torn-tail recovery runs again on that
+  reopen. `OpenHandles()` reports the cache size (used by tests).
+- `Engine.appendLocked` releases after a terminal event (`WorkflowCompleted` /
+  `WorkflowFailed`) is durable. That one choke point covers decision complete/fail
+  (Go and polyglot), `TerminateWorkflow`, and workflows that finish during `Recover`.
+  A close error is logged, not returned: the event is already on disk.
+- `Recover` needed no change: it reads finished workflows with `ReadAll` (a
+  short-lived handle) and never caches. `TestRecoverHoldsNoHandlesForFinishedWorkflows`
+  locks that in.
+- Tests: `TestReleaseThenAppend` (history), `TestFinishedWorkflowReleasesHandle` and
+  the recover test (server). Both server tests fail with the release call disabled.
+
+**Prod verification:** before, 3 finished workflows and 3 `.history` fds open in the
+process. After deploy, a fresh OrderSaga (with one charge retry) held 1 fd while live
+and 0 once COMPLETED. Fresh backup `data-20261021T065202Z.tar.gz` taken before restart;
+`workflowd.prev` is now the `9b1f777` build.
+
+**Next:** fix torn writes on a live handle (below). `--retention` in prod still awaits
+the owner's OK. Then Phase 4 / Week 11, Raft.
+
+**Gotchas:**
+- New bug found, not fixed: if `Append`'s write fails partway (ENOSPC, EIO), the
+  partial record stays at the tail and the handle stays cached, so the next append
+  lands after it and `ReadAll` then hits a CRC/length error (hard corruption). Tail
+  recovery only runs on open. Likely fix: `Release` the handle on any write/fsync error
+  so the next append reopens and truncates. A restart before the next append also heals it.
+- The process's open-files soft limit on the VPS is 524287, so the old leak was slow;
+  count fds with `ls -l /proc/$(systemctl show -p MainPID --value workflowd)/fd`.
+- `GET /api/workflows/{id}` returns the summary fields flat (`status`, `history_length`),
+  not under `summary` like the gRPC response.
+
+---
+
 ## 2026-10-21 — Session 15: Unsticking the public demo + ops hardening
 
 First session driven by a production review of the VPS (see the handoff in the local,
