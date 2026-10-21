@@ -7,8 +7,9 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
-The first published SDK release will be 0.1.0. Before publishing, rename this heading to
-`## [0.1.0] - YYYY-MM-DD`; the release workflow refuses to publish without it.
+## [0.1.0] - 2026-10-21
+
+The first published SDK release.
 
 ### Added
 - SDKs for TypeScript/JavaScript, Python and Java: workflows as ordinary functions with
@@ -26,7 +27,6 @@ The first published SDK release will be 0.1.0. Before publishing, rename this he
 - Go client: `client.Options.TLS`, `client.Options.AuthToken`, `client.ErrUnauthenticated`.
 - CI: every SDK runs end to end against a real engine, in plaintext and over TLS with a
   required token; `buf lint` and `buf breaking` guard the protobuf wire format.
-
 - SDKs: retry policies on an activity call (recorded with the step), `getVersion` /
   `sideEffect`, JSON and binary payloads, heartbeats for long activities, a list of
   addresses with cluster leader-hint following and re-registration after a restart,

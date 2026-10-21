@@ -85,19 +85,15 @@ jobs:
     needs: version
     if: inputs.registries == 'all' || inputs.registries == 'pypi'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # PyPI trusted publishing: GitHub's OIDC token replaces an API token
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Check the token is set
-        if: ${{ !inputs.dry_run }}
-        env:
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          [ -n "$TWINE_PASSWORD" ] || { echo "::error::Repository secret PYPI_API_TOKEN is not set"; exit 1; }
 
       - name: Build and check
         working-directory: sdks/python
@@ -107,13 +103,12 @@ jobs:
           python -m build
           twine check --strict dist/*
 
+      # Needs a trusted publisher on PyPI for this repo + release-sdks.yml (see sdks/README.md).
       - name: Publish workflowd==${{ needs.version.outputs.version }}
         if: ${{ !inputs.dry_run }}
-        working-directory: sdks/python
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload --non-interactive dist/*
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist/
 
   maven:
     needs: version
