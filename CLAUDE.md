@@ -94,6 +94,9 @@ end-to-end, Java is written but uncompiled. Next: **Phase 4 / Week 11 — Raft**
 `docs/SESSION_LOG.md` for the running log; `docs/ROADMAP.md` Status line is
 authoritative.
 
+Session 15 hardened the public demo: activity tasks are routed by step name, and an
+in-process `--demo-worker` plus opt-in `--retention` were added (see SESSION_LOG).
+
 **Polyglot invariants worth not breaking:** SDK decisions are fenced by history
 length (stale → reject); a malformed command must leave the task *pending* or the
 workflow strands; and each language needs a suspend mechanism workflow code can't
