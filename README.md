@@ -112,6 +112,27 @@ _, err := env.ExecuteWorkflow(Checkout, order)
 // err matches testsuite.ErrWorkflowFailed: "rejected"; env.Elapsed() == 168h
 ```
 
+### Run steps in parallel, on a schedule, with retries
+
+```go
+charge := ctx.ExecuteActivityAsync("charge-card", order,
+	workflow.WithRetryPolicy(workflow.RetryPolicy{MaxAttempts: 3, InitialBackoff: time.Second}))
+email := ctx.ExecuteActivityAsync("send-receipt", order) // runs at the same time
+reply := ctx.WaitForSignalAsync("courier", "picked-up")
+if ctx.WaitAny(reply, ctx.NewTimer("sla", 2*time.Hour)) == 1 {
+	ctx.ExecuteActivity("escalate", order) // the deadline won the race
+}
+```
+
+`WaitAny` decides by the order history recorded the results, so a replay always takes the same
+branch. A retry policy set on the call is recorded with the step and survives restarts.
+Schedules start workflows on a cron expression, durably and on the cluster leader only:
+
+```go
+c.CreateSchedule(ctx, client.Schedule{ID: "nightly-report", Cron: "0 2 * * *",
+	Timezone: "Europe/London", WorkflowType: "Report"})
+```
+
 ### Change it safely
 
 Workflows can run for weeks, so code changes while executions are in flight. `GetVersion`
@@ -172,8 +193,10 @@ worker.workflow('OrderWorkflow', async (ctx) => {
 | Python (`sdks/python/`) | run end to end in CI (plaintext and TLS + token); PyPI-ready, not yet published |
 | Java (`sdks/java/`) | compiled for Java 11 and run end to end in CI; Maven-ready, not yet published |
 
-`GetVersion` and `SideEffect` are Go-only for now. [`sdks/README.md`](sdks/README.md) describes
-the protocol if you want to add a language.
+Every SDK has retry policies, `getVersion` / `sideEffect`, JSON and binary payloads, and follows
+a cluster's leader; TypeScript and Python also run steps in parallel (`Promise.all`,
+`ctx.waitAny`, `activity_async`). [`sdks/README.md`](sdks/README.md) describes the protocol if
+you want to add a language.
 
 ## Running a cluster (optional)
 
@@ -195,14 +218,14 @@ Followers answer with the leader's address, and the Go client follows it: give
 - **Auth and TLS are opt-in, and one token.** `--tls-cert`/`--tls-key` and `--auth-token-file`
   cover gRPC, the JSON API and metrics; `--raft-tls-*` gives cluster members mutual TLS. With
   none set, every port is open plaintext, and there are no per-user identities or roles yet.
-- **Throughput.** One engine-wide lock and a full history read per operation, and listing is a
-  full scan. It has not been load-tested.
+- **Not load-tested.** Workflows run in parallel under per-workflow locks with their state cached
+  in memory, and listing reads an in-memory index; the cost that remains is one fsync per event
+  ([ADR-0006](docs/adr/0006-keep-file-per-workflow-store.md)).
 - **At-least-once activities.** An activity can run twice if a worker dies after doing the work
   but before reporting it. Make activities idempotent (`worker.GetActivityInfo` gives a key).
-- **Retry policies are engine-side only**, and activities run one at a time per workflow (no
-  parallel steps yet). Payloads are bytes; use JSON for structure.
-- **Rolling back** to a binary older than the version markers can't read histories that
-  contain one.
+  Signals are exactly-once: each carries an idempotency key.
+- **Rolling back** to an older binary: binaries before the version markers can't read histories
+  that contain one, and binaries before parallel steps can't read histories that ran some.
 
 ## Project layout
 

@@ -12,6 +12,7 @@ that supersedes the old one.
 | [0004](0004-replicated-history-leader-only-engine.md) | Replicate history through Raft; run the engine on the leader only | Accepted |
 | [0005](0005-public-go-sdk.md) | The public Go SDK: workflow, client, worker, embedded | Accepted |
 | [0006](0006-keep-file-per-workflow-store.md) | Keep the file-per-workflow history store; no LSM engine | Accepted |
+| [0007](0007-parallel-steps.md) | Parallel steps and batched commands | Accepted |
 
 ## Template
 

@@ -44,6 +44,8 @@ schedule next step → record result.** Four components, built across phases:
 | Consensus (Raft) | `internal/raft`    | 4 ✅  | Elections, log replication, snapshots, five-property safety checker. |
 | Cluster          | `internal/cluster` | 4 ✅  | Replicated history state machine, leader-only per-term engine, leader hints (ADR-0004). |
 | Public Go SDK    | `workflow`, `worker`, `client`, `testsuite`, `embedded` | 5 ✅ | What Go developers import (ADR-0005). Replay engine in `internal/replay`; `sdk` is deprecated aliases. |
+| Locking + cache + index | `internal/server` (`wfstate.go`, `index.go`) | backlog ✅ | Per-workflow locks, in-memory history + `state.Folder` state, visibility index (Session 24). |
+| Schedules        | `internal/cron`, `internal/server/schedules.go` | backlog ✅ | Durable cron schedules, leader-only, idempotent per fire (Session 24). |
 | Auth + TLS       | `internal/tlsconfig`, `internal/server/auth.go`, `cmd/workflowd/security.go` | — ✅ | Opt-in TLS on every listener, bearer token on HTTP + gRPC, metrics token, Raft mTLS. |
 
 ## Build / test / regenerate
@@ -84,6 +86,12 @@ This is how context survives across sessions and machines. The in-repo docs are 
 source of truth because they travel with `git clone`; the global memory is the local cache.
 
 ## Current status
+
+**Session 24 (engine backlog; parallel to Session 23):** SDK-chosen retry policies,
+version markers, binary/JSON payloads, heartbeats and leader hints in every SDK (#19);
+per-workflow locks + an in-memory state cache (#22); a visibility index and ADR-0006
+(no LSM) (#23); cron schedules (#24); parallel steps with batched commands (ADR-0007,
+#25); exactly-once signals (#26). Sticky queues closed with measurements.
 
 **Session 23 (security, CI, packaging; parallel to the engine-backlog session):**
 opt-in TLS and bearer auth on every listener (no flags = unchanged), `buf` in CI, every
@@ -143,3 +151,18 @@ timer, signal, activity result) never requires the workflow type to be
 registered; only deciding does. A worker re-registers whenever its connection is
 turned away. `GetVersion` consumes a step sequence only when a version marker is
 there (or is being recorded).
+
+**Concurrency invariants worth not breaking:** everything that reads a workflow's
+history and then appends holds that workflow's lock; lock order is a workflow lock,
+then `Engine.mu`, never two workflow locks; `Engine.mu` is never held across I/O. A
+failed append drops the cached history (the write may have landed). The engine is the
+only writer of its histories; a closed engine refuses writes. Never wait on the index
+build while holding a workflow lock (Recover builds it).
+
+**Parallel-step invariants worth not breaking:** a failure that will be retried is
+recorded with `will_retry` and must stay invisible to workflow code; the engine decides
+after every step result, and recovery decides when the last event was a result;
+"first of" races are decided by `ResolvedEventID`, never by call order; a single command
+travels in the old `command` field so older engines understand it. Schedule run ids
+are `<schedule>-<fire time>` (idempotent firing); signal idempotency keys live in
+history.

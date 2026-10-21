@@ -27,7 +27,21 @@ The first published SDK release will be 0.1.0. Before publishing, rename this he
 - CI: every SDK runs end to end against a real engine, in plaintext and over TLS with a
   required token; `buf lint` and `buf breaking` guard the protobuf wire format.
 
+- SDKs: retry policies on an activity call (recorded with the step), `getVersion` /
+  `sideEffect`, JSON and binary payloads, heartbeats for long activities, a list of
+  addresses with cluster leader-hint following and re-registration after a restart,
+  exactly-once signals (an idempotency key per signal). TypeScript and Python: parallel
+  steps (`Promise.all` / `ctx.waitAny`; `activity_async`, `wait_all`, `wait_any`).
+- Engine: per-workflow locks and an in-memory state cache, a visibility index, cron
+  schedules (`/api/schedules`, `CreateSchedule`), parallel steps with batched commands,
+  `request_id` on `SignalWorkflow`, `POST /api/activity-tasks/heartbeat`.
+- Go: `workflow.WithRetryPolicy`, `ExecuteActivityAsync`, `NewTimer`, `WaitForSignalAsync`,
+  `WaitAny`; `client.CreateSchedule` / `DeleteSchedule` / `ListSchedules`,
+  `client.WithSignalRequestID`.
+
 ### Changed
 - `--auth-token` now also requires the token on gRPC calls, not only the JSON API.
+- Go: `client.SignalWorkflow` is exactly-once (it sends an idempotency key); a closed
+  engine refuses writes.
 - Java: `Workflowd` moved from the default package to `io.github.olayanju1234.workflowd`.
 - `worker.Run` (Go) returns at once when the engine rejects its token.
