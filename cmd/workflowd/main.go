@@ -1,7 +1,5 @@
-// Command workflowd is the durable workflow engine daemon.
-//
-// Today it bootstraps and validates the on-disk history store. The gRPC server
-// and task scheduler land in Phase 1, Weeks 3–4 (see docs/ROADMAP.md).
+// Command workflowd is the durable workflow engine daemon: one binary serving
+// gRPC, the JSON API + embedded dashboard, and Prometheus metrics.
 package main
 
 import (
@@ -102,6 +100,9 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 		return fmt.Errorf("recover: %w", err)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Two HTTP listeners, deliberately separate from each other and from gRPC:
 	// the dashboard + JSON API are for humans and operators, while /metrics is
 	// scraped by Prometheus and is usually kept on an internal-only port. Either
@@ -116,14 +117,14 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 			logger.Warn("API auth is disabled; anyone who can reach the HTTP port can start, signal and terminate workflows",
 				"hint", "pass --auth-token to require a bearer token")
 		}
-		startHTTP(httpAddr, api.Wrap(mux), "dashboard", logger)
-		logger.Info("dashboard listening", "addr", httpAddr, "url", "http://localhost"+httpAddr)
+		httpSrvs = append(httpSrvs, startHTTP(ctx, httpAddr, api.Wrap(mux), "dashboard", logger))
+		logger.Info("dashboard listening", "addr", httpAddr, "url", browseURL(httpAddr))
 	}
 
 	if metricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", engine.Metrics().Handler())
-		httpSrvs = append(httpSrvs, startHTTP(metricsAddr, mux, "metrics", logger))
+		httpSrvs = append(httpSrvs, startHTTP(ctx, metricsAddr, mux, "metrics", logger))
 		logger.Info("metrics endpoint listening", "addr", metricsAddr, "path", "/metrics")
 	}
 
@@ -135,11 +136,9 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 	gs := grpc.NewServer()
 	server.RegisterWorkflowServiceServer(gs, server.NewGRPCServer(engine, logger))
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
-		logger.Info("shutdown signal received; draining gRPC server", "grace", shutdownGracePeriod)
+		logger.Info("shutdown signal received; draining servers", "grace", shutdownGracePeriod)
 		sctx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
 		defer cancel()
 		for _, srv := range httpSrvs {
@@ -168,11 +167,14 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, addr, metricsAdd
 // startHTTP runs an HTTP server in the background, logging (but not fatally
 // failing on) a listen error — a busy dashboard port must not take down an
 // otherwise healthy engine.
-func startHTTP(addr string, handler http.Handler, name string, logger *slog.Logger) *http.Server {
+func startHTTP(ctx context.Context, addr string, handler http.Handler, name string, logger *slog.Logger) *http.Server {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second, // basic slowloris guard
+		// Request contexts end on SIGTERM, so SDK long-polls return at once
+		// instead of holding Shutdown open for up to the 25 s poll window.
+		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -180,6 +182,19 @@ func startHTTP(addr string, handler http.Handler, name string, logger *slog.Logg
 		}
 	}()
 	return srv
+}
+
+// browseURL turns a listen address into a URL a person can open: ":8233" and
+// "0.0.0.0:8233" become localhost, while an explicit host is kept as-is.
+func browseURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // demoDef is the Phase-1 stand-in for "workflow code": a fixed, ordered pipeline.
