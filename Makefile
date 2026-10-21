@@ -1,7 +1,7 @@
 GOBIN   := $(shell go env GOPATH)/bin
 MODULE  := github.com/olayanju-1234/durable-workflow-engine
 
-.PHONY: all tools proto fmt fmtcheck vet build test cover run ci
+.PHONY: all tools proto fmt fmtcheck vet build test cover run cluster ci
 
 all: build
 
@@ -46,6 +46,10 @@ cover:
 # Smoke test: append + read back from a real on-disk store.
 run:
 	go run ./cmd/workflowd --demo
+
+# Three local nodes forming a Raft cluster (see scripts/cluster.sh for ports).
+cluster:
+	./scripts/cluster.sh
 
 # What CI runs.
 ci: fmtcheck vet build test

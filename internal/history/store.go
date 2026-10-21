@@ -2,10 +2,8 @@ package history
 
 import (
 	"bufio"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,28 +11,22 @@ import (
 	"sync"
 
 	"google.golang.org/protobuf/proto"
+
+	"github.com/olayanju-1234/durable-workflow-engine/internal/record"
 )
 
-// On-disk record framing, repeated once per event:
+// On-disk framing is package record's, repeated once per event:
 //
 //	[4B big-endian length N][4B big-endian CRC32C of payload][N-byte protobuf payload]
-//
-// Length-prefixing lets us read records sequentially; the CRC detects corruption.
 const (
-	lengthSize = 4
-	crcSize    = 4
-	headerSize = lengthSize + crcSize
-	// Guards against a corrupt length prefix triggering a huge allocation.
-	maxRecordSize = 64 << 20
+	headerSize = record.HeaderSize
 	// historyExt is the on-disk suffix for a workflow's log; the file's base name
 	// (minus this suffix) is the workflow id. ListWorkflows relies on this mapping.
 	historyExt = ".history"
 )
 
-var crcTable = crc32.MakeTable(crc32.Castagnoli)
-
 // ErrCorruptRecord is returned when a complete record's CRC fails to verify.
-var ErrCorruptRecord = errors.New("history: corrupt record (CRC mismatch)")
+var ErrCorruptRecord = record.ErrCorrupt
 
 // HistoryStore is an append-only, per-workflow event log persisted to disk. It
 // is the single source of truth for workflow state and is safe for concurrent use.
@@ -67,15 +59,11 @@ func (s *HistoryStore) Append(workflowID string, event *HistoryEvent) error {
 	if err != nil {
 		return fmt.Errorf("history: marshal event: %w", err)
 	}
-	if len(payload) > maxRecordSize {
-		return fmt.Errorf("history: event too large: %d bytes", len(payload))
-	}
-
 	// One buffer, one write call to keep the torn-write window as small as possible.
-	record := make([]byte, headerSize+len(payload))
-	binary.BigEndian.PutUint32(record[0:lengthSize], uint32(len(payload)))
-	binary.BigEndian.PutUint32(record[lengthSize:headerSize], crc32.Checksum(payload, crcTable))
-	copy(record[headerSize:], payload)
+	rec, err := record.Encode(payload)
+	if err != nil {
+		return fmt.Errorf("history: %w", err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -86,7 +74,7 @@ func (s *HistoryStore) Append(workflowID string, event *HistoryEvent) error {
 	}
 	// os.File.Write errors whenever it writes short, so err alone catches a torn
 	// record. Dropping the handle makes the next Append reopen and truncate it.
-	if _, err := s.writeFile(f, record); err != nil {
+	if _, err := s.writeFile(f, rec); err != nil {
 		s.releaseLocked(workflowID)
 		return fmt.Errorf("history: write record: %w", err)
 	}
@@ -119,7 +107,7 @@ func (s *HistoryStore) ReadAll(workflowID string) ([]*HistoryEvent, error) {
 	defer f.Close()
 
 	var events []*HistoryEvent
-	if _, err := scanRecords(bufio.NewReader(f), func(payload []byte) error {
+	if _, err := record.Scan(bufio.NewReader(f), func(payload []byte) error {
 		event := &HistoryEvent{}
 		if err := proto.Unmarshal(payload, event); err != nil {
 			return fmt.Errorf("history: unmarshal record %d: %w", len(events), err)
@@ -130,49 +118,6 @@ func (s *HistoryStore) ReadAll(workflowID string) ([]*HistoryEvent, error) {
 		return nil, err
 	}
 	return events, nil
-}
-
-// scanRecords reads length+CRC framed records from r in order, calling emit with
-// each valid record's payload, and returns the byte offset just past the last
-// valid record — the clean end of the log.
-//
-// A torn trailing record (a partial header or payload, i.e. a crash mid-append)
-// ends the scan without error: that record never committed. A CRC mismatch or an
-// over-large length on an otherwise complete record is a hard error, because that
-// is corruption in the body of the log, not an interrupted write at its tail.
-func scanRecords(r *bufio.Reader, emit func(payload []byte) error) (int64, error) {
-	var offset int64
-	for {
-		var header [headerSize]byte
-		if _, err := io.ReadFull(r, header[:]); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return offset, nil // clean EOF or torn header -> end of usable log
-			}
-			return offset, fmt.Errorf("history: read header: %w", err)
-		}
-		length := binary.BigEndian.Uint32(header[0:lengthSize])
-		wantCRC := binary.BigEndian.Uint32(header[lengthSize:headerSize])
-		if length > maxRecordSize {
-			return offset, fmt.Errorf("history: record at offset %d length %d exceeds max", offset, length)
-		}
-
-		payload := make([]byte, length)
-		if _, err := io.ReadFull(r, payload); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return offset, nil // torn payload -> last record never committed
-			}
-			return offset, fmt.Errorf("history: read payload: %w", err)
-		}
-		if crc32.Checksum(payload, crcTable) != wantCRC {
-			return offset, fmt.Errorf("history: record at offset %d: %w", offset, ErrCorruptRecord)
-		}
-		if emit != nil {
-			if err := emit(payload); err != nil {
-				return offset, err
-			}
-		}
-		offset += headerSize + int64(length)
-	}
 }
 
 // Close flushes and closes all open file handles. The store must not be used afterward.
@@ -279,7 +224,7 @@ func recoverTornTail(f *os.File) error {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("history: seek for recovery: %w", err)
 	}
-	cleanEnd, err := scanRecords(bufio.NewReader(f), nil)
+	cleanEnd, err := record.Scan(bufio.NewReader(f), nil)
 	if err != nil {
 		return err
 	}

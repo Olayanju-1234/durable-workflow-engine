@@ -5,6 +5,63 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 18: Raft, part 1 (leader election)
+
+Phase 4 restarted in a side session that runs all four Raft weeks, one PR each.
+Week 11 is PR #9.
+
+**Done:**
+- `internal/record`: the `[len][CRC32C][payload]` framing moved out of
+  `internal/history` so the Raft files can share it. History keeps `headerSize`
+  and `ErrCorruptRecord`; the on-disk format and every history test are unchanged.
+- `proto/raft.proto` reshaped: one one-way RPC, `Send(Envelope)`, where every
+  request and every response is its own message. `PersistentState` became
+  `HardState` (term + vote); the log gets its own file in Week 12.
+- `internal/raft` core (`core.go`): a deterministic state machine (tick / step ->
+  `Ready{HardState, Messages}` -> advance). Randomized election timeouts in
+  [electionTick, 2x), RequestVote with the up-to-date log check, one vote per
+  term, heartbeats, the higher-term-wins rule, CheckQuorum (a leader that can't
+  hear a majority steps down) and paper §6 vote suppression (a follower that
+  heard a live leader within the minimum timeout ignores vote requests).
+- `Node` (driver): one goroutine owns the core and persists each Ready's hard
+  state (atomic temp + fsync + rename + dir fsync) before sending its messages. A
+  failed persist stops the node (fail-stop). `GRPCTransport`: one goroutine and a
+  1024-message drop-when-full queue per peer, reconnect backoff capped at 1 s.
+- `workflowd --serve --node-id --peers [--raft-addr] [--raft-tick]` runs a cluster
+  member. **Raft only for now**: no workflow API in cluster mode until Week 14;
+  `/api/health` reports role/term/leader. `make cluster` (`scripts/cluster.sh`)
+  starts n1–n3 on localhost.
+- Tests: simulated in-memory cluster (`sim_test.go`, seeded, no clock/goroutines)
+  with a safety checker; scenario tests (one leader, stability, re-election,
+  partitioned leader steps down, split vote); core-rule tests (up-to-date log,
+  one vote per term, lease suppression, term rules); 200 random chaos schedules
+  (reorder/drop/duplicate/crash/partition) checking election safety plus
+  liveness after healing; `TestForgottenVoteElectsTwoLeaders` (permanent teeth
+  test); hard-state storage tests; a real 3-node gRPC cluster over loopback
+  (elect, stop leader, fail over, restart from disk).
+- Teeth-verified by hand: removing the up-to-date check, CheckQuorum, vote
+  suppression, the one-vote rule, or the stale-term rule each fails a test.
+
+**Live smoke test:** `make cluster` elected n1 in term 1; SIGKILL on n1 gave n2
+leadership in term 2 about 1.06 s later; n1 restarted with term 1 / vote n1 from
+disk and followed n2.
+
+**Next:** Week 12, log replication (AppendEntries with entries, commit on
+majority, conflict repair, durable log file).
+
+**Gotchas:**
+- gRPC's default reconnect backoff grows to 2 minutes; Raft needs peers heard
+  within an election timeout, so the transport caps it at 1 s.
+- Go randomizes map iteration. The core keeps peers in a sorted slice and never
+  iterates a map where order is observable, or seeded runs would not replay.
+- A partitioned node that rejoins with a higher term still costs one election
+  (its reply to a heartbeat carries the higher term). PreVote would fix it;
+  deferred.
+- The randomized test with a 10-tick election timeout saw under 2 elections per
+  run; 3 ticks gives about 9. Measure coverage, not just pass/fail.
+
+---
+
 ## 2026-10-21 — Session 17: Drop the append handle when a write fails
 
 Side session to close the torn-write bug found in Session 16. PR #7, merged and
