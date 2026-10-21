@@ -258,8 +258,8 @@ func (c *core) tickLeader() {
 	c.heartbeatElapsed++
 	if c.heartbeatElapsed >= c.heartbeatTick {
 		c.heartbeatElapsed = 0
-		// A heartbeat carries whatever each follower is still missing, so it is
-		// also how lost messages get re-sent.
+		// A heartbeat carries any entries not yet sent, and its prev entry lets a
+		// follower that lost a message say so (by rejecting it).
 		c.broadcastAppend()
 	}
 }

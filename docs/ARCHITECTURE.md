@@ -100,7 +100,10 @@ majority steps down) and §6 vote suppression. Durable Raft state lives in
 
 Replication: the leader appends proposals to its log and sends each follower
 what it is missing in `AppendEntries`, guarded by the prevLogIndex/prevLogTerm
-check (followers truncate only at a real conflict). An entry commits once a
+check (followers truncate only at a real conflict). Sending is pipelined with
+flow control: the leader moves a follower's `next` past what it sent (a lost
+message shows up as a rejection of the next one) and keeps at most 1024
+unacknowledged entries in flight per follower. An entry commits once a
 majority holds it on disk, counting only entries from the leader's own term; a
 new leader therefore opens its term with an empty entry. Each node's `Node`
 persists (hard state, then entries) before sending, and applies committed

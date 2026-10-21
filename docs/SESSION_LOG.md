@@ -51,6 +51,17 @@ Week 14 of Phase 4, PR #12. Week 13 (PR #11) merged as `3998bc7` and deployed
   across a leader kill. Full suite stable 6/6 runs in parallel under `-race`.
 - Mutation-verified: no barrier, never stopping the engine, skipping Recover, no
   event-id fence, ignoring rejections, leasing to a departed poller.
+- Raft fix found only on CI: commits on a new leader took ~1 s each. Each
+  heartbeat re-sent all unacknowledged entries and each lagging ack triggered
+  another send; on a loaded runner the duplicates snowballed until the 1024-slot
+  peer queue was full (960 ms ≈ 1024 × 0.94 ms). Now pipelined: `next` advances
+  past what was sent, a lost message is detected by the follower's rejection of
+  the next one (per-peer delivery is FIFO), a 1024-entry in-flight window, and a
+  256-slot peer queue. `TestHeartbeatsDoNotResendInflightEntries` (sent 11 times
+  in 10 heartbeats before the fix) and `TestLostPipelinedEntryIsResent`.
+- Diagnostics: Raft warns on slow commits (with per-follower progress), slow
+  persist-and-send rounds and slow peer sends; failing chaos tests SIGQUIT the
+  nodes and print workflowd goroutine stacks.
 
 **Live check:** `make cluster`: follower `503` with `X-Workflowd-Leader`; leader
 SIGKILLed during an OrderSaga's durable timer; the new leader served 1.2 s later
@@ -70,7 +81,9 @@ import, chunked snapshots, a cluster section in `web/site/docs.html`.
   lock. The 100-workflow test submits from 4 clients; 100 simultaneous submissions
   on a shared laptop disk queued completions past the 30 s lease.
 - The chaos test's failures under parallel load were (1) the departed-poller bug,
-  (2) 200 ms election timeouts in the in-process/gRPC tests (now 500 ms–1 s).
+  (2) 200 ms election timeouts in the in-process/gRPC tests (now 500 ms–1 s),
+  (3) on CI only, the duplicate-message snowball above. Reproduce slow-machine
+  bugs with data from the failing machine (logs, goroutine dumps), not guesses.
 - Chaos node processes call `raft.UnsafeDisableFsyncForTests()`: they kill
   processes, not machines, so the page cache survives. Never call it elsewhere.
 - `go test -run` in a re-exec'd child must target only the helper test, or the

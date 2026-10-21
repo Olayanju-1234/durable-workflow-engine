@@ -178,6 +178,54 @@ leader died, so the new leader ran it again. In the history, each step still
 appears exactly once. Activities must be idempotent, in a cluster just as on one
 node.
 
+## The bug only CI could see: a message snowball
+
+With all of that green locally, the pull request's CI run failed: after the
+leader was killed, the new leader committed **one entry per second**, every
+time, for four minutes. It never happened on my laptop, even with CPU limits.
+
+I added warnings for slow commits (with each follower's replication progress),
+slow disk rounds and slow peer sends, and had the chaos test dump every node's
+goroutine stacks when it fails. The next failing run said: commits take about
+960 ms, the follower is fully caught up, the leader's Raft goroutines are idle,
+and no single send is slow.
+
+The number gave it away: 960 ms is almost exactly **1024 × 0.94 ms**. The queue
+of messages waiting for that follower (1024 slots) was full, and every new
+message waited behind a thousand older ones.
+
+Why was it full? Two behaviours that are each reasonable on their own:
+
+1. Every heartbeat re-sent all the entries the follower hadn't acknowledged yet
+   (that's how lost messages used to get re-sent).
+2. Every acknowledgement that still showed the follower behind triggered
+   another send.
+
+On a busy CI runner, acknowledgements started arriving later than one
+heartbeat. Then each heartbeat sent the same entries again, each copy drew its
+own acknowledgement, each acknowledgement drew another send... a snowball,
+until the queue was full and stayed full.
+
+The fix is what production Raft implementations do, called **pipelining with
+flow control**:
+
+- After sending entries to a follower, the leader optimistically moves that
+  follower's `next` past them, so heartbeats stop re-sending them.
+- If a message is lost, the follower notices on the *next* message (its
+  consistency check fails, because the previous entry is missing) and rejects
+  it, and the leader backs up. Messages to one peer arrive in order, so a
+  rejection can't be one message overtaking another.
+- A window (1024 entries) caps how far ahead of a follower's acknowledgements
+  the leader may get, and the per-peer queue shrank to 256 so a slow peer adds
+  less latency.
+
+`TestHeartbeatsDoNotResendInflightEntries` pins it: one proposal and ten
+heartbeats must send the new entry to each follower exactly once. Before the
+fix, it was sent 11 times.
+
+Node analogy: a retry loop without backoff. Every timeout fires another
+request; a slow server makes more timeouts; more requests make it slower.
+
 ## A bug the chaos test found that had nothing to do with Raft
 
 Running the full test suite (every package in parallel, so the machine is busy),
