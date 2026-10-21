@@ -326,6 +326,31 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 	}
 }
 
+// CommandFromDecision is the inverse of decisionFromCommand: what a Go SDK
+// worker sends back for a decision its replay produced. A noop is a nil command.
+func CommandFromDecision(d state.Decision) *WorkflowCommand {
+	switch d.Type {
+	case state.DecideScheduleStep:
+		return &WorkflowCommand{Command: &WorkflowCommand_ScheduleActivity{ScheduleActivity: &ScheduleActivityCommand{
+			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input,
+		}}}
+	case state.DecideStartTimer:
+		return &WorkflowCommand{Command: &WorkflowCommand_StartTimer{StartTimer: &StartTimerCommand{
+			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, DelayMs: d.Delay.Milliseconds(),
+		}}}
+	case state.DecideAwaitSignal:
+		return &WorkflowCommand{Command: &WorkflowCommand_AwaitSignal{AwaitSignal: &AwaitSignalCommand{
+			StepName: d.StepName, Sequence: d.Sequence, SignalName: d.Signal, Input: d.Input,
+		}}}
+	case state.DecideCompleteWorkflow:
+		return &WorkflowCommand{Command: &WorkflowCommand_CompleteWorkflow{CompleteWorkflow: &CompleteWorkflowCommand{Output: d.Output}}}
+	case state.DecideFailWorkflow:
+		return &WorkflowCommand{Command: &WorkflowCommand_FailWorkflow{FailWorkflow: &FailWorkflowCommand{Error: d.Error}}}
+	default:
+		return nil
+	}
+}
+
 // validateDecision rejects a malformed command before it reaches the log. The
 // engine must never trust an SDK to number its own steps correctly: a bad
 // sequence would produce a history that Reconstruct later refuses to read,

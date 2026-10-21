@@ -154,12 +154,6 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		tail.Sequence != le.sequence || tail.Name != le.stepName || tail.Status != state.StepScheduled {
 		return
 	}
-	planner, ok := e.planners[st.WorkflowType]
-	if !ok {
-		e.log.Warn("lease expired for unregistered type", "workflow_id", tm.WorkflowID, "type", st.WorkflowType)
-		return
-	}
-
 	failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 		StepFailed: &history.StepFailedEvent{
 			StepName: le.stepName, Sequence: le.sequence,
@@ -187,5 +181,5 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		e.scheduleRetryLocked(tm.WorkflowID, tail, policy.backoff(tail.Attempts))
 		return
 	}
-	e.advanceOrRetry(tm, tm.WorkflowID, planner)
+	e.advanceOrRetry(tm, tm.WorkflowID, st.WorkflowType)
 }

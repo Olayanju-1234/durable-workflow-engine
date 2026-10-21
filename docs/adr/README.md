@@ -10,6 +10,7 @@ that supersedes the old one.
 | [0002](0002-protobuf-events.md) | Protocol Buffers for events and the gRPC API | Accepted |
 | [0003](0003-single-binary-embedded.md) | Single-binary, zero-dependency, embeddable engine | Accepted |
 | [0004](0004-replicated-history-leader-only-engine.md) | Replicate history through Raft; run the engine on the leader only | Accepted |
+| [0005](0005-public-go-sdk.md) | The public Go SDK: workflow, client, worker, embedded | Accepted |
 
 ## Template
 

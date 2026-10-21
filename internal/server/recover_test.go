@@ -183,22 +183,53 @@ func TestRecoverSkipsTerminalWorkflow(t *testing.T) {
 	assertNothingQueued(t, e)
 }
 
-// TestRecoverSkipsUnregisteredType: a WAITING workflow whose type isn't registered
-// on this node can't be driven, so Recover leaves it on disk and enqueues nothing
-// rather than failing startup for every other workflow.
-func TestRecoverSkipsUnregisteredType(t *testing.T) {
+// TestRecoverResumesStepsOfUnregisteredType: SDK workers register their types
+// only after the engine has recovered, so in-flight steps must resume without a
+// planner: the activity is re-enqueued and an overdue timer fires. Registering
+// the type then resumes the decisions.
+func TestRecoverResumesStepsOfUnregisteredType(t *testing.T) {
 	dir := t.TempDir()
-	const wfID = "wf-unknown"
-
 	pre := newTestEngine(t, dir) // nothing registered
-	writeHistory(t, pre.store, wfID,
-		startedEv(wfID, "Ghost", nil),
-		scheduledEv("vanish", 1, nil),
+	writeHistory(t, pre.store, "wf-activity",
+		startedEv("wf-activity", "Remote", nil),
+		scheduledEv("charge", 1, nil),
+	)
+	writeHistory(t, pre.store, "wf-timer",
+		startedEv("wf-timer", "Remote", nil),
+		&history.HistoryEvent{Attributes: &history.HistoryEvent_TimerStarted{
+			TimerStarted: &history.TimerStartedEvent{StepName: "wait", Sequence: 1, FireAt: time.Now().Add(-time.Second).UnixNano()},
+		}},
 	)
 
 	e := newTestEngine(t, dir) // still nothing registered
 	if err := e.Recover(); err != nil {
 		t.Fatalf("recover must not fail on an unregistered type: %v", err)
 	}
-	assertNothingQueued(t, e)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	task, err := e.PollTask(ctx, "w", "charge")
+	if err != nil || task.GetWorkflowId() != "wf-activity" {
+		t.Fatalf("in-flight activity not re-enqueued: %v %v", task, err)
+	}
+	for {
+		evs, err := e.store.ReadAll("wf-timer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(evs) == 3 && evs[2].GetTimerFired() != nil {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("overdue timer never fired; history has %d events", len(evs))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := e.RegisterWorkflowTypes([]string{"Remote"}, "sdk", "test"); err != nil {
+		t.Fatal(err)
+	}
+	wt, err := e.PollWorkflowTask(ctx, "sdk", []string{"Remote"})
+	if err != nil || wt.GetWorkflowId() != "wf-timer" {
+		t.Fatalf("registration did not resume the fired timer's workflow: %v %v", wt, err)
+	}
 }
