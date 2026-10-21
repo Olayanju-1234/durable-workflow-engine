@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -202,6 +203,9 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 		cc.start(id)
 	}
 	t.Cleanup(func() {
+		if t.Failed() {
+			cc.dumpStacks()
+		}
 		for _, n := range cc.nodes {
 			cc.kill(n.id)
 			n.conn.Close()
@@ -225,6 +229,41 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 		}
 	})
 	return cc
+}
+
+// dumpStacks asks every running node to print all its goroutines (SIGQUIT),
+// then logs the ones in workflowd's own packages: where a stuck or slow
+// cluster is actually waiting.
+func (cc *chaosCluster) dumpStacks() {
+	for _, id := range cc.ids {
+		cc.mu.Lock()
+		n := cc.nodes[id]
+		cmd, exited := n.cmd, n.exited
+		n.cmd = nil
+		cc.mu.Unlock()
+		if cmd == nil {
+			continue
+		}
+		_ = cmd.Process.Signal(syscall.SIGQUIT)
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-exited
+		}
+		data, _ := os.ReadFile(n.logPath)
+		_, dump, ok := strings.Cut(string(data), "SIGQUIT")
+		if !ok {
+			continue
+		}
+		var keep []string
+		for _, g := range strings.Split(dump, "\n\n") {
+			if strings.Contains(g, "durable-workflow-engine/internal/") && !strings.Contains(g, "chaos_test") {
+				keep = append(keep, g)
+			}
+		}
+		cc.t.Logf("--- %s goroutines in workflowd packages (%d) ---\n%s", id, len(keep), strings.Join(keep, "\n\n"))
+	}
 }
 
 func (cc *chaosCluster) start(id string) {

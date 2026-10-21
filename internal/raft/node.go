@@ -23,8 +23,8 @@ const (
 	// slowCommit and slowFlush are the thresholds above which a commit or a
 	// persist-and-send round is logged as a warning: a sign of a slow disk, an
 	// overloaded node, or a follower that can't keep up.
-	slowCommit = time.Second
-	slowFlush  = 500 * time.Millisecond
+	slowCommit = 500 * time.Millisecond
+	slowFlush  = 200 * time.Millisecond
 )
 
 var (
