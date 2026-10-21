@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +11,8 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/proto"
+
+	"github.com/olayanju-1234/durable-workflow-engine/internal/record"
 )
 
 // simCluster is a deterministic, in-memory Raft cluster. There is no clock, no
@@ -31,8 +35,9 @@ type simCluster struct {
 
 	// forgetVotes simulates a node that does not persist its vote: on restart
 	// it comes back with its term but no record of who it voted for. Only the
-	// teeth tests set it.
+	// teeth tests set it, as they do knobs.
 	forgetVotes bool
+	knobs       testingKnobs
 
 	checker *safetyChecker
 }
@@ -41,7 +46,43 @@ type simCluster struct {
 // else in the core does not.
 type simDisk struct {
 	hardState *HardState
-	entries   []*LogEntry
+	snapshot  *Snapshot
+	entries   []*LogEntry // the entries after snapshot
+}
+
+func (d *simDisk) base() uint64 {
+	if d.snapshot == nil {
+		return 0
+	}
+	return d.snapshot.Index
+}
+
+// encodeApplied serializes a simulated state machine (the list of entries it
+// applied) as snapshot data, using the same record framing as everything else.
+func encodeApplied(ents []*LogEntry) []byte {
+	var out []byte
+	for _, e := range ents {
+		payload, _ := proto.Marshal(e)
+		rec, _ := record.Encode(payload)
+		out = append(out, rec...)
+	}
+	return out
+}
+
+func decodeApplied(data []byte) []*LogEntry {
+	var out []*LogEntry
+	_, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), func(p []byte) error {
+		e := &LogEntry{}
+		if err := proto.Unmarshal(p, e); err != nil {
+			return err
+		}
+		out = append(out, e)
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	return out
 }
 
 func newSimCluster(t testing.TB, n int, seed uint64) *simCluster {
@@ -89,12 +130,17 @@ func (s *simCluster) start(id string) {
 		heartbeatTick: s.heartbeatTick,
 		rand:          rand.New(rand.NewPCG(s.rand.Uint64(), s.rand.Uint64())),
 		logger:        s.logger,
-	}, persistedState{hardState: hs, entries: slices.Clone(d.entries)})
+		knobs:         s.knobs,
+	}, persistedState{hardState: hs, snapshot: d.snapshot, entries: slices.Clone(d.entries)})
 	if err != nil {
 		s.t.Fatalf("start %s: %v", id, err)
 	}
 	s.cores[id] = c
-	s.applied[id] = nil // the state machine is rebuilt by re-applying the log
+	s.applied[id] = nil // rebuilt from the snapshot, then by re-applying the log
+	if d.snapshot != nil {
+		s.restoreSM(id, d.snapshot)
+	}
+	s.checker.restarted(id, c)
 	delete(s.down, id)
 }
 
@@ -108,11 +154,17 @@ func (s *simCluster) flush(id string) {
 		if rd.HardState != nil {
 			d.hardState = proto.Clone(rd.HardState).(*HardState)
 		}
+		if rd.Snapshot != nil {
+			d.snapshot, d.entries = rd.Snapshot, nil
+		}
 		if len(rd.Entries) > 0 {
 			first := rd.Entries[0].GetIndex()
-			d.entries = append(d.entries[:first-1], rd.Entries...)
+			d.entries = append(d.entries[:first-d.base()-1], rd.Entries...)
 		}
 		s.inflight = append(s.inflight, rd.Messages...)
+		if rd.Snapshot != nil {
+			s.restoreSM(id, rd.Snapshot)
+		}
 		for _, e := range rd.CommittedEntries {
 			s.applied[id] = append(s.applied[id], e)
 			s.checker.applied(id, e)
@@ -120,6 +172,30 @@ func (s *simCluster) flush(id string) {
 		c.advance(rd)
 	}
 	s.checker.observe(s)
+}
+
+// restoreSM replaces a node's state machine with a snapshot's contents. Every
+// entry in it must agree with what other nodes applied (State Machine Safety).
+func (s *simCluster) restoreSM(id string, snap *Snapshot) {
+	s.applied[id] = decodeApplied(snap.Data)
+	for _, e := range s.applied[id] {
+		s.checker.applied(id, e)
+	}
+}
+
+// snapshot has a node snapshot its state machine at everything applied so
+// far and compact its log, as Node does once enough entries pile up.
+func (s *simCluster) snapshot(id string) {
+	c, d := s.cores[id], s.disk[id]
+	idx := c.log.handedOut
+	if s.down[id] || idx <= c.log.offset {
+		return
+	}
+	term, _ := c.log.term(idx)
+	snap := &Snapshot{Index: idx, Term: term, Data: encodeApplied(s.applied[id])}
+	d.entries = slices.Clone(d.entries[idx-d.base():])
+	d.snapshot = snap
+	c.compact(snap)
 }
 
 // propose submits data on the current leader and returns its index.
@@ -293,17 +369,126 @@ func (s *simCluster) dump() string {
 	return out
 }
 
-// safetyChecker watches a simCluster and records every violation of a Raft
-// safety property it can see. It records rather than failing at once so the
-// teeth tests can assert that a deliberately broken cluster IS caught.
+// safetyChecker watches a simCluster and records every violation it sees of
+// the five properties Raft guarantees (paper Figure 3). It records rather than
+// failing at once, so the teeth tests can assert that a deliberately broken
+// core IS caught.
 type safetyChecker struct {
-	leaderOf   map[uint64]string    // term -> the node that led it
-	appliedAt  map[uint64]*LogEntry // index -> the entry the first node applied there
-	violations []string
+	leaderOf    map[uint64]string     // term -> the node that led it
+	appliedAt   map[uint64]*LogEntry  // index -> what the first node applied there
+	committedAt map[uint64]*LogEntry  // index -> what the first node committed there
+	seenCommit  map[string]uint64     // node -> commit index already recorded
+	leaderLog   map[string]leaderView // node -> its log as last seen while leading
+	violations  []string
+}
+
+// leaderView is a copy of a leader's log, taken while it led term.
+type leaderView struct {
+	term    uint64
+	entries []*LogEntry
 }
 
 func newSafetyChecker() *safetyChecker {
-	return &safetyChecker{leaderOf: make(map[uint64]string), appliedAt: make(map[uint64]*LogEntry)}
+	return &safetyChecker{
+		leaderOf:    make(map[uint64]string),
+		appliedAt:   make(map[uint64]*LogEntry),
+		committedAt: make(map[uint64]*LogEntry),
+		seenCommit:  make(map[string]uint64),
+		leaderLog:   make(map[string]leaderView),
+	}
+}
+
+func (k *safetyChecker) violate(format string, args ...any) {
+	for i, a := range args {
+		if e, ok := a.(*LogEntry); ok {
+			args[i] = describe(e)
+		}
+	}
+	k.violations = append(k.violations, fmt.Sprintf(format, args...))
+}
+
+// describe prints an entry compactly: a payload can be megabytes.
+func describe(e *LogEntry) string {
+	if e == nil {
+		return "<none>"
+	}
+	data := e.GetData()
+	if len(data) > 16 {
+		return fmt.Sprintf("{%d@t%d %q… (%d bytes)}", e.GetIndex(), e.GetTerm(), data[:16], len(data))
+	}
+	return fmt.Sprintf("{%d@t%d %q}", e.GetIndex(), e.GetTerm(), data)
+}
+
+// restarted forgets a node's volatile history: its commit index starts over.
+func (k *safetyChecker) restarted(id string, c *core) {
+	k.seenCommit[id] = c.log.committed
+	delete(k.leaderLog, id)
+}
+
+// entryAt returns the entry a core's log holds at index i, or nil.
+func entryAt(c *core, i uint64) *LogEntry {
+	if i <= c.log.offset || i > c.log.lastIndex() {
+		return nil
+	}
+	return c.log.entries[i-c.log.offset-1]
+}
+
+func (k *safetyChecker) observe(s *simCluster) {
+	for _, id := range s.ids {
+		if s.down[id] {
+			continue
+		}
+		c := s.cores[id]
+		k.recordCommits(id, c)
+		if c.role != Leader {
+			delete(k.leaderLog, id)
+			continue
+		}
+
+		// Election Safety: at most one leader can be elected in a given term.
+		if prev, ok := k.leaderOf[c.term]; ok && prev != id {
+			k.violate("election safety: %s and %s both led term %d", prev, id, c.term)
+		}
+		k.leaderOf[c.term] = id
+
+		view, ok := k.leaderLog[id]
+		if ok && view.term == c.term {
+			// Leader Append-Only: a leader never overwrites or deletes entries in
+			// its log; it only appends.
+			for _, e := range view.entries {
+				if e.GetIndex() > c.log.offset && !proto.Equal(entryAt(c, e.GetIndex()), e) {
+					k.violate("leader append-only: leader %s of term %d changed index %d from %v to %v",
+						id, c.term, e.GetIndex(), e, entryAt(c, e.GetIndex()))
+					break
+				}
+			}
+		} else {
+			// Leader Completeness: a leader holds every entry committed before
+			// its term. Checked the moment it is first seen leading.
+			for i, e := range k.committedAt {
+				if i > c.log.offset && !proto.Equal(entryAt(c, i), e) {
+					k.violate("leader completeness: %s leads term %d without committed entry %v (has %v)",
+						id, c.term, e, entryAt(c, i))
+					break
+				}
+			}
+		}
+		k.leaderLog[id] = leaderView{term: c.term, entries: slices.Clone(c.log.entries)}
+	}
+}
+
+// recordCommits notes every entry a node newly counts as committed. Two nodes
+// committing different entries at one index is already a safety failure.
+func (k *safetyChecker) recordCommits(id string, c *core) {
+	for i := max(k.seenCommit[id], c.log.offset) + 1; i <= c.log.committed; i++ {
+		e := entryAt(c, i)
+		if prev, ok := k.committedAt[i]; ok && !proto.Equal(prev, e) {
+			k.violate("state machine safety: %s committed %v at index %d, another node committed %v", id, e, i, prev)
+			continue
+		}
+		k.committedAt[i] = e
+	}
+	k.seenCommit[id] = c.log.committed
 }
 
 // applied checks State Machine Safety: once any node applies an entry at an
@@ -317,21 +502,34 @@ func (k *safetyChecker) applied(id string, e *LogEntry) {
 	k.appliedAt[e.GetIndex()] = e
 }
 
-func (k *safetyChecker) violate(format string, args ...any) {
-	k.violations = append(k.violations, fmt.Sprintf(format, args...))
-}
-
-func (k *safetyChecker) observe(s *simCluster) {
-	// Election Safety: at most one leader can be elected in a given term.
-	for _, id := range s.ids {
-		c := s.cores[id]
-		if s.down[id] || c.role != Leader {
-			continue
+// checkLogMatching verifies Log Matching across every pair of running nodes:
+// if two logs hold an entry with the same index and term, they are identical
+// in every entry up to that index. It is O(nodes² × log), so callers run it
+// periodically rather than on every message.
+func (k *safetyChecker) checkLogMatching(s *simCluster) {
+	for i, a := range s.ids {
+		for _, b := range s.ids[i+1:] {
+			if s.down[a] || s.down[b] {
+				continue
+			}
+			ca, cb := s.cores[a], s.cores[b]
+			lo := max(ca.log.offset, cb.log.offset) + 1
+			hi := min(ca.log.lastIndex(), cb.log.lastIndex())
+			top := uint64(0) // highest index where both hold the same term
+			for j := hi; j >= lo && j > 0; j-- {
+				if entryAt(ca, j).GetTerm() == entryAt(cb, j).GetTerm() {
+					top = j
+					break
+				}
+			}
+			for j := lo; j <= top; j++ {
+				if !proto.Equal(entryAt(ca, j), entryAt(cb, j)) {
+					k.violate("log matching: %s and %s agree at index %d but differ at %d (%v vs %v)",
+						a, b, top, j, entryAt(ca, j), entryAt(cb, j))
+					return
+				}
+			}
 		}
-		if prev, ok := k.leaderOf[c.term]; ok && prev != id {
-			k.violate("election safety: %s and %s both led term %d", prev, id, c.term)
-		}
-		k.leaderOf[c.term] = id
 	}
 }
 

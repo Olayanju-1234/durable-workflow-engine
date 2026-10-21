@@ -19,6 +19,9 @@ const (
 	hardStateFile = "hardstate"
 	// logFile holds the log, one CRC-framed LogEntry per record, in index order.
 	logFile = "log"
+	// snapshotFile holds the latest snapshot: a SnapshotMeta record, then the
+	// state machine's data as a second record.
+	snapshotFile = "snapshot"
 )
 
 // DiskStorage keeps a node's Raft state durable in one directory, using the
@@ -43,9 +46,13 @@ func OpenDiskStorage(dir string) (*DiskStorage, error) {
 
 // load reads everything a restarting node needs and opens the log for
 // appending. A brand-new directory yields the zero state: term 0, no vote,
-// empty log.
+// no snapshot, empty log.
 func (s *DiskStorage) load() (persistedState, error) {
 	hs, err := s.loadHardState()
+	if err != nil {
+		return persistedState{}, err
+	}
+	snap, err := s.loadSnapshot()
 	if err != nil {
 		return persistedState{}, err
 	}
@@ -53,10 +60,37 @@ func (s *DiskStorage) load() (persistedState, error) {
 	if err != nil {
 		return persistedState{}, err
 	}
-	if len(ents) > 0 && ents[0].GetIndex() != 1 {
-		return persistedState{}, fmt.Errorf("raft: log starts at index %d, want 1", ents[0].GetIndex())
+	if snap == nil {
+		if len(ents) > 0 && ents[0].GetIndex() != 1 {
+			return persistedState{}, fmt.Errorf("raft: log starts at index %d with no snapshot before it", ents[0].GetIndex())
+		}
+		return persistedState{hardState: hs, entries: ents}, nil
 	}
-	return persistedState{hardState: hs, entries: ents}, nil
+	ents, err = s.entriesAfter(snap, ents)
+	if err != nil {
+		return persistedState{}, err
+	}
+	return persistedState{hardState: hs, snapshot: snap, entries: ents}, nil
+}
+
+// entriesAfter returns the logged entries that continue snap. The snapshot is
+// always written before the log is compacted or reset, so after a crash the
+// log may still hold entries the snapshot covers (dropped here, and from the
+// file at the next compaction) or, mid-install, entries that don't follow the
+// snapshot at all (the whole file is reset).
+func (s *DiskStorage) entriesAfter(snap *Snapshot, ents []*LogEntry) ([]*LogEntry, error) {
+	if len(ents) > 0 && ents[0].GetIndex() == snap.Index+1 {
+		return ents, nil // already compacted
+	}
+	if len(ents) > 0 && ents[0].GetIndex() > snap.Index+1 {
+		return nil, fmt.Errorf("raft: log starts at index %d, after a snapshot ending at %d", ents[0].GetIndex(), snap.Index)
+	}
+	if len(ents) > 0 && ents[len(ents)-1].GetIndex() >= snap.Index {
+		if at := ents[snap.Index-ents[0].GetIndex()]; at.GetTerm() == snap.Term {
+			return ents[snap.Index-ents[0].GetIndex()+1:], nil
+		}
+	}
+	return nil, s.resetLog(snap.Index)
 }
 
 // Close releases the log file. The storage must not be used afterwards.
@@ -183,6 +217,93 @@ func (s *DiskStorage) appendEntries(ents []*LogEntry) error {
 	s.offsets = append(s.offsets, offsets...)
 	s.end += int64(len(buf))
 	return nil
+}
+
+// resetLog empties the log file; the next entry appended will be index+1.
+// Used after installing a snapshot that replaces the whole log.
+func (s *DiskStorage) resetLog(index uint64) error {
+	if err := s.log.Truncate(0); err != nil {
+		return fmt.Errorf("raft: reset log: %w", err)
+	}
+	if err := s.log.Sync(); err != nil {
+		return fmt.Errorf("raft: fsync reset log: %w", err)
+	}
+	s.first, s.offsets, s.end = index+1, nil, 0
+	return nil
+}
+
+// compactLog drops every entry up to and including index from the log file,
+// which a durable snapshot now covers. The file is rewritten and renamed into
+// place, so a crash leaves either the old log or the new one.
+func (s *DiskStorage) compactLog(index uint64) error {
+	if index < s.first {
+		return nil
+	}
+	keepFrom := s.end
+	if index < s.lastIndex() {
+		keepFrom = s.offsets[index+1-s.first]
+	}
+	kept := make([]byte, s.end-keepFrom)
+	if _, err := s.log.ReadAt(kept, keepFrom); err != nil {
+		return fmt.Errorf("raft: read log for compaction: %w", err)
+	}
+	if err := writeFileAtomic(s.dir, logFile, kept); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(s.dir, logFile), os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("raft: reopen compacted log: %w", err)
+	}
+	s.log.Close()
+	offsets := make([]int64, 0, s.lastIndex()-index)
+	for _, off := range s.offsets[min(index+1-s.first, uint64(len(s.offsets))):] {
+		offsets = append(offsets, off-keepFrom)
+	}
+	s.log, s.first, s.offsets, s.end = f, index+1, offsets, s.end-keepFrom
+	return nil
+}
+
+func (s *DiskStorage) loadSnapshot() (*Snapshot, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir, snapshotFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("raft: read snapshot: %w", err)
+	}
+	var payloads [][]byte
+	if _, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), func(p []byte) error {
+		payloads = append(payloads, p)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("raft: snapshot: %w", err)
+	}
+	if len(payloads) != 2 {
+		return nil, fmt.Errorf("raft: snapshot file holds %d records, want 2", len(payloads))
+	}
+	meta := &SnapshotMeta{}
+	if err := proto.Unmarshal(payloads[0], meta); err != nil {
+		return nil, fmt.Errorf("raft: decode snapshot meta: %w", err)
+	}
+	return &Snapshot{Index: meta.GetLastIncludedIndex(), Term: meta.GetLastIncludedTerm(), Data: payloads[1]}, nil
+}
+
+// saveSnapshot durably replaces the snapshot file. It must complete before the
+// log entries it covers are dropped.
+func (s *DiskStorage) saveSnapshot(snap *Snapshot) error {
+	meta, err := proto.Marshal(&SnapshotMeta{LastIncludedIndex: snap.Index, LastIncludedTerm: snap.Term})
+	if err != nil {
+		return fmt.Errorf("raft: encode snapshot meta: %w", err)
+	}
+	head, err := record.Encode(meta)
+	if err != nil {
+		return fmt.Errorf("raft: snapshot meta: %w", err)
+	}
+	body, err := record.Encode(snap.Data)
+	if err != nil {
+		return fmt.Errorf("raft: snapshot data: %w", err)
+	}
+	return writeFileAtomic(s.dir, snapshotFile, append(head, body...))
 }
 
 func (s *DiskStorage) loadHardState() (*HardState, error) {

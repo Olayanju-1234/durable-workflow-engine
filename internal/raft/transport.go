@@ -11,6 +11,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+
+	"github.com/olayanju-1234/durable-workflow-engine/internal/record"
 )
 
 const (
@@ -19,8 +21,17 @@ const (
 	// the leader re-sends whatever a follower is missing on the next heartbeat.
 	peerQueueSize = 1024
 	// sendTimeout bounds one Send call, so a hung peer can't stall the queue.
-	sendTimeout = 2 * time.Second
+	sendTimeout = 10 * time.Second
+	// maxMessageSize admits a whole snapshot in one InstallSnapshot message
+	// (gRPC's default limit is 4 MB). Snapshot data is capped by the record
+	// format at 64 MB.
+	maxMessageSize = record.MaxSize + 1<<20
 )
+
+// ServerOptions are the options a gRPC server carrying RaftService needs.
+func ServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{grpc.MaxRecvMsgSize(maxMessageSize)}
+}
 
 // GRPCTransport sends Raft messages to peers over gRPC, one Send call per
 // message. Each peer gets its own goroutine and queue, so a slow or dead peer
@@ -40,6 +51,7 @@ func NewGRPCTransport(self string, peerAddrs map[string]string, logger *slog.Log
 		}
 		conn, err := grpc.NewClient(addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(maxMessageSize)),
 			// gRPC's default reconnect backoff grows to two minutes. A peer that
 			// restarts or comes back from a partition must be heard from within an
 			// election timeout, so cap the backoff at a second.

@@ -1,6 +1,9 @@
 package raft
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // raftLog is the core's in-memory view of its log, plus three cursors into it:
 //
@@ -21,10 +24,32 @@ type raftLog struct {
 	handedOut uint64 // highest index handed to the driver to apply
 }
 
-func newRaftLog(entries []*LogEntry) *raftLog {
+// newRaftLog builds the log a node restarts with: the entries after its
+// latest snapshot (if any). Everything in a snapshot is committed and applied.
+func newRaftLog(snap *Snapshot, entries []*LogEntry) *raftLog {
 	l := &raftLog{entries: entries}
+	if snap != nil {
+		l.offset, l.offsetTerm = snap.Index, snap.Term
+		l.committed, l.handedOut = snap.Index, snap.Index
+	}
 	l.stabled = l.lastIndex() // whatever we loaded came from disk
 	return l
+}
+
+// compact drops every entry up to and including index, which a snapshot now
+// covers. The caller guarantees index has been applied.
+func (l *raftLog) compact(index, term uint64) {
+	l.entries = slices.Clone(l.entries[index-l.offset:]) // a fresh array, so the old one can be freed
+	l.offset, l.offsetTerm = index, term
+}
+
+// restore replaces the whole log with a snapshot from the leader: the log is
+// now empty and starts right after the snapshot, which counts as committed,
+// stored and applied (the driver installs it before anything later).
+func (l *raftLog) restore(index, term uint64) {
+	l.entries = nil
+	l.offset, l.offsetTerm = index, term
+	l.committed, l.stabled, l.handedOut = index, index, index
 }
 
 func (l *raftLog) lastIndex() uint64 {

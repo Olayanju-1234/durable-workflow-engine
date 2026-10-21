@@ -203,7 +203,7 @@ func TestStaleAppendDoesNotTruncate(t *testing.T) {
 }
 
 func TestConflictHintSkipsWholeTerm(t *testing.T) {
-	l := newRaftLog(logFromTerms("", figure7["f"]))
+	l := newRaftLog(nil, logFromTerms("", figure7["f"]))
 	tests := []struct {
 		prev, want uint64
 	}{
@@ -277,7 +277,22 @@ func (s *simCluster) elect(id string, voters ...string) {
 // onto a majority while leading term 3; committing it then would let n5 erase
 // an applied entry in term 4.
 func TestFigure8OldTermEntryNotCommittedByCount(t *testing.T) {
+	s := figure8(t, testingKnobs{})
+	if c := s.cores[s.ids[0]].log.committed; c >= 2 {
+		t.Errorf("n1 committed index %d by counting replicas of a term-1 entry", c)
+	}
+	s.checker.assertClean(t)
+}
+
+// figure8 replays the Figure 8 schedule with the given knobs and returns the
+// cluster once n5 has taken over in term 4.
+func figure8(t *testing.T, knobs testingKnobs) *simCluster {
+	t.Helper()
 	s := newSimCluster(t, 5, 17)
+	s.knobs = knobs
+	for _, id := range s.ids {
+		s.cores[id].knobs = knobs
+	}
 	n1, n2, n3, n4, n5 := s.ids[0], s.ids[1], s.ids[2], s.ids[3], s.ids[4]
 
 	// (a) n1 leads term 1; its opening entry (index 1) reaches everyone. Then
@@ -311,19 +326,18 @@ func TestFigure8OldTermEntryNotCommittedByCount(t *testing.T) {
 	s.flush(n1)
 	s.deliverOne(n1, n3) // X alone: n3 now holds [1, X]
 	s.deliverOne(n3, n1)
-	if c := s.cores[n1].log.committed; c >= 2 {
-		t.Errorf("n1 committed index %d by counting replicas of a term-1 entry", c)
-	}
+	s.inflight = nil
+	committed := s.cores[n1].log.committed
 
 	// (d) n1 crashes; n5 restarts and wins term 4 with n3 and n4 (its last
 	// term, 2, beats theirs), then overwrites X everywhere it can reach.
-	s.inflight = nil
 	s.crash(n1)
 	s.restart(n5)
 	s.elect(n5, n3, n4)
 	s.forgetLeader(n2, n3, n4)
 	s.run(50)
-	s.checker.assertClean(t)
+	s.cores[n1].log.committed = committed // read back by the caller
+	return s
 }
 
 // A follower may hold stale entries past what the leader just sent. The

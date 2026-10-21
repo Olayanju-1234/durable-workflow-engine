@@ -19,6 +19,8 @@ func (ch chaos) step() {
 	s := ch.s
 	r := s.rand
 	switch p := r.IntN(100); {
+	case p < 1:
+		s.snapshot(s.ids[r.IntN(len(s.ids))])
 	case p < 5:
 		ch.proposeAnywhere()
 	case p < 30:
@@ -144,10 +146,14 @@ func TestRandomizedSafety(t *testing.T) {
 	}
 	for seed := range seeds {
 		ch := newChaos(t, seed)
-		for range steps {
+		for i := range steps {
 			ch.step()
+			if i%10 == 0 {
+				ch.s.checker.checkLogMatching(ch.s)
+			}
 		}
 		ch.settle(t, seed)
+		ch.s.checker.checkLogMatching(ch.s)
 		if v := ch.s.checker.violations; len(v) > 0 {
 			t.Fatalf("seed %d: %s", seed, v[0])
 		}
