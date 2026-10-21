@@ -77,14 +77,27 @@ func newCluster(t *testing.T, n int, snapshotEvery uint64, serveGRPC bool) *test
 	if serveGRPC {
 		tc.grpcAddrs, tc.grpcServers = map[string]string{}, map[string]*grpc.Server{}
 	}
+	// Hold every listener until all ports are picked, so no two collide.
+	var held []net.Listener
+	reserve := func() string {
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, lis)
+		return lis.Addr().String()
+	}
 	base := t.TempDir()
 	for i := 1; i <= n; i++ {
 		id := fmt.Sprintf("n%d", i)
-		tc.peers[id] = freeAddr(t)
+		tc.peers[id] = reserve()
 		tc.members[id] = &member{id: id, dir: filepath.Join(base, id)}
 		if serveGRPC {
-			tc.grpcAddrs[id] = freeAddr(t)
+			tc.grpcAddrs[id] = reserve()
 		}
+	}
+	for _, lis := range held {
+		lis.Close()
 	}
 	for id := range tc.members {
 		tc.start(id)

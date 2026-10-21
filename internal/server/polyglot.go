@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -249,13 +250,19 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmd *Workflo
 		return fmt.Errorf("server: read history %s: %w", workflowID, err)
 	}
 	// The fence: the decision was computed from a snapshot of history. If a
-	// timer fired or a signal landed since, the command may be based on a stale
-	// view — reject it. Clearing the pending decision is safe here precisely
-	// because whatever advanced the history also dispatched a fresh task.
+	// signal landed since, the command may be based on a stale view, so reject
+	// it. A signal that satisfies no wait dispatches nothing, so if the
+	// workflow still needs a decision, hand out a fresh task here.
 	if int64(len(events)) != pending.historyLength {
 		delete(e.pendingDecisions, workflowID)
-		return fmt.Errorf("%w: history for %q advanced from %d to %d events while the task was outstanding",
+		stale := fmt.Errorf("%w: history for %q advanced from %d to %d events while the task was outstanding",
 			ErrStaleDecision, workflowID, pending.historyLength, len(events))
+		if st, err := state.Reconstruct(events); err == nil && st.Status == state.StatusRunning {
+			if err := e.dispatchWorkflowTaskLocked(workflowID, st.WorkflowType, events); err != nil {
+				return errors.Join(stale, err)
+			}
+		}
+		return stale
 	}
 
 	if replayError != "" {
