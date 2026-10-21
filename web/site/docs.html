@@ -49,6 +49,8 @@
     <a href="#registering">Workers &amp; clients</a>
     <a href="#workers">Activities</a>
     <a href="#retries">Retries &amp; Saga</a>
+    <a href="#parallel">Parallel steps</a>
+    <a href="#schedules">Schedules</a>
     <a href="#testing">Testing workflows</a>
     <a href="#versioning">Changing running code</a>
     <a href="#embedding">Embedding the engine</a>
@@ -229,7 +231,7 @@ result: Hello, Ada! 👋</code></pre>
         <tr><td><code>time.Sleep</code></td><td><code>ctx.Sleep(...)</code></td><td>Only a recorded timer survives a restart</td></tr>
         <tr><td><code>rand</code>, <code>uuid.New()</code></td><td><code>ctx.SideEffect(...)</code>, or generate inside an activity</td><td>New value each replay</td></tr>
         <tr><td>HTTP calls, DB queries, file I/O</td><td><code>ctx.ExecuteActivity(...)</code></td><td>Side effects would repeat on every replay</td></tr>
-        <tr><td><code>go func(){}</code>, channels</td><td>Sequential code (parallel steps are not supported yet)</td><td>Goroutine scheduling is non-deterministic</td></tr>
+        <tr><td><code>go func(){}</code>, channels</td><td><code>ctx.ExecuteActivityAsync</code>, <code>ctx.WaitAny</code> (<a href="#parallel">Parallel steps</a>)</td><td>Goroutine scheduling is non-deterministic</td></tr>
         <tr><td>Reading global mutable state</td><td>Pass data through the workflow input and step outputs</td><td>Process memory is gone after a restart</td></tr>
         <tr><td>Reordering or renaming steps in a running deployment</td><td><a href="#versioning"><code>ctx.GetVersion(...)</code></a></td><td>In-flight histories won't match the new code</td></tr>
       </tbody>
@@ -395,15 +397,21 @@ out, err := c.WaitForResult(ctx, id)     // blocks until it finishes</code></pre
 
     <h2 id="retries">Retries &amp; Saga compensation</h2>
     <p>
-      Retries are handled by the engine and are invisible to your workflow. Today a policy is
-      set on the engine, per activity step name (the daemon sets one for the demo's
-      <code>charge</code> step; setting policies from the SDK is on the backlog):
+      Retries are handled by the engine and are invisible to your workflow. Set a policy on the
+      call itself:
     </p>
-    <pre data-lang="go"><code>engine.SetRetryPolicy("charge", server.RetryPolicy{
-	MaxAttempts: 3,                      // counts the first try; 1 = no retry
-	Backoff:     200 * time.Millisecond, // doubles each attempt
-	MaxBackoff:  5 * time.Second,        // ceiling
-})</code></pre>
+    <pre data-lang="go"><code>receipt, err := ctx.ExecuteActivity("charge", order, workflow.WithRetryPolicy(workflow.RetryPolicy{
+	MaxAttempts:    3,                      // counts the first try; 1 = no retry
+	InitialBackoff: 200 * time.Millisecond, // doubles each attempt
+	MaxBackoff:     5 * time.Second,        // ceiling
+}))</code></pre>
+    <p>
+      TypeScript: <code>ctx.activity('charge', order, { retry: { maxAttempts: 3, initialBackoffMs: 200 } })</code>;
+      Python: <code>ctx.activity("charge", order, retry=RetryPolicy(max_attempts=3, initial_backoff=0.2))</code>.
+      The policy is recorded with the step, so the retries continue after a restart or a leader
+      change. An engine can also set a default per step name (<code>Engine.SetRetryPolicy</code>,
+      used by the demo); a policy on the call wins.
+    </p>
     <p>
       The default is <strong>no retry</strong> (<code>MaxAttempts: 1</code>) — a failure surfaces
       to the workflow immediately. Retries reuse the same step sequence, so a retried activity
@@ -414,6 +422,58 @@ out, err := c.WaitForResult(ctx, id)     // blocks until it finishes</code></pre
       <strong>Saga compensation needs no special machinery.</strong> Once retries are exhausted,
       the activity error is returned to your Go code, so "undo" is just an ordinary error branch
       that calls more activities, as in the <code>release-stock</code> calls in the example above.
+    </p>
+
+    <h2 id="parallel">Parallel steps</h2>
+    <p>
+      Start several steps before waiting on any of them. Every step still gets its own place in
+      history, and the engine dispatches them at once:
+    </p>
+    <pre data-lang="go"><code>stock := ctx.ExecuteActivityAsync("check-stock", order)
+price := ctx.ExecuteActivityAsync("quote-price", order)
+if _, err := stock.Get(); err != nil { ... }
+quote, err := price.Get()
+
+// A race: whichever finishes first.
+reply := ctx.WaitForSignalAsync("reply", "approved")
+deadline := ctx.NewTimer("deadline", 48*time.Hour)
+if ctx.WaitAny(reply, deadline) == 1 {
+	return nil, errors.New("no reply in time")
+}</code></pre>
+    <p>
+      <code>WaitAny</code> picks the step whose result history recorded first, not the first in
+      your argument list, so every replay makes the same choice. There is deliberately no
+      non-blocking "is it done yet?": its answer would depend on when a replay runs. A step the
+      engine is retrying has no result yet, so your code keeps waiting on it. A workflow may
+      return while steps are still running; they are abandoned.
+    </p>
+    <p>
+      TypeScript: start calls without awaiting them and use <code>Promise.all</code>, and
+      <code>ctx.waitAny([...])</code> instead of <code>Promise.race</code> (which picks by call
+      order). Python: <code>ctx.activity_async</code>, <code>ctx.sleep_async</code>,
+      <code>ctx.wait_for_signal_async</code>, then <code>ctx.wait_all</code> /
+      <code>ctx.wait_any</code>.
+    </p>
+
+    <h2 id="schedules">Schedules</h2>
+    <p>
+      A schedule starts a workflow every time a cron expression fires:
+    </p>
+    <pre data-lang="go"><code>err := c.CreateSchedule(ctx, client.Schedule{
+	ID:            "nightly-report",
+	Cron:          "0 2 * * MON-FRI", // or @hourly, @daily, "@every 15m"
+	Timezone:      "Europe/London",   // empty is UTC
+	WorkflowType:  "Report",
+	SkipIfRunning: true,              // skip a fire while the last run is still going
+})</code></pre>
+    <p>
+      Over HTTP: <code>POST /api/schedules</code>, <code>GET /api/schedules</code>,
+      <code>DELETE /api/schedules/{id}</code>. Schedules are durable and, in a cluster, fire on
+      the leader only. Each run's workflow id is <code>&lt;schedule id&gt;-&lt;fire time&gt;</code>
+      (e.g. <code>nightly-report-20261022T010000Z</code>), so a fire is never started twice, even
+      across a restart or a failover. After downtime, the latest fire missed in the last 24 hours
+      runs once. Fields: minute, hour, day of month, month, day of week, with <code>*</code>,
+      ranges, steps, lists and names; when both day fields are set, either matches.
     </p>
 
     <h2 id="testing">Testing workflows</h2>
@@ -596,13 +656,20 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
   ],
   "signals": [{"name":"approved","payload":"yes"}]
 }</code></pre>
-    <p>Replay your workflow function against <code>steps</code> in call order, then return one command:</p>
-    <pre data-lang="json"><code>{"type":"schedule_activity","step_name":"charge","sequence":2,"input":"..."}
+    <p>Replay your workflow function against <code>steps</code> in call order, then return the
+      commands it issued before it blocked: one in <code>"command"</code>, several in
+      <code>"commands": [...]</code> (parallel steps, with consecutive sequences):</p>
+    <pre data-lang="json"><code>{"type":"schedule_activity","step_name":"charge","sequence":2,"input":"...",
+ "retry_policy":{"max_attempts":3,"initial_backoff_ms":500}}
 {"type":"start_timer","step_name":"wait","sequence":3,"delay_ms":60000}
 {"type":"await_signal","step_name":"gate","sequence":4,"signal_name":"approved"}
+{"type":"record_marker","step_name":"fraud-check","sequence":5,"marker":"version","data":"1"}
 {"type":"complete_workflow","output":"..."}
 {"type":"fail_workflow","error":"..."}
 {"type":"noop"}</code></pre>
+    <p>Binary payloads travel as a <code>&lt;field&gt;_base64</code> twin; resolved steps carry
+      <code>resolved_event_id</code> for "first of" races. The full protocol is in
+      <a href="https://github.com/Olayanju-1234/durable-workflow-engine/tree/main/sdks#readme">sdks/README.md</a>.</p>
 
     <h3>How replay suspends — the one hard part</h3>
     <p>
@@ -720,7 +787,8 @@ new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORK
         <tr><td><code>PollTask</code></td><td>Long-poll for the next activity task. Returns a <code>Task</code> with a <code>lease_token</code> and <code>lease_duration_ms</code>.</td></tr>
         <tr><td><code>CompleteTask</code></td><td>Report a result. Requires the current <code>lease_token</code>; sets exactly one of <code>output</code> or <code>error</code>.</td></tr>
         <tr><td><code>Heartbeat</code></td><td>Extend a lease on a long-running task. A rejection means the lease was lost.</td></tr>
-        <tr><td><code>SignalWorkflow</code></td><td>Deliver an external event. Buffered if the workflow isn't waiting yet; rejected for unknown or terminal workflows.</td></tr>
+        <tr><td><code>SignalWorkflow</code></td><td>Deliver an external event. Buffered if the workflow isn't waiting yet; rejected for unknown or terminal workflows. An optional <code>request_id</code> makes it exactly-once: a retry with the same id is not recorded again (the Go client sets one per call).</td></tr>
+        <tr><td><code>CreateSchedule</code> / <code>DeleteSchedule</code> / <code>ListSchedules</code></td><td>Start a workflow on a cron expression (<a href="#schedules">Schedules</a>).</td></tr>
         <tr><td><code>ListWorkflows</code></td><td>Summaries of all workflows, with an optional status filter.</td></tr>
         <tr><td><code>GetWorkflow</code></td><td>One workflow in full, including every step.</td></tr>
         <tr><td><code>TerminateWorkflow</code></td><td>Operator kill switch. Durably fails the workflow and fences any worker still holding its task.</td></tr>
@@ -804,8 +872,16 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
 
     <h3>Signal a workflow</h3>
     <pre data-lang="sh"><code>POST /api/workflows/{id}/signal
-{"name":"approved","payload":"yes"}
+{"name":"approved","payload":"yes","request_id":"approval-4711"}
 → 200 {"status":"delivered"}</code></pre>
+    <p><code>request_id</code> is optional; sending it again (a retry) is accepted and recorded once.</p>
+
+    <h3>Schedules</h3>
+    <pre data-lang="sh"><code>POST /api/schedules
+{"schedule_id":"nightly","cron":"0 2 * * *","timezone":"UTC","workflow_type":"Report","input":"","skip_if_running":true}
+→ 201 {"schedule_id":"nightly"}
+GET /api/schedules          → 200 {"schedules":[{..., "next_fire_at":"2026-10-22T02:00:00Z"}]}
+DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
 
     <h3>Terminate a workflow</h3>
     <pre data-lang="sh"><code>POST /api/workflows/{id}/terminate
@@ -948,21 +1024,22 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
     <p>Known and deliberate, as of the end of the 17-week roadmap:</p>
     <ul>
       <li><strong>Clustering is young.</strong> Membership is fixed by <code>--peers</code>; the Raft
-        port is plaintext unless you set <code>--raft-tls-*</code>; every history write is a Raft commit under one engine lock, so a
-        cluster adds availability, not write throughput; the TypeScript and Python SDKs don't follow
-        leader hints yet; and a single-node data directory can't be moved into a cluster. A single
-        node's data directory is its single point of failure; back it up.</li>
+        port is plaintext unless you set <code>--raft-tls-*</code>; every history write is a Raft commit
+        on the leader, so a cluster adds availability, not write throughput; and a single-node data
+        directory can't be moved into a cluster. A single node's data directory is its single point
+        of failure; back it up.</li>
       <li><strong>Auth is one shared token.</strong> TLS and the token are opt-in and cover every
         port (<a href="#security">Auth &amp; TLS</a>), but there are no per-user identities or roles,
         and with nothing set every port is open plaintext.</li>
-      <li><strong>Sequential steps.</strong> One step in flight per workflow; no parallel fan-out yet.</li>
-      <li><strong>At-least-once</strong> activity execution, and a signal retried across a leader
-        change can be recorded twice.</li>
-      <li><strong>Retry policies are engine-side only</strong>, and <code>GetVersion</code> /
-        <code>SideEffect</code> are Go-only (the TypeScript and Python SDKs don't have them yet).</li>
-      <li><strong>Listing is a full scan</strong> of the data directory, and there is <strong>one
-        global lock</strong> with a full history re-read per operation. It has not been load-tested.</li>
-      <li><strong>No cron scheduling</strong> yet.</li>
+      <li><strong>At-least-once</strong> activity execution: make activities idempotent. (Signals
+        are exactly-once; each carries an idempotency key.)</li>
+      <li><strong>Parallel steps are Go, TypeScript and Python</strong>; the Java SDK runs one step
+        at a time.</li>
+      <li><strong>Not load-tested.</strong> Workflows run in parallel, each under its own lock with
+        its state cached, and listing reads an in-memory index; the main remaining cost is one fsync
+        per event (<a href="https://github.com/Olayanju-1234/durable-workflow-engine/blob/main/docs/adr/0006-keep-file-per-workflow-store.md">ADR-0006</a>).</li>
+      <li><strong>Rollback</strong>: binaries from before parallel steps can't read a history that
+        ran some.</li>
     </ul>
 
     <h2 id="faq">FAQ</h2>

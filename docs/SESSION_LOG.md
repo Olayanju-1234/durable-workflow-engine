@@ -5,6 +5,70 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 24 (engine backlog): SDK features, per-workflow locking, index, schedules, parallel steps, exactly-once signals
+
+Run in parallel with Session 23 (security/CI/packaging). PRs #19, #22, #23, #24, #25,
+#26 and this docs PR, each squash-merged after green CI; nothing deployed (the parent
+session deploys).
+
+**Done:**
+- #19 SDK protocol: `ScheduleActivityCommand.retry_policy` recorded on `StepScheduled`
+  (overrides the engine's by-name policy, survives restarts; Go `workflow.WithRetryPolicy`,
+  honoured by `testsuite`); `record_marker` + marker steps over HTTP, so TS/Python/Java
+  have `getVersion`/`sideEffect`; `<field>_base64` payload twins (only for non-UTF-8
+  bytes); `POST /api/activity-tasks/heartbeat`; TS/Python/Java follow 503 leader hints
+  over several addresses, re-register after any redirect/restart, heartbeat, JSON/bytes
+  helpers. `sdks/sdk_e2e_test.go` drives TS and Python end to end from `go test`.
+- #22 Per-workflow locks + in-memory state cache (`wfstate.go`, `state.Folder`); store
+  lock not held across write/fsync/read; data-driven definitions decide from the cached
+  state. Bench: 1000-step workflow 2253 → 49 µs/step; 64 concurrent workflows 243 → 59
+  µs/step (no fsync), 47 → 25 ms/step (macOS full fsync).
+- #23 Visibility index (`index.go`), ADR-0006 (stay on files; measured: recovery 0.83 s
+  at 10k, 5.9 s at 50k; durable append 20 ms vs 10.6 µs buffered). List 734 → 0.75 ms.
+- #24 Cron schedules: `internal/cron` (hand-written), `CreateSchedule`/`DeleteSchedule`/
+  `ListSchedules` on gRPC, HTTP, Go client; stored in the reserved
+  `__workflowd-schedules` history using existing event types; run id = schedule id +
+  fire time; 24 h catch-up; leader-only; skip-if-running.
+- #25 Parallel steps (ADR-0007): multi-open history, `StepFailed.will_retry`, decide
+  after every result, batched `commands`, leases per (workflow, sequence), recovery of
+  every open step; Go futures + `WaitAny` by `ResolvedEventID`; TS batching by
+  quiescence + `ctx.waitAny`; Python `*_async` + `wait_all`/`wait_any`; `testsuite`
+  rewritten as an event-driven simulator.
+- #26 Exactly-once signals: `request_id` on `SignalWorkflow`, recorded on
+  `SignalReceived`, checked before recording (also after the workflow finished).
+- Sticky queues closed with measurements (`BenchmarkReplayDecision`: 74 µs at 100 steps).
+
+**Teeth:** every load-bearing claim has a mutation that fails its test: recorded policy
+dropped; no re-registration / ignored leader hint / no heartbeat (TS, Python); no
+per-workflow lock, unfolded append, cache kept after a failed append, one global lock,
+no eviction; index not updated on append/purge/failed append/recovery; non-deterministic
+run ids, schedules not loaded, no catch-up, no skip; one lease per workflow, recovery of
+only the latest step, retrying step treated as failed, `WaitAny` by code order, no
+`will_retry`, recovery deciding only when RUNNING, SDK sending only the first command;
+no signal dedup, a new key per client attempt.
+
+**Bugs found on the way:** a closed engine still accepted writes (a "crashed" engine's
+workers reported to it after a restart): `appendLocked` now refuses with
+`ErrEngineClosed`. TS e2e raced its own registration
+on CI (fixed in #23).
+
+**Next:** publishing the SDKs (owner); continue-as-new; group commit if write rates
+need it; parallel steps in Java; nginx: add `POST /api/activity-tasks/heartbeat` to the
+demo's rate-limit exemption.
+
+**Gotchas:**
+- Rollback: binaries before #25 can't read a history with two steps in flight; before
+  #19 they ignore SDK retry policies; before #26 they record retried signals twice.
+  Schedules use only existing event types (an older binary lists the schedule history as
+  one RUNNING workflow).
+- The engine must never hold a workflow lock while waiting on the index build: Recover
+  builds the index, so schedule catch-up runs after it (`recoverWorkflows` then
+  `recoverSchedules`).
+- Tests that watch the files (`waitForState`) can see an event a moment before the index
+  does; wait through the engine (`GetWorkflow`) when comparing.
+
+---
+
 ## 2026-10-21 — Session 23 (security, CI, packaging): TLS + auth everywhere, buf, SDKs in CI, publish-ready packages
 
 Run in parallel with the engine-backlog session (PR #19 and later). PRs #16, #17, #18,

@@ -15,9 +15,11 @@
 | **gRPC Task Queue** | `internal/server` | 1 | Public API: `StartWorkflow`, `PollTask`, `CompleteTask`. Bridges engine ↔ external workers. |
 | **Timers & Signals** | `internal/timer` | 2 | Min-heap of fire times; background goroutine appends `TimerFired`. External `SignalWorkflow` to park/resume workflows. |
 | **Replay Engine** | `internal/replay` | 2, 5 | Re-executes workflow code, returning recorded outputs for already-completed steps so side effects never repeat. Requires deterministic workflows. Shared by the in-process engine, the Go worker and the test environment. |
-| **Scheduler** | `internal/server` | 3 | Worker identity, lease tokens on every dispatched task, `Heartbeat` RPC, reassignment on lease expiry (a dead worker's task is retried per policy). Sticky queues deferred — workers are stateless activity executors, so there is no worker-side cache to stick to yet. |
+| **Scheduler** | `internal/server` | 3 | Worker identity, a lease token per dispatched step (workflow + sequence), `Heartbeat` RPC, reassignment on lease expiry (a dead worker's task is retried per policy). No sticky queues: see "Why no sticky queues" below. |
+| **Concurrency + cache** | `internal/server` (`wfstate.go`, `index.go`) | backlog | A lock and an in-memory history + replayed state per workflow (folded event by event), and a visibility index for listing. See "Concurrency, caching and the index". |
+| **Schedules** | `internal/cron`, `internal/server` | backlog | Cron schedules that start workflows, stored in a reserved history and fired by the leader. See "Schedules". |
 | **Consensus (Raft)** | `internal/raft` | 4 | Leader election (Wk11), log replication, snapshotting. All history writes go through the Raft log for HA. See "Replication (Raft)" below. |
-| **Polyglot protocol** | `internal/server` | 3+ | `RegisterWorkflowType` / `PollWorkflowTask` / `CompleteWorkflowTask`: workflow code runs in an SDK process and returns one command per decision. |
+| **Polyglot protocol** | `internal/server` | 3+ | `RegisterWorkflowType` / `PollWorkflowTask` / `CompleteWorkflowTask`: workflow code runs in an SDK process and returns the commands it issued before blocking (several, for parallel steps). |
 | **Public Go SDK** | `workflow`, `worker`, `client`, `testsuite`, `embedded` | 5 | What Go developers import: write workflows, run them in their own process over gRPC, start and inspect them, unit-test them in virtual time, or embed an engine. See "The Go SDK" below and [ADR-0005](adr/0005-public-go-sdk.md). |
 
 ## Data flow (happy path)
@@ -72,9 +74,14 @@ Records are appended and fsync'd one at a time:
 - **CRC32C** → detects bit rot / torn writes. A CRC mismatch on a complete record is a hard
   error; a short read (torn header/payload from a crash mid-append) is treated as end-of-log.
 - **fsync per append** → an event is only "committed" once durable. Correctness over
-  performance for now; Phase 4 batches writes to amortize fsync.
-- **Event types** grow by adding `oneof` fields (`MarkerRecordedEvent` arrived in Phase 5).
-  An older binary cannot read a history that contains a newer event type.
+  performance; in a cluster the Raft log is fsync'd per batch instead. The store holds no
+  lock across a write, fsync or read, so different workflows' fsyncs overlap.
+- **Event types** grow by adding `oneof` fields (`MarkerRecordedEvent` arrived in Phase 5),
+  and events grow optional fields (`retry_policy`, `will_retry`, a signal's `request_id`).
+  An older binary cannot read a history that contains a newer event type, or one with
+  several steps in flight.
+- **Staying on files** was revisited with measurements in
+  [ADR-0006](adr/0006-keep-file-per-workflow-store.md): no LSM engine.
 - **Torn-tail truncation on open** → the append handle is cached per workflow, and opening it
   truncates any partial trailing record. A failed write or fsync drops the cached handle, so
   a live process recovers on its next append the same way a restarted one does.
@@ -157,8 +164,8 @@ your process                                         workflowd
 client.StartWorkflow ─────────── gRPC ──────────────▶ append WorkflowStarted
 worker ─ RegisterWorkflowType ───────────────────────▶ type → remote planner
 worker ─ PollWorkflowTask ◀── task: full history ──── dispatch decision
-  replay.Decide(fn, history)  (internal/replay)
-worker ─ CompleteWorkflowTask(one command) ──────────▶ validate, fence, append
+  replay.DecideAll(fn, history)  (internal/replay)
+worker ─ CompleteWorkflowTask(commands) ─────────────▶ validate, fence, append
 worker ─ PollTask(step_names) ◀── activity task ───── lease + enqueue
   run ActivityFunc, Heartbeat every lease/3
 worker ─ CompleteTask(output | error) ───────────────▶ append, decide again
@@ -184,6 +191,76 @@ worker ─ CompleteTask(output | error) ─────────────�
 - **Steps don't wait for registration.** Recovery, timers, signals and activity results
   are recorded whether or not the workflow's type is registered; only the next decision
   waits for a worker to register it.
+
+## Concurrency, caching and the index
+
+```
+op on workflow W ─▶ lock W ─▶ cached events + state (Folder) ─▶ decide ─▶ HistoryLog.Append
+                                   ▲ fold the new event in ◀────────────────┘
+                                   └─▶ visibility index: W's summary
+```
+
+- **Per-workflow locks.** Everything that reads a workflow's history and then appends to it
+  holds that workflow's lock, so its event ids stay contiguous; other workflows run in
+  parallel. `Engine.mu` guards only shared maps (planners, policies, leases, pending
+  decisions) and is never held across I/O. Order: a workflow's lock, then `Engine.mu`.
+- **The cache.** A workflow in use keeps its events and replayed state; `state.Folder` is
+  `Reconstruct` one event at a time, so an append costs O(1), not a re-read and re-replay
+  (a 1000-step workflow went from 2.25 ms to 49 µs a step). Idle unfinished workflows are
+  kept LRU (`WithStateCacheSize`); finished ones leave at once. The engine is the only
+  writer of its histories, so the cache stays in step. **A failed append drops the cached
+  copy**: the write may have landed, so the next operation reads the file.
+- **The visibility index.** One summary per workflow, built by `Recover` in its existing
+  pass and updated on every append (under the workflow's lock) and purge. Listing,
+  retention and SDK-registration resume read it instead of scanning the data directory
+  (10k workflows: 734 ms to 0.75 ms). A write whose outcome is unknown marks the entry
+  stale and the next listing re-reads it.
+- Ids starting with `__workflowd` are reserved for engine-internal histories.
+
+## Parallel steps ([ADR-0007](adr/0007-parallel-steps.md))
+
+- History may have several steps in flight; results name their step by sequence; a retry
+  re-opens its own sequence. A failure the engine will retry is recorded with
+  `will_retry` and stays open to workflow code.
+- The engine decides after **every** step result, even with other steps in flight, and
+  applies the batch the planner returns (`CompleteWorkflowTask.commands`). Recovery
+  re-dispatches every open step, re-arms every retry, and decides if the last event was a
+  result.
+- "First of" races (`WaitAny`) pick the step whose result history recorded first
+  (`ResolvedEventID`), so every replay agrees.
+
+## Schedules
+
+```
+CreateSchedule ─▶ __workflowd-schedules history: WorkflowStarted, SignalReceived(upsert|delete)…
+timer (leader's engine) ─▶ StartWorkflow("<id>-<fire time>")  ← AlreadyExists = already fired
+Recover ─▶ load schedules ─▶ start the latest fire missed in 24 h ─▶ arm the next
+```
+
+Schedules are a workflow-shaped history of existing event types, so they replicate through
+Raft like any history and every binary can read the data directory. Only an engine fires
+them, and in a cluster only the leader runs one. The run id names the fire time, which makes
+firing idempotent across restarts and failovers. Cron parsing is hand-written
+(`internal/cron`): five fields, names, ranges, steps, macros, `@every`, time zones, DST.
+
+## Exactly-once signals
+
+`SignalWorkflow` carries an optional `request_id`, recorded on the `SignalReceived` event. A
+signal whose key is already in the history succeeds without being recorded again, even after
+the workflow finished and on a new leader (the key replicates with the history). The Go client
+makes one key per call and reuses it on every retry; the HTTP SDKs send one per signal.
+
+## Why no sticky queues
+
+Temporal's sticky queues route a workflow's tasks back to the worker that holds it in memory,
+so the worker resumes the paused function instead of replaying it. workflowd has nothing to
+stick to: workers are stateless, and every task carries the full history. Measured replay cost
+per decision (`internal/replay` `BenchmarkReplayDecision`): 21 µs at 10 steps, 74 µs at 100
+(4.8 KB of history), 0.7 ms at 1000 (52 KB). That is at or below one network round trip for
+the task itself, and the engine side is already cached. Sticky execution would add a worker
+cache, routing, a sticky timeout and failover handling to save that. Not built; revisit for
+workflows with many thousands of steps, where a continue-as-new (restart with fresh history)
+is the better tool anyway.
 
 ## Auth and TLS (opt-in)
 
