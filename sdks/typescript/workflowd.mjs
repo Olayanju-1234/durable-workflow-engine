@@ -270,6 +270,8 @@ export class Worker {
   }
 
   async _workflowLoop() {
+    // An empty filter means "any type", so a worker with no workflows must not poll.
+    if (this.workflows.size === 0) return;
     const types = [...this.workflows.keys()].join(',');
     while (!this._stop) {
       let task;
@@ -305,10 +307,15 @@ export class Worker {
   }
 
   async _activityLoop() {
+    // Name our activities so the engine never hands us another worker's step.
+    if (this.activities.size === 0) return;
+    const names = [...this.activities.keys()].join(',');
     while (!this._stop) {
       let task;
       try {
-        task = await this._fetch(`/api/activity-tasks?worker_id=${this.workerId}`);
+        task = await this._fetch(
+          `/api/activity-tasks?activities=${encodeURIComponent(names)}&worker_id=${this.workerId}`,
+        );
       } catch {
         await sleep(500);
         continue;

@@ -1004,7 +1004,10 @@ type PollTaskRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Identifies the worker; recorded on the lease and in engine logs, so a lease
 	// expiry names the worker that went dark.
-	WorkerId      string `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	WorkerId string `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	// Only receive tasks for these activities (step names). Empty means any task,
+	// which is only safe when a single worker implements every activity.
+	StepNames     []string `protobuf:"bytes,2,rep,name=step_names,json=stepNames,proto3" json:"step_names,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1044,6 +1047,13 @@ func (x *PollTaskRequest) GetWorkerId() string {
 		return x.WorkerId
 	}
 	return ""
+}
+
+func (x *PollTaskRequest) GetStepNames() []string {
+	if x != nil {
+		return x.StepNames
+	}
+	return nil
 }
 
 // Task is one unit of work dispatched to exactly one worker, under a lease.
@@ -2096,9 +2106,11 @@ const file_service_proto_rawDesc = "" +
 	"workflowId\"8\n" +
 	"\x15StartWorkflowResponse\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
-	"workflowId\".\n" +
+	"workflowId\"M\n" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
-	"\tworker_id\x18\x01 \x01(\tR\bworkerId\"\xc3\x01\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1d\n" +
+	"\n" +
+	"step_names\x18\x02 \x03(\tR\tstepNames\"\xc3\x01\n" +
 	"\x04Task\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1b\n" +

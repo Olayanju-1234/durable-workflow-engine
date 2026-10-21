@@ -45,6 +45,7 @@ import random
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
@@ -263,6 +264,9 @@ class Worker:
     # -- serving loops --
 
     def _workflow_loop(self) -> None:
+        # An empty filter means "any type", so a worker with no workflows must not poll.
+        if not self.workflows:
+            return
         types = ",".join(self.workflows)
         while not self._stop.is_set():
             try:
@@ -299,9 +303,13 @@ class Worker:
                     print(f"[workflowd] complete failed: {err}")
 
     def _activity_loop(self) -> None:
+        # Name our activities so the engine never hands us another worker's step.
+        if not self.activities:
+            return
+        names = urllib.parse.quote(",".join(self.activities))
         while not self._stop.is_set():
             try:
-                task = self._request("GET", f"/api/activity-tasks?worker_id={self.worker_id}")
+                task = self._request("GET", f"/api/activity-tasks?activities={names}&worker_id={self.worker_id}")
             except Exception:
                 time.sleep(0.5)
                 continue

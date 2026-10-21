@@ -1,50 +1,87 @@
 package server
 
-import "context"
+import (
+	"context"
+	"slices"
+	"sync"
+)
 
-// taskQueue is an in-memory FIFO of pending tasks awaiting a worker.
+// routedQueue is an in-memory FIFO whose pollers can ask only for the items they
+// can handle: an activity worker names the steps it implements, an SDK worker
+// names the workflow types it can replay. route extracts that key from an item.
 //
-// It is a buffered channel: a channel receive delivers each value to exactly
-// one goroutine, so an enqueued Task is handed to exactly one PollTask caller.
-// That single-delivery property *is* the "no duplicate dispatch" guarantee — we
-// get it from the language, not from bookkeeping.
+// Each item is handed to exactly one poller: removal happens under mu, so two
+// pollers can never both take the same item. That is the "no duplicate
+// dispatch" guarantee.
 //
 // The queue is deliberately ephemeral. On restart it is empty; the source of
-// truth is the on-disk history, and crash recovery (Week 4) re-derives any
-// outstanding tasks by replaying the log. Nothing here is durable.
-type taskQueue struct {
-	ch chan *Task
+// truth is the on-disk history, and crash recovery re-derives any outstanding
+// work by replaying the log. Nothing here is durable.
+type routedQueue[T any] struct {
+	route func(T) string
+
+	mu      sync.Mutex
+	pending []T
+	// ready is closed (and replaced) on every enqueue, waking every poller so
+	// each can re-check for an item matching its own routes.
+	ready chan struct{}
 }
 
-// taskQueueCapacity bounds buffered tasks. Phase 1 keeps one step in flight per
-// workflow, so this only fills under an extreme backlog of unworked workflows;
-// a durable, back-pressured queue arrives in Phase 4.
-const taskQueueCapacity = 1 << 16
+func newRoutedQueue[T any](route func(T) string) *routedQueue[T] {
+	return &routedQueue[T]{route: route, ready: make(chan struct{})}
+}
+
+func (q *routedQueue[T]) enqueue(item T) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.pending = append(q.pending, item)
+	close(q.ready)
+	q.ready = make(chan struct{})
+}
+
+// dropWhere removes every pending item matching fn, so a stale item is never
+// handed out.
+func (q *routedQueue[T]) dropWhere(fn func(T) bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.pending = slices.DeleteFunc(q.pending, fn)
+}
+
+// depth is how many items are pending right now (a point-in-time read).
+func (q *routedQueue[T]) depth() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.pending)
+}
+
+// poll blocks until an item whose route is in routes is available, or ctx
+// ends. Passing no routes accepts any item. Long-poll is a worker's normal
+// idle state.
+func (q *routedQueue[T]) poll(ctx context.Context, routes []string) (T, error) {
+	for {
+		q.mu.Lock()
+		for i, item := range q.pending {
+			if len(routes) == 0 || slices.Contains(routes, q.route(item)) {
+				q.pending = slices.Delete(q.pending, i, i+1)
+				q.mu.Unlock()
+				return item, nil
+			}
+		}
+		wait := q.ready
+		q.mu.Unlock()
+
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			var zero T
+			return zero, ctx.Err()
+		}
+	}
+}
+
+// taskQueue holds activity tasks, routed by step name.
+type taskQueue = routedQueue[*Task]
 
 func newTaskQueue() *taskQueue {
-	return &taskQueue{ch: make(chan *Task, taskQueueCapacity)}
-}
-
-// enqueue adds a task for the next polling worker. It does not block until the
-// buffer is full (see taskQueueCapacity).
-func (q *taskQueue) enqueue(t *Task) {
-	q.ch <- t
-}
-
-// depth is how many tasks are buffered right now (a point-in-time read; the
-// value can change immediately after). Feeds the queue-depth gauge.
-func (q *taskQueue) depth() int {
-	return len(q.ch)
-}
-
-// poll blocks until a task is available, returning ctx.Err() if the caller's
-// context is cancelled first (worker disconnect or server shutdown). Long-poll
-// is the worker's normal idle state.
-func (q *taskQueue) poll(ctx context.Context) (*Task, error) {
-	select {
-	case t := <-q.ch:
-		return t, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return newRoutedQueue((*Task).GetStepName)
 }

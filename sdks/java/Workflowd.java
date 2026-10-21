@@ -303,6 +303,8 @@ public final class Workflowd {
 
         @SuppressWarnings("unchecked")
         private void workflowLoop() {
+            // An empty filter means "any type", so a worker with no workflows must not poll.
+            if (workflows.isEmpty()) return;
             String types = String.join(",", workflows.keySet());
             while (!stopped.get()) {
                 Map<String, Object> task;
@@ -339,10 +341,14 @@ public final class Workflowd {
 
         @SuppressWarnings("unchecked")
         private void activityLoop() {
+            // Name our activities so the engine never hands us another worker's step.
+            if (activities.isEmpty()) return;
+            String names = String.join(",", activities.keySet());
             while (!stopped.get()) {
                 Map<String, Object> task;
                 try {
-                    Object res = request("GET", "/api/activity-tasks?worker_id=" + enc(workerId), null);
+                    Object res = request("GET",
+                            "/api/activity-tasks?activities=" + enc(names) + "&worker_id=" + enc(workerId), null);
                     if (res == null) continue;
                     task = (Map<String, Object>) res;
                 } catch (Exception e) {

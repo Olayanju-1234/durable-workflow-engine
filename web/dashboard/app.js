@@ -319,6 +319,21 @@ async function startWorkflow(e) {
   }
 }
 
+// On a node running the demo worker, point visitors at a workflow that will
+// actually move, and at the input that shows the saga compensating.
+async function loadNodeInfo() {
+  try {
+    const health = await api('/api/health');
+    if (!health.demo_worker) return;
+    if (!$('s-type').value) $('s-type').value = 'OrderSaga';
+    $('s-input').placeholder = 'order-42 (or order-42-decline)';
+    $('s-hint').textContent = 'A demo worker runs reserve, charge and ship on this node. '
+      + 'Start an OrderSaga and watch it weave. Put "decline" in the input to see the saga release the reservation.';
+  } catch {
+    // Health is best-effort here; the dialog works without it.
+  }
+}
+
 function openStartModal() {
   $('start-modal').hidden = false;
   $('modal-scrim').hidden = false;
@@ -402,6 +417,7 @@ function init() {
 
   refresh();
   scheduleRefresh();
+  loadNodeInfo();
 }
 
 document.addEventListener('DOMContentLoaded', init);

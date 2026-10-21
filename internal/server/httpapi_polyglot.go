@@ -26,6 +26,9 @@ import (
 // fits in ~200 lines with NO dependencies — Node's fetch, Python's urllib and
 // Java's HttpClient are all built in.
 //
+// Routing: a worker passes ?types=A,B on workflow-tasks and ?activities=x,y on
+// activity-tasks to receive only work it can do. Omitting the filter means any.
+//
 // Long-polling: poll endpoints block up to pollTimeout, then return 204 so the
 // client loops. Standard long-poll, and it keeps a dead connection from looking
 // like a stalled workflow.
@@ -219,7 +222,8 @@ func (a *HTTPAPI) pollActivityTask(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithPollTimeout(r)
 	defer cancel()
 
-	task, err := a.engine.PollTask(ctx, r.URL.Query().Get("worker_id"))
+	task, err := a.engine.PollTask(ctx, r.URL.Query().Get("worker_id"),
+		splitCSV(r.URL.Query().Get("activities"))...)
 	if err != nil {
 		w.WriteHeader(http.StatusNoContent)
 		return

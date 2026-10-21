@@ -181,4 +181,7 @@ func TestHTTPAPIHealthShape(t *testing.T) {
 			t.Errorf("health response missing %q: %v", key, body)
 		}
 	}
+	if body["demo_worker"] != false {
+		t.Errorf("demo_worker = %v, want false by default", body["demo_worker"])
+	}
 }

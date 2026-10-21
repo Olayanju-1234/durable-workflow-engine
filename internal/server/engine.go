@@ -370,11 +370,13 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 }
 
 // PollTask blocks until a task is ready for a worker (or ctx is cancelled).
+// A worker that names stepNames only receives tasks for those activities, so
+// workers with different activity sets can share one engine; none means any.
 // Dispatch grants the worker a lease on the task: the returned Task carries a
 // token that CompleteTask and Heartbeat must present, and a deadline after
 // which the engine assumes the worker died and reassigns the work.
-func (e *Engine) PollTask(ctx context.Context, workerID string) (*Task, error) {
-	t, err := e.queue.poll(ctx)
+func (e *Engine) PollTask(ctx context.Context, workerID string, stepNames ...string) (*Task, error) {
+	t, err := e.queue.poll(ctx, stepNames)
 	if err != nil {
 		return nil, err
 	}
