@@ -15,17 +15,23 @@ import (
 // primitives — an activity, a durable Sleep, and a WaitForSignal — then a final
 // activity whose input the workflow composes itself.
 func orderWorkflow(ctx sdk.Context, input []byte) ([]byte, error) {
-	reserved, err := ctx.ExecuteActivity("reserve", input)
-	if err != nil {
-		return nil, err
+	return orderWorkflowWithCooldown(40*time.Millisecond)(ctx, input)
+}
+
+func orderWorkflowWithCooldown(cooldown time.Duration) sdk.WorkflowFunc {
+	return func(ctx sdk.Context, input []byte) ([]byte, error) {
+		reserved, err := ctx.ExecuteActivity("reserve", input)
+		if err != nil {
+			return nil, err
+		}
+		ctx.Sleep("cooldown", cooldown)
+		approval := ctx.WaitForSignal("await-approval", "approve")
+		shipped, err := ctx.ExecuteActivity("ship", append(append([]byte{}, reserved...), approval...))
+		if err != nil {
+			return nil, err
+		}
+		return shipped, nil
 	}
-	ctx.Sleep("cooldown", 40*time.Millisecond)
-	approval := ctx.WaitForSignal("await-approval", "approve")
-	shipped, err := ctx.ExecuteActivity("ship", append(append([]byte{}, reserved...), approval...))
-	if err != nil {
-		return nil, err
-	}
-	return shipped, nil
 }
 
 func newFuncEngine(t *testing.T, dir string, w sdk.Workflow) *Engine {
@@ -102,7 +108,9 @@ func TestReplayWorkflowRunsToCompletion(t *testing.T) {
 // recovered by a fresh engine and finishes — recovery drives replay workflows too.
 func TestReplayWorkflowSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
-	w := sdk.Workflow{Type: "Order", Fn: orderWorkflow}
+	// Long enough that engine 1 is reliably observed paused on the timer under -race load;
+	// with 40 ms the timer could fire before the poll saw it, and the wait timed out.
+	w := sdk.Workflow{Type: "Order", Fn: orderWorkflowWithCooldown(750 * time.Millisecond)}
 
 	// Engine 1: run reserve, arm the cooldown timer, then crash before it fires.
 	store1, err := history.NewHistoryStore(dir)
