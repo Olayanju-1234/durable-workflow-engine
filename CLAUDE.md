@@ -44,6 +44,7 @@ schedule next step → record result.** Four components, built across phases:
 | Consensus (Raft) | `internal/raft`    | 4 ✅  | Elections, log replication, snapshots, five-property safety checker. |
 | Cluster          | `internal/cluster` | 4 ✅  | Replicated history state machine, leader-only per-term engine, leader hints (ADR-0004). |
 | Public Go SDK    | `workflow`, `worker`, `client`, `testsuite`, `embedded` | 5 ✅ | What Go developers import (ADR-0005). Replay engine in `internal/replay`; `sdk` is deprecated aliases. |
+| Auth + TLS       | `internal/tlsconfig`, `internal/server/auth.go`, `cmd/workflowd/security.go` | — ✅ | Opt-in TLS on every listener, bearer token on HTTP + gRPC, metrics token, Raft mTLS. |
 
 ## Build / test / regenerate
 
@@ -83,6 +84,12 @@ This is how context survives across sessions and machines. The in-repo docs are 
 source of truth because they travel with `git clone`; the global memory is the local cache.
 
 ## Current status
+
+**Session 23 (security, CI, packaging; parallel to the engine-backlog session):**
+opt-in TLS and bearer auth on every listener (no flags = unchanged), `buf` in CI, every
+SDK (Java included) run end to end in CI in plaintext and over TLS, and publish-ready
+npm/PyPI/Maven packages with a manual, dry-run-by-default release workflow. Nothing is
+published; `sdks/README.md` has the owner's steps.
 
 **Phase 5 complete (Weeks 15–17): the public Go SDK, all 17 roadmap weeks done.**
 Session 22: `workflow` / `worker` / `client` / `embedded` (Wk15), `GetVersion` +

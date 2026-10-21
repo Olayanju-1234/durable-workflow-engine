@@ -5,6 +5,62 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-21 — Session 23 (security, CI, packaging): TLS + auth everywhere, buf, SDKs in CI, publish-ready packages
+
+Run in parallel with the engine-backlog session (PR #19 and later). PRs #16, #17, #18,
+#20, all squash-merged; nothing deployed (the parent session deploys once both have merged).
+
+**Done:**
+- #16 `scripts/sdk-e2e.sh <sdk>` + CI job `sdk-e2e` (typescript/python/java): build the
+  engine, run the SDK's example worker, drive an approved order (COMPLETED,
+  `shipped(reserved(<id>))`) and a rejected one (FAILED after exactly one `release`).
+  `sdks/java/Example.java`. **The Java SDK compiled for the first time with no code
+  changes** (`javac --release 11 -Xlint:all,-serial -Werror` on JDK 21).
+- #17 buf: `buf.yaml` (v2, module `proto/`), lint `STANDARD` minus
+  DIRECTORY_SAME_PACKAGE / PACKAGE_DIRECTORY_MATCH, and RPC_REQUEST/RESPONSE_STANDARD_NAME
+  ignored for `raft.proto` only; breaking `WIRE_JSON`. CI job `proto` (buf v1.73.0 from the
+  release, sha256-checked) runs lint + `buf breaking` against the PR base sha.
+  `make buf` / `make proto-check`. ADR-0002 follow-up closed.
+- #18 auth + TLS, all opt-in (no flags = exactly as before): `--tls-cert/--tls-key` on
+  gRPC, HTTP and metrics (`internal/tlsconfig`, cert reloaded on mtime change, last good
+  cert kept); `--auth-token-file` / `$WORKFLOWD_AUTH_TOKEN` now guards gRPC too
+  (`server.GRPCAuth` interceptors); `--auth-public-reads`; `--metrics-auth-token-file` /
+  `$WORKFLOWD_METRICS_AUTH_TOKEN`; `--raft-tls-cert/key/ca` mutual TLS (`cluster.Config.PeerTLS`).
+  Go `client.Options{TLS, AuthToken}`, `client.ErrUnauthenticated`, `worker.Run` stops on a
+  rejected token. TS `token`, Python `token`/`ca_file`, Java 4-arg `Worker` + `trustPem`.
+  Dashboard prompts for the token on 401 (sessionStorage). CI runs every SDK a second time
+  over TLS with a required token (`E2E_SECURE=1`).
+- #20 packages, not published: `sdks/typescript/package.json` + `workflowd.d.mts` (tsc-checked
+  by `types-check.mts`), `sdks/python/pyproject.toml`, `sdks/java/pom.xml` (Java class now in
+  `package io.github.olayanju1234.workflowd`; the file did not move, Maven stages it),
+  `CHANGELOG.md`, `scripts/sdk-version.py` (six version strings agree), CI job
+  `sdk-packages`, manual `.github/workflows/release-sdks.yml` (dry run by default). Owner's
+  publish steps: `sdks/README.md` → "Publishing the SDKs".
+
+**Tests:** gRPC auth matrix (5 methods × 4 bad headers + valid), public reads (HTTP + gRPC),
+metrics guard, token sources (file/env/argv/conflicts), HTTPS listener refuses plaintext,
+tlsconfig (trust, mTLS rejects no cert and a rogue CA, reload, bad files), a 3-node cluster
+over mTLS whose Raft port refuses plaintext/cert-less/rogue callers, Go client over TLS+token,
+worker with a bad token. `buf breaking` checked by hand to fail on a `bytes`→`string` change.
+
+**Next:** owner publishes the SDKs (secrets + `gh workflow run release-sdks.yml`), after
+renaming `## [Unreleased]` to `## [0.1.0] - <date>`. Per-user identities/RBAC stay with the
+commercial layer. Raft peer certs aren't bound to node ids.
+
+**Gotchas:**
+- The old `--auth-token` already covered reads (the docs said "mutating routes"). So the
+  "read auth" option is the inverse, `--auth-public-reads`. Polls are `GET`s but lease work,
+  so they are never public.
+- Behaviour change: `--auth-token` now also guards gRPC. Prod sets no token.
+- `.mjs` needs `.d.mts` (TypeScript pairs them); a self-import (`from 'workflowd'`) in
+  `types-check.mts` also tests the package.json `exports`.
+- The Java file must not move while #19 rewrites it; `pom.xml` copies it into
+  `target/sdk-src/io/github/olayanju1234/workflowd/` in `generate-sources`.
+- macOS bash is 3.2: empty arrays under `set -u` need `${a[@]+"${a[@]}"}`.
+- No JDK on the laptop: Java is verified in CI only.
+
+---
+
 ## 2026-10-21 — Session 22: the public Go SDK — Phase 5 complete
 
 Weeks 15–17, PRs #13 (Wk15), #14 (Wk16) and #15 (Wk17). Wk15+16 deployed together as

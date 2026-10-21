@@ -691,7 +691,9 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
     <pre data-lang="sh"><code>openssl rand -hex 32 &gt; /etc/workflowd/token &amp;&amp; chmod 600 /etc/workflowd/token
 workflowd --serve --auth-token-file /etc/workflowd/token \
   --tls-cert /etc/workflowd/tls.crt --tls-key /etc/workflowd/tls.key</code></pre>
-    <p>Clients send the same token. The dashboard asks for it once per tab when the API answers <code>401</code>.</p>
+    <p>Clients send the same token. The dashboard asks for it once per tab when the API answers <code>401</code>.
+      In a cluster, followers redirect clients to the leader by the host in its <code>--peers</code> entry, so each
+      node's <code>--tls-cert</code> must be valid for that host as well as any name clients dial.</p>
     <pre data-lang="go"><code>c, err := client.Dial(client.Options{
     Addrs:     []string{"workflowd.internal:7233"},
     TLS:       &amp;tls.Config{},                       // or RootCAs: your CA pool
