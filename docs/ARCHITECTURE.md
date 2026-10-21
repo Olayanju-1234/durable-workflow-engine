@@ -16,7 +16,7 @@
 | **Timers & Signals** | `internal/timer` | 2 | Min-heap of fire times; background goroutine appends `TimerFired`. External `SignalWorkflow` to park/resume workflows. |
 | **Replay Engine** | `sdk` + engine | 2 | Re-executes workflow code, returning recorded outputs for already-completed steps so side effects never repeat. Requires deterministic workflows. |
 | **Scheduler** | `internal/server` | 3 | Worker identity, lease tokens on every dispatched task, `Heartbeat` RPC, reassignment on lease expiry (a dead worker's task is retried per policy). Sticky queues deferred — workers are stateless activity executors, so there is no worker-side cache to stick to yet. |
-| **Consensus (Raft)** | `internal/raft` | 4 | Leader election, log replication, snapshotting. All history writes go through the Raft log for HA. |
+| **Consensus (Raft)** | `internal/raft` | 4 | Leader election (Wk11), log replication, snapshotting. All history writes go through the Raft log for HA. See "Replication (Raft)" below. |
 | **Public SDK** | `sdk` | 5 | The Go package developers import. `workflow.Execute/Sleep/WaitForEvent/...`, `client.*`, `worker.New`. |
 
 ## Data flow (happy path)
@@ -77,6 +77,25 @@ Records are appended and fsync'd one at a time:
   a live process recovers on its next append the same way a restarted one does.
 
 See [ADR-0001](adr/0001-record-format.md). Protobuf rationale: [ADR-0002](adr/0002-protobuf-events.md).
+
+## Replication (Raft)
+
+Opt-in with `--node-id` and `--peers`; without them the daemon is single-node and
+none of this runs. The Raft implementation in `internal/raft` has three layers:
+
+- **core**: the algorithm as a deterministic state machine. Inputs are `tick()`
+  and `step(message)`; the output is a `Ready` batch (state to persist, messages
+  to send). No clock, disk or network, so tests replay exact schedules.
+- **Node**: one goroutine that owns the core, turns wall-clock time into ticks,
+  and persists every `Ready` (fsync) **before** sending its messages.
+- **Transport**: `RaftService.Send(Envelope)`, one one-way gRPC call per Raft
+  message (responses are messages too). Peer traffic has its own listener
+  (`--raft-addr`) and must never be exposed publicly.
+
+Elections use randomized timeouts (1–2 s by default), one durable vote per term,
+the paper's up-to-date log check, CheckQuorum (a leader that can't hear a
+majority steps down) and §6 vote suppression. Durable Raft state lives in
+`<data-dir>/raft/`, framed like the histories (`internal/record`).
 
 ## Determinism (Phase 2+)
 

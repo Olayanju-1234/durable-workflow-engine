@@ -41,7 +41,7 @@ schedule next step → record result.** Four components, built across phases:
 | Observability    | `internal/metrics` | 3 ✅  | Zero-dep Prometheus `/metrics`; visibility API (List/Get/Terminate). |
 | Dashboard + site | `web/`             | 3 ✅  | `go:embed` operational UI + JSON HTTP API; public landing page & docs. |
 | Polyglot SDKs    | `sdks/`            | —  ✅  | Workflow-task protocol + TypeScript/Python/Java SDKs (dependency-free). |
-| Consensus (Raft) | `internal/raft`    | 4     | Leader election, log replication, snapshots, HA. |
+| Consensus (Raft) | `internal/raft`    | 4 🚧  | Leader election ✅ (Wk11); log replication, snapshots, HA next. |
 | Public SDK       | `sdk`              | 5     | Ergonomic Go API developers import. |
 
 ## Build / test / regenerate
@@ -98,7 +98,9 @@ Session 15 hardened the public demo: activity tasks are routed by step name, and
 in-process `--demo-worker` plus opt-in `--retention` were added (see SESSION_LOG).
 Sessions 16–17 hardened the history store's cached append handles: released when a
 workflow finishes, and dropped on a failed write or fsync so the reopen truncates the
-torn record.
+torn record. Session 18 started Phase 4 for real: a hand-rolled, deterministic Raft
+core with leader election (`internal/raft`), a gRPC transport, and opt-in cluster
+flags (`--node-id`, `--peers`); cluster mode runs Raft only until Week 14.
 
 **Polyglot invariants worth not breaking:** SDK decisions are fenced by history
 length (stale → reject); a malformed command must leave the task *pending* or the
