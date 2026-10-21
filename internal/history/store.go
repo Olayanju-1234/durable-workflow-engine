@@ -43,6 +43,9 @@ type HistoryStore struct {
 
 	mu    sync.Mutex
 	files map[string]*os.File // workflowID -> open append handle
+
+	// writeFile is (*os.File).Write; tests swap it to inject a torn write.
+	writeFile func(f *os.File, b []byte) (int, error)
 }
 
 // NewHistoryStore opens a store rooted at dir, creating the directory if needed.
@@ -50,7 +53,7 @@ func NewHistoryStore(dir string) (*HistoryStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("history: create data dir: %w", err)
 	}
-	return &HistoryStore{dir: dir, files: make(map[string]*os.File)}, nil
+	return &HistoryStore{dir: dir, files: make(map[string]*os.File), writeFile: (*os.File).Write}, nil
 }
 
 // Append serializes event and writes it as a single durable record to the
@@ -81,10 +84,14 @@ func (s *HistoryStore) Append(workflowID string, event *HistoryEvent) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(record); err != nil {
+	// os.File.Write errors whenever it writes short, so err alone catches a torn
+	// record. Dropping the handle makes the next Append reopen and truncate it.
+	if _, err := s.writeFile(f, record); err != nil {
+		s.releaseLocked(workflowID)
 		return fmt.Errorf("history: write record: %w", err)
 	}
 	if err := f.Sync(); err != nil {
+		s.releaseLocked(workflowID)
 		return fmt.Errorf("history: fsync: %w", err)
 	}
 	return nil
@@ -188,6 +195,11 @@ func (s *HistoryStore) Close() error {
 func (s *HistoryStore) Release(workflowID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.releaseLocked(workflowID)
+}
+
+// releaseLocked is Release for callers that already hold s.mu.
+func (s *HistoryStore) releaseLocked(workflowID string) error {
 	f, ok := s.files[workflowID]
 	if !ok {
 		return nil
@@ -215,10 +227,7 @@ func (s *HistoryStore) Delete(workflowID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if f, ok := s.files[workflowID]; ok {
-		f.Close()
-		delete(s.files, workflowID)
-	}
+	s.releaseLocked(workflowID)
 	if err := os.Remove(s.path(workflowID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("history: delete %s: %w", workflowID, err)
 	}

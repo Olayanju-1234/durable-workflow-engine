@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -277,6 +278,86 @@ func TestReleaseThenAppend(t *testing.T) {
 	}
 	if n := s.OpenHandles(); n != 1 {
 		t.Errorf("open handles after reopen = %d, want 1", n)
+	}
+}
+
+// TestAppendAfterFailedWriteRecovers covers a write that fails on a live store.
+// The failed Append must drop its cached handle, so the retry reopens the file,
+// truncates the partial record and lands on a clean boundary, not after garbage.
+func TestAppendAfterFailedWriteRecovers(t *testing.T) {
+	tests := []struct {
+		name    string
+		breakIt func(t *testing.T, s *HistoryStore, path string)
+		wantErr error
+	}{
+		{
+			// What ENOSPC or EIO mid-record leaves behind: half a record on disk.
+			name: "partial write then ENOSPC",
+			breakIt: func(t *testing.T, s *HistoryStore, _ string) {
+				s.writeFile = func(f *os.File, b []byte) (int, error) {
+					n, err := f.Write(b[:len(b)/2])
+					if err != nil {
+						return n, err
+					}
+					return n, syscall.ENOSPC
+				}
+			},
+			wantErr: syscall.ENOSPC,
+		},
+		{
+			name: "torn bytes and a dead descriptor",
+			breakIt: func(t *testing.T, s *HistoryStore, path string) {
+				f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+				if err != nil {
+					t.Fatalf("open for torn write: %v", err)
+				}
+				if _, err := f.Write([]byte{0xDE, 0xAD, 0xBE}); err != nil {
+					t.Fatalf("torn write: %v", err)
+				}
+				f.Close()
+				for _, cached := range s.files {
+					cached.Close()
+				}
+			},
+			wantErr: os.ErrClosed,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			const wfID = "wf-failed-write"
+			s, err := NewHistoryStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+
+			events := sampleEvents()
+			if err := s.Append(wfID, events[0]); err != nil {
+				t.Fatalf("append ev1: %v", err)
+			}
+
+			tc.breakIt(t, s, filepath.Join(dir, wfID+historyExt))
+			if err := s.Append(wfID, events[1]); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("failed append: got %v, want %v", err, tc.wantErr)
+			}
+			s.writeFile = (*os.File).Write
+			if n := s.OpenHandles(); n != 0 {
+				t.Errorf("open handles after failed append = %d, want 0", n)
+			}
+
+			if err := s.Append(wfID, events[1]); err != nil {
+				t.Fatalf("retry append: %v", err)
+			}
+			got, err := s.ReadAll(wfID)
+			if err != nil {
+				t.Fatalf("read all after retry: %v", err)
+			}
+			if len(got) != 2 || !proto.Equal(events[0], got[0]) || !proto.Equal(events[1], got[1]) {
+				t.Fatalf("history after retry = %v, want first two sample events", got)
+			}
+		})
 	}
 }
 
