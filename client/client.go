@@ -12,6 +12,7 @@ package client
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
@@ -29,12 +31,13 @@ import (
 
 // Errors a call can be matched against with errors.Is.
 var (
-	ErrNotFound       = errors.New("client: workflow not found")
-	ErrAlreadyExists  = errors.New("client: workflow id already in use")
-	ErrNotRunning     = errors.New("client: workflow is not running")
-	ErrInvalid        = errors.New("client: invalid request")
-	ErrUnavailable    = errors.New("client: no workflowd node is serving")
-	ErrWorkflowFailed = errors.New("client: workflow did not complete")
+	ErrNotFound        = errors.New("client: workflow not found")
+	ErrAlreadyExists   = errors.New("client: workflow id already in use")
+	ErrNotRunning      = errors.New("client: workflow is not running")
+	ErrInvalid         = errors.New("client: invalid request")
+	ErrUnavailable     = errors.New("client: no workflowd node is serving")
+	ErrUnauthenticated = errors.New("client: missing or invalid auth token")
+	ErrWorkflowFailed  = errors.New("client: workflow did not complete")
 )
 
 func init() {
@@ -46,8 +49,14 @@ type Options struct {
 	// Addrs are workflowd gRPC addresses, e.g. "localhost:7233". For a cluster,
 	// list every node.
 	Addrs []string
-	// DialOptions replace the default (plaintext; workflowd has no TLS of its
-	// own, so put a TLS-terminating proxy in front of it across networks).
+	// TLS, if set, dials with TLS (e.g. &tls.Config{} for public CAs, or one
+	// whose RootCAs hold your CA). Nil dials plaintext.
+	TLS *tls.Config
+	// AuthToken is sent as "authorization: Bearer <token>" on every call, for
+	// an engine started with --auth-token-file.
+	AuthToken string
+	// DialOptions are added after the ones TLS and AuthToken produce, so a
+	// transport credential here wins.
 	DialOptions []grpc.DialOption
 	// Logger receives connection-level debug logs. Nil discards them.
 	Logger *slog.Logger
@@ -65,16 +74,31 @@ func Dial(opts Options) (*Client, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	dialOpts := opts.DialOptions
-	if len(dialOpts) == 0 {
-		dialOpts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	creds := insecure.NewCredentials()
+	if opts.TLS != nil {
+		creds = credentials.NewTLS(opts.TLS)
 	}
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	if opts.AuthToken != "" {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerToken(opts.AuthToken)))
+	}
+	dialOpts = append(dialOpts, opts.DialOptions...)
 	conn, err := rpc.New(opts.Addrs, dialOpts, logger)
 	if err != nil {
 		return nil, fmt.Errorf("client: %w", err)
 	}
 	return &Client{conn: conn, log: logger}, nil
 }
+
+// bearerToken attaches the engine's auth token to every call. It is allowed
+// over plaintext so a token still works behind a TLS-terminating proxy.
+type bearerToken string
+
+func (t bearerToken) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + string(t)}, nil
+}
+
+func (bearerToken) RequireTransportSecurity() bool { return false }
 
 // Close releases the client's connections.
 func (c *Client) Close() error { return c.conn.Close() }
@@ -204,6 +228,8 @@ func wrap(op string, err error) error {
 		kind = ErrInvalid
 	case codes.Unavailable:
 		kind = ErrUnavailable
+	case codes.Unauthenticated:
+		kind = ErrUnauthenticated
 	default:
 		return fmt.Errorf("client: %s: %w", op, err)
 	}

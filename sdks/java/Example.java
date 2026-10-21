@@ -1,4 +1,6 @@
+import java.nio.file.Path;
 import java.time.Duration;
+import javax.net.ssl.SSLContext;
 
 /**
  * Runnable example: an order workflow written entirely in Java, orchestrated by a Go engine
@@ -12,7 +14,11 @@ import java.time.Duration;
 public final class Example {
     public static void main(String[] args) throws Exception {
         String address = System.getenv().getOrDefault("WORKFLOWD_ADDR", "http://localhost:8233");
-        Workflowd.Worker worker = new Workflowd.Worker(address, "java-example");
+        // For an engine with auth on, and a private CA over https.
+        String token = System.getenv("WORKFLOWD_AUTH_TOKEN");
+        String caFile = System.getenv("WORKFLOWD_CA_FILE");
+        SSLContext ssl = caFile == null ? null : Workflowd.trustPem(Path.of(caFile));
+        Workflowd.Worker worker = new Workflowd.Worker(address, "java-example", token, ssl);
 
         // ---- the workflow: ordinary Java ----
         worker.workflow("JavaOrder", ctx -> {

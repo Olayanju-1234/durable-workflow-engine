@@ -60,6 +60,7 @@
 
     <h4>Reference</h4>
     <a href="#cli">CLI flags</a>
+    <a href="#security">Auth &amp; TLS</a>
     <a href="#api">gRPC API</a>
     <a href="#http-api">HTTP / JSON API</a>
     <a href="#metrics">Metrics</a>
@@ -653,7 +654,11 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--http-addr</code></td><td><code>:8233</code></td><td>Dashboard + JSON API. Empty string disables.</td></tr>
         <tr><td><code>--metrics-addr</code></td><td><code>:9090</code></td><td>Prometheus <code>/metrics</code>. Empty string disables.</td></tr>
         <tr><td><code>--demo</code></td><td><code>false</code></td><td>Drive a sample workflow to completion against a real store, then exit.</td></tr>
-        <tr><td><code>--auth-token</code></td><td>empty</td><td>Require this bearer token on mutating <code>/api</code> routes (<code>Authorization: Bearer &lt;token&gt;</code>). Empty disables auth. <code>/api/health</code> and the dashboard's static assets stay open.</td></tr>
+        <tr><td><code>--auth-token-file</code></td><td><code>$WORKFLOWD_AUTH_TOKEN</code></td><td>Require the bearer token in this file on every JSON API route and every gRPC call. Unset (and no env var) leaves both open. <code>/api/health</code> and the dashboard's static assets stay open. See <a href="#security">Auth &amp; TLS</a>.</td></tr>
+        <tr><td><code>--auth-token</code></td><td>empty</td><td>The same token on the command line. It shows up in <code>ps</code>; prefer the file or the env var.</td></tr>
+        <tr><td><code>--auth-public-reads</code></td><td><code>false</code></td><td>With a token set, let anyone list and describe workflows (HTTP <code>GET /api/workflows[/{id}]</code>, gRPC <code>ListWorkflows</code>/<code>GetWorkflow</code>). Starting, signalling, terminating and every worker call still need the token.</td></tr>
+        <tr><td><code>--metrics-auth-token-file</code></td><td><code>$WORKFLOWD_METRICS_AUTH_TOKEN</code></td><td>Require a separate bearer token on <code>/metrics</code>, so Prometheus never holds the API token. Unset leaves <code>/metrics</code> open.</td></tr>
+        <tr><td><code>--tls-cert</code>, <code>--tls-key</code></td><td>empty</td><td>Serve TLS on the gRPC, dashboard/API and metrics listeners with this PEM certificate and key. Re-read when the files change, so a renewed certificate needs no restart. Unset: plaintext.</td></tr>
         <tr><td><code>--demo-worker</code></td><td><code>false</code></td><td>Run an in-process worker for the built-in demo activities (<code>reserve</code>, <code>charge</code>, <code>ship</code>, <code>release</code>), so <code>OrderSaga</code> and <code>OrderWorkflow</code> run with no separate worker. An input containing <code>decline</code> makes <code>charge</code> fail for good, which shows the saga compensating.</td></tr>
         <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated) this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
         <tr><td><code>--version</code></td><td>—</td><td>Print version and exit.</td></tr>
@@ -661,13 +666,46 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--node-id</code></td><td>empty</td><td>This node's id in <code>--peers</code>.</td></tr>
         <tr><td><code>--raft-addr</code></td><td>this node's <code>--peers</code> entry</td><td>Listen address for Raft traffic between nodes. Keep it on a private network.</td></tr>
         <tr><td><code>--raft-tick</code></td><td><code>100ms</code></td><td>Raft clock: leaders heartbeat every tick; followers start an election after 10–20 silent ticks.</td></tr>
+        <tr><td><code>--raft-tls-cert</code>, <code>--raft-tls-key</code>, <code>--raft-tls-ca</code></td><td>empty</td><td>Mutual TLS between cluster members: each node presents its certificate and accepts only peers whose certificate the CA signed. All three or none.</td></tr>
       </tbody>
     </table>
     <div class="callout warn">
-      <strong>Auth is optional and there is no TLS.</strong> Without <code>--auth-token</code>, anyone who can reach these ports can start,
-      signal and terminate workflows. With it, the JSON API requires the token but gRPC and metrics remain unauthenticated.
-      Bind everything to localhost or a private network either way.
+      <strong>Auth and TLS are off unless you turn them on.</strong> With no flags set, every port is plaintext and anyone who can reach
+      the HTTP or gRPC port can start, signal and terminate workflows. Set a token and certificates as described in
+      <a href="#security">Auth &amp; TLS</a>, or bind everything to localhost and put a TLS proxy in front.
     </div>
+
+    <h2 id="security">Auth &amp; TLS</h2>
+    <p>Each piece is opt-in and independent, so a deployment that sets none of them behaves exactly as before.</p>
+    <table>
+      <thead><tr><th>Port</th><th>TLS</th><th>Auth</th></tr></thead>
+      <tbody>
+        <tr><td>gRPC (<code>--addr</code>)</td><td><code>--tls-cert</code>/<code>--tls-key</code></td><td>The API token, as <code>authorization: Bearer &lt;token&gt;</code> metadata on every call</td></tr>
+        <tr><td>Dashboard + JSON API (<code>--http-addr</code>)</td><td><code>--tls-cert</code>/<code>--tls-key</code></td><td>The API token on every <code>/api</code> route but <code>/api/health</code>; reads can be left open with <code>--auth-public-reads</code></td></tr>
+        <tr><td>Metrics (<code>--metrics-addr</code>)</td><td><code>--tls-cert</code>/<code>--tls-key</code></td><td>Its own token, <code>--metrics-auth-token-file</code></td></tr>
+        <tr><td>Raft (<code>--raft-addr</code>)</td><td>Mutual TLS, <code>--raft-tls-*</code></td><td>The peer certificate is the credential</td></tr>
+      </tbody>
+    </table>
+    <p>Keep secrets out of the command line and the unit file: a token file (mode <code>600</code>; the daemon warns if others can
+      read it) or an environment variable from a root-only <code>EnvironmentFile</code>.</p>
+    <pre data-lang="sh"><code>openssl rand -hex 32 &gt; /etc/workflowd/token &amp;&amp; chmod 600 /etc/workflowd/token
+workflowd --serve --auth-token-file /etc/workflowd/token \
+  --tls-cert /etc/workflowd/tls.crt --tls-key /etc/workflowd/tls.key</code></pre>
+    <p>Clients send the same token. The dashboard asks for it once per tab when the API answers <code>401</code>.</p>
+    <pre data-lang="go"><code>c, err := client.Dial(client.Options{
+    Addrs:     []string{"workflowd.internal:7233"},
+    TLS:       &amp;tls.Config{},                       // or RootCAs: your CA pool
+    AuthToken: os.Getenv("WORKFLOWD_AUTH_TOKEN"),
+})</code></pre>
+    <pre data-lang="js"><code>// TypeScript: for a private CA, start node with NODE_EXTRA_CA_CERTS=/path/ca.pem
+new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORKFLOWD_AUTH_TOKEN });</code></pre>
+    <pre data-lang="py"><code>Worker(address="https://workflowd.internal:8233",
+       token=os.environ["WORKFLOWD_AUTH_TOKEN"], ca_file="/path/ca.pem")  # ca_file only for a private CA</code></pre>
+    <pre data-lang="java"><code>new Workflowd.Worker("https://workflowd.internal:8233", "worker-1",
+        System.getenv("WORKFLOWD_AUTH_TOKEN"), Workflowd.trustPem(Path.of("/path/ca.pem")));</code></pre>
+    <p>What this does not give you yet: there is one shared API token, so no per-user identities or roles; client
+      certificates are only checked on the Raft port; and any certificate the cluster CA signed can speak for any member,
+      so give the Raft CA to cluster nodes only.</p>
 
     <h2 id="api">gRPC API</h2>
     <p>
@@ -784,7 +822,7 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
       <thead><tr><th>Code</th><th>When</th></tr></thead>
       <tbody>
         <tr><td><code>400</code></td><td>Malformed JSON, unknown field, unknown workflow type, bad status filter, empty signal name</td></tr>
-        <tr><td><code>401</code></td><td>Missing or wrong bearer token (when <code>--auth-token</code> is set)</td></tr>
+        <tr><td><code>401</code></td><td>Missing or wrong bearer token (when a token is set; see <a href="#security">Auth &amp; TLS</a>)</td></tr>
         <tr><td><code>404</code></td><td>No such workflow</td></tr>
         <tr><td><code>409</code></td><td>Workflow already terminal (double terminate, signal after finish), or duplicate workflow id on start</td></tr>
         <tr><td><code>500</code></td><td>Unreadable or structurally invalid history</td></tr>
@@ -908,12 +946,13 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
     <p>Known and deliberate, as of the end of the 17-week roadmap:</p>
     <ul>
       <li><strong>Clustering is young.</strong> Membership is fixed by <code>--peers</code>; the Raft
-        port has no TLS or auth; every history write is a Raft commit under one engine lock, so a
+        port is plaintext unless you set <code>--raft-tls-*</code>; every history write is a Raft commit under one engine lock, so a
         cluster adds availability, not write throughput; the TypeScript and Python SDKs don't follow
         leader hints yet; and a single-node data directory can't be moved into a cluster. A single
         node's data directory is its single point of failure; back it up.</li>
-      <li><strong>No TLS</strong> on any port, and auth (when enabled) is a single shared bearer
-        token on the JSON API only; gRPC and metrics are unauthenticated. Keep ports private.</li>
+      <li><strong>Auth is one shared token.</strong> TLS and the token are opt-in and cover every
+        port (<a href="#security">Auth &amp; TLS</a>), but there are no per-user identities or roles,
+        and with nothing set every port is open plaintext.</li>
       <li><strong>Sequential steps.</strong> One step in flight per workflow; no parallel fan-out yet.</li>
       <li><strong>At-least-once</strong> activity execution, and a signal retried across a leader
         change can be recorded twice.</li>

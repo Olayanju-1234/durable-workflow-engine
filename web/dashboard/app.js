@@ -37,11 +37,44 @@ function fmtTime(iso) {
   return d.toLocaleString();
 }
 
+// An engine started with --auth-token-file wants a bearer token. Ask once per
+// page load; keep it in sessionStorage so it goes away with the tab.
+const TOKEN_KEY = 'workflowd-token';
+let apiToken = '';
+try { apiToken = sessionStorage.getItem(TOKEN_KEY) || ''; } catch { /* storage blocked */ }
+let tokenPrompted = false;
+
+function setToken(token) {
+  apiToken = token;
+  try {
+    if (token) sessionStorage.setItem(TOKEN_KEY, token);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  } catch { /* storage blocked: keep it in memory only */ }
+}
+
 async function api(path, options) {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+  const send = (token) => fetch(path, {
     ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
   });
+  const sent = apiToken;
+  let res = await send(sent);
+  if (res.status === 401) {
+    if (sent && sent === apiToken) setToken(''); // wrong or rotated: ask again on the next load
+    if (apiToken && apiToken !== sent) {
+      res = await send(apiToken); // a concurrent request was just given one
+    } else if (!tokenPrompted) {
+      tokenPrompted = true;
+      const token = (window.prompt('This workflowd requires an API token:') || '').trim();
+      if (token) {
+        setToken(token);
+        res = await send(token);
+      }
+    }
+  }
   const text = await res.text();
   const body = text ? JSON.parse(text) : {};
   if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);

@@ -10,7 +10,12 @@ import os
 from workflowd import ActivityFailure, Worker, WorkflowFailure
 
 ADDRESS = os.environ.get("WORKFLOWD_ADDR", "http://localhost:8233")
-worker = Worker(address=ADDRESS, worker_id="py-example")
+worker = Worker(
+    address=ADDRESS,
+    worker_id="py-example",
+    token=os.environ.get("WORKFLOWD_AUTH_TOKEN"),  # for an engine with auth on
+    ca_file=os.environ.get("WORKFLOWD_CA_FILE"),  # for a private CA over https
+)
 
 
 # ---- the workflow: ordinary Python ----

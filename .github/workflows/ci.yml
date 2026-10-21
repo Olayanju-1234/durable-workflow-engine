@@ -35,8 +35,9 @@ jobs:
       - name: Test (race)
         run: go test ./... -race -count=1
 
-  # Each SDK's example worker runs against a real engine built in the same job:
-  # one approved order completes, one rejected order compensates and fails.
+  # Each SDK's example worker runs against a real engine built in the same job,
+  # in plaintext and then over TLS with a required token: one approved order
+  # completes, one rejected order compensates and fails.
   sdk-e2e:
     runs-on: ubuntu-latest
     strategy:
@@ -69,8 +70,14 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Build workflowd
+        run: go build -o "$RUNNER_TEMP/workflowd" ./cmd/workflowd
+
       - name: End to end against workflowd
-        run: ./scripts/sdk-e2e.sh ${{ matrix.sdk }}
+        run: WORKFLOWD_BIN="$RUNNER_TEMP/workflowd" ./scripts/sdk-e2e.sh ${{ matrix.sdk }}
+
+      - name: End to end over TLS with a required token
+        run: E2E_SECURE=1 WORKFLOWD_BIN="$RUNNER_TEMP/workflowd" ./scripts/sdk-e2e.sh ${{ matrix.sdk }}
 
   # Proto lint and wire-compatibility check (ADR-0002). buf is a CI tool, not a
   # Go dependency; the binary is pinned and checksum-verified.

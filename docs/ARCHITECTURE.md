@@ -185,6 +185,29 @@ worker ─ CompleteTask(output | error) ─────────────�
   are recorded whether or not the workflow's type is registered; only the next decision
   waits for a worker to register it.
 
+## Auth and TLS (opt-in)
+
+Every listener is plaintext and open unless flags say otherwise, so existing
+deployments are unchanged. `internal/tlsconfig` builds the `*tls.Config`s: `Server`
+for the client-facing ports and `Peer` for Raft (mutual TLS, usable on both ends of a
+connection: it demands a client certificate from the CA and presents its own). Both
+re-read the certificate when its file's mtime changes and keep the last good one if a
+renewal is half-written.
+
+| Listener | TLS | Auth |
+|---|---|---|
+| gRPC | `--tls-cert/--tls-key` | `server.GRPCAuth`: unary + stream interceptors check `authorization: Bearer` metadata |
+| JSON API + dashboard | same cert | `HTTPAPI.requireAuth`: every `/api` route but health; `WithPublicReads` opens list/describe only |
+| Metrics | same cert | `server.BearerAuth` with its own token |
+| Raft | `--raft-tls-*` (mTLS) | the peer certificate |
+
+Tokens come from a file or an environment variable (`cmd/workflowd/security.go`); the
+argv flag still works but warns. One token covers HTTP and gRPC, compared in constant
+time. Polls (`/api/workflow-tasks`, `/api/activity-tasks`, `PollTask`) lease work, so
+they are never "reads". Clients: `client.Options{TLS, AuthToken}` in Go (a per-RPC
+credential allowed over plaintext, for TLS-terminating proxies), and a `token` option
+plus an https address in the TypeScript, Python and Java SDKs.
+
 ## Determinism
 
 Replay only works if workflow functions are deterministic: same history, same sequence of

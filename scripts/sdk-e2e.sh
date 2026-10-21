@@ -4,9 +4,9 @@
 #
 #   scripts/sdk-e2e.sh typescript|python|java
 #
-# WORKFLOWD_BIN skips the build; E2E_ENGINE_FLAGS adds engine flags; E2E_SCHEME,
-# E2E_CURL_FLAGS and E2E_WORKER_ENV let a caller run the same check over TLS
-# with a token. Needs curl and jq, plus node, python3 or a JDK.
+# E2E_SECURE=1 runs the same check over TLS (a throwaway CA) with a required
+# token, and also checks that plaintext and token-less calls are refused.
+# WORKFLOWD_BIN skips the build. Needs Go, curl and jq, plus node, python3 or a JDK.
 set -euo pipefail
 
 lang=${1:?usage: sdk-e2e.sh typescript|python|java}
@@ -14,10 +14,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 http_port=${E2E_HTTP_PORT:-18233}
 grpc_port=${E2E_GRPC_PORT:-17233}
-addr="${E2E_SCHEME:-http}://127.0.0.1:$http_port"
-read -r -a curl_flags <<<"${E2E_CURL_FLAGS:-}"
-read -r -a engine_flags <<<"${E2E_ENGINE_FLAGS:-}"
-read -r -a worker_env <<<"${E2E_WORKER_ENV:-}"
+scheme=http
+curl_flags=()
+engine_flags=()
+worker_env=()
 pids=()
 
 cleanup() {
@@ -27,7 +27,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log() { printf '[e2e:%s] %s\n' "$lang" "$*"; }
+label=$lang
+log() { printf '[e2e:%s] %s\n' "$label" "$*"; }
 fail() {
   log "FAIL: $*"
   log "--- engine log"; cat "$work/engine.log" || true
@@ -42,11 +43,32 @@ if [ -z "$bin" ]; then
   (cd "$root" && go build -o "$bin" ./cmd/workflowd)
 fi
 
+if [ "${E2E_SECURE:-}" = 1 ]; then
+  label="$lang+tls"
+  (cd "$root" && go run ./internal/tlsconfig/tlstest/gencert "$work")
+  token="e2e-$RANDOM$RANDOM$RANDOM"
+  (umask 077 && printf '%s\n' "$token" >"$work/token")
+  scheme=https
+  engine_flags=(--tls-cert "$work/server.pem" --tls-key "$work/server-key.pem" --auth-token-file "$work/token")
+  curl_flags=(--cacert "$work/test-ca.pem" -H "Authorization: Bearer $token")
+  worker_env=(WORKFLOWD_AUTH_TOKEN="$token" WORKFLOWD_CA_FILE="$work/test-ca.pem" NODE_EXTRA_CA_CERTS="$work/test-ca.pem")
+fi
+addr="$scheme://127.0.0.1:$http_port"
+
 "$bin" --serve --data-dir "$work/data" --addr "127.0.0.1:$grpc_port" \
   --http-addr "127.0.0.1:$http_port" --metrics-addr "" ${engine_flags[@]+"${engine_flags[@]}"} >"$work/engine.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 50); do api -f "$addr/api/health" >/dev/null 2>&1 && break; sleep 0.2; done
 api -f "$addr/api/health" >/dev/null || fail "engine did not come up at $addr"
+
+if [ "$scheme" = https ]; then
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$work/test-ca.pem" "$addr/api/workflows") || true
+  [ "$code" = 401 ] || fail "a request without the token got HTTP $code, want 401"
+  if code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$http_port/api/health" 2>/dev/null) && [ "$code" = 200 ]; then
+    fail "the TLS listener answered plaintext HTTP"
+  fi
+  log "token-less and plaintext requests refused"
+fi
 
 case "$lang" in
   typescript)

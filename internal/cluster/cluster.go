@@ -6,6 +6,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
@@ -54,6 +56,10 @@ type Config struct {
 	// OnEngine, if set, runs next to each term's engine (the demo worker,
 	// retention) until ctx is cancelled at the end of the term.
 	OnEngine func(ctx context.Context, e *server.Engine)
+
+	// PeerTLS, if set, is a mutual-TLS config (tlsconfig.Peer) for Raft traffic
+	// in both directions: peers without a certificate from its CA are refused.
+	PeerTLS *tls.Config
 
 	// Zero values pick raft's defaults.
 	TickInterval  time.Duration
@@ -108,7 +114,13 @@ func Start(cfg Config) (*Cluster, error) {
 		return nil, err
 	}
 	c.storage = storage
-	c.transport, err = raft.NewGRPCTransport(cfg.NodeID, cfg.Peers, cfg.Logger, grpc.WithUnaryInterceptor(c.advertise))
+	dialOpts := []grpc.DialOption{grpc.WithUnaryInterceptor(c.advertise)}
+	srvOpts := append(raft.ServerOptions(), grpc.UnaryInterceptor(c.observe))
+	if cfg.PeerTLS != nil {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(cfg.PeerTLS)))
+		srvOpts = append(srvOpts, grpc.Creds(credentials.NewTLS(cfg.PeerTLS)))
+	}
+	c.transport, err = raft.NewGRPCTransport(cfg.NodeID, cfg.Peers, cfg.Logger, dialOpts...)
 	if err != nil {
 		storage.Close()
 		return nil, err
@@ -134,7 +146,7 @@ func Start(cfg Config) (*Cluster, error) {
 		storage.Close()
 		return nil, fmt.Errorf("cluster: listen %s: %w", cfg.RaftAddr, err)
 	}
-	c.raftSrv = grpc.NewServer(append(raft.ServerOptions(), grpc.UnaryInterceptor(c.observe))...)
+	c.raftSrv = grpc.NewServer(srvOpts...)
 	raft.RegisterServer(c.raftSrv, c.node)
 	go func() { _ = c.raftSrv.Serve(lis) }()
 	c.node.Start()

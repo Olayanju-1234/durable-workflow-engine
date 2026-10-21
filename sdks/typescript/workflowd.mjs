@@ -196,8 +196,14 @@ export async function decide(fn, task) {
  * serves both workflow decisions and activity executions.
  */
 export class Worker {
-  constructor({ address = 'http://localhost:8233', workerId, sdk = 'typescript/0.1.0' } = {}) {
+  /**
+   * `token` is sent as `Authorization: Bearer <token>` for an engine started
+   * with --auth-token-file. An https address uses Node's trust store; for a
+   * private CA, start Node with NODE_EXTRA_CA_CERTS=/path/to/ca.pem.
+   */
+  constructor({ address = 'http://localhost:8233', workerId, sdk = 'typescript/0.1.0', token } = {}) {
     this.address = address.replace(/\/$/, '');
+    this.token = token;
     this.workerId = workerId ?? `ts-worker-${Math.random().toString(16).slice(2, 10)}`;
     this.sdk = sdk;
     this.workflows = new Map();
@@ -224,7 +230,11 @@ export class Worker {
   async _fetch(path, options = {}) {
     const res = await fetch(this.address + path, {
       ...options,
-      headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+        ...(options.headers ?? {}),
+      },
     });
     if (res.status === 204) return null; // long-poll expired
     const text = await res.text();

@@ -21,7 +21,7 @@ type authHarness struct {
 	store *history.HistoryStore
 }
 
-func newAuthHarness(t *testing.T, token string) *authHarness {
+func newAuthHarness(t *testing.T, token string, extra ...server.HTTPOption) *authHarness {
 	t.Helper()
 
 	store, err := history.NewHistoryStore(t.TempDir())
@@ -35,7 +35,7 @@ func newAuthHarness(t *testing.T, token string) *authHarness {
 	t.Cleanup(engine.Close)
 	engine.Register(state.WorkflowDefinition{Type: "Flow", Steps: state.Activities("one")})
 
-	api := server.NewHTTPAPI(engine, logger, server.WithAuthToken(token))
+	api := server.NewHTTPAPI(engine, logger, append([]server.HTTPOption{server.WithAuthToken(token)}, extra...)...)
 	mux := api.Handler()
 	mux.Handle("/", webStub{})
 	srv := httptest.NewServer(api.Wrap(mux))
@@ -89,6 +89,69 @@ func TestHTTPAPIAuth(t *testing.T) {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// With public reads, anyone can list and describe workflows; everything that
+// changes state or leases work still needs the token.
+func TestHTTPAPIAuthPublicReads(t *testing.T) {
+	h := newAuthHarness(t, "sekrit", server.WithPublicReads())
+	if got := h.do(t, "POST", "/api/workflows", "sekrit", `{"type":"Flow","workflow_id":"p-1"}`); got != http.StatusCreated {
+		t.Fatalf("start with token: got %d", got)
+	}
+	tests := []struct {
+		name, method, path, body string
+		want                     int
+	}{
+		{"list is open", "GET", "/api/workflows", "", http.StatusOK},
+		{"describe is open", "GET", "/api/workflows/p-1", "", http.StatusOK},
+		{"start needs the token", "POST", "/api/workflows", `{"type":"Flow"}`, http.StatusUnauthorized},
+		{"signal needs the token", "POST", "/api/workflows/p-1/signal", `{"name":"x"}`, http.StatusUnauthorized},
+		{"terminate needs the token", "POST", "/api/workflows/p-1/terminate", `{}`, http.StatusUnauthorized},
+		{"workflow-task poll needs the token", "GET", "/api/workflow-tasks?types=Flow", "", http.StatusUnauthorized},
+		{"activity poll needs the token", "GET", "/api/activity-tasks", "", http.StatusUnauthorized},
+		{"type registration needs the token", "POST", "/api/workflow-types", `{"workflow_types":["X"]}`, http.StatusUnauthorized},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := h.do(t, tc.method, tc.path, "", tc.body); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBearerAuthGuardsMetrics(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("workflowd_up 1")) })
+	open := httptest.NewServer(server.BearerAuth("", ok))
+	t.Cleanup(open.Close)
+	guarded := httptest.NewServer(server.BearerAuth("scrape", ok))
+	t.Cleanup(guarded.Close)
+
+	get := func(url, token string) int {
+		t.Helper()
+		req, _ := http.NewRequest("GET", url+"/metrics", nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	if got := get(open.URL, ""); got != http.StatusOK {
+		t.Errorf("no token configured: got %d, want 200", got)
+	}
+	if got := get(guarded.URL, ""); got != http.StatusUnauthorized {
+		t.Errorf("guarded, no token: got %d, want 401", got)
+	}
+	if got := get(guarded.URL, "wrong"); got != http.StatusUnauthorized {
+		t.Errorf("guarded, wrong token: got %d, want 401", got)
+	}
+	if got := get(guarded.URL, "scrape"); got != http.StatusOK {
+		t.Errorf("guarded, right token: got %d, want 200", got)
 	}
 }
 

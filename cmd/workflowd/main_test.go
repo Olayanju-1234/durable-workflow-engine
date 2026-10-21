@@ -23,9 +23,12 @@ func TestBrowseURL(t *testing.T) {
 		"example.com:8233": "http://example.com:8233",
 	}
 	for addr, want := range tests {
-		if got := browseURL(addr); got != want {
+		if got := browseURL(addr, false); got != want {
 			t.Errorf("browseURL(%q) = %q, want %q", addr, got, want)
 		}
+	}
+	if got := browseURL(":8233", true); got != "https://localhost:8233" {
+		t.Errorf("browseURL with TLS = %q", got)
 	}
 }
 

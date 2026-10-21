@@ -1,10 +1,17 @@
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -12,6 +19,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 
 /**
  * workflowd — Java SDK.
@@ -212,6 +221,7 @@ public final class Workflowd {
     public static final class Worker {
         private final String address;
         private final String workerId;
+        private final String authToken;
         private final HttpClient http;
         private final Map<String, WorkflowFunction> workflows = new ConcurrentHashMap<>();
         private final Map<String, ActivityFunction> activities = new ConcurrentHashMap<>();
@@ -222,9 +232,22 @@ public final class Workflowd {
         }
 
         public Worker(String address, String workerId) {
+            this(address, workerId, null, null);
+        }
+
+        /**
+         * @param authToken  sent as {@code Authorization: Bearer <token>} for an engine started
+         *                   with --auth-token-file; null for none
+         * @param sslContext trust settings for an https address, e.g. {@link #trustPem}; null
+         *                   uses the JVM's default trust store
+         */
+        public Worker(String address, String workerId, String authToken, SSLContext sslContext) {
             this.address = address.endsWith("/") ? address.substring(0, address.length() - 1) : address;
             this.workerId = workerId;
-            this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+            this.authToken = authToken;
+            HttpClient.Builder http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10));
+            if (sslContext != null) http.sslContext(sslContext);
+            this.http = http.build();
         }
 
         public Worker workflow(String type, WorkflowFunction fn) {
@@ -245,12 +268,12 @@ public final class Workflowd {
             HttpRequest.BodyPublisher pub = body == null
                     ? HttpRequest.BodyPublishers.noBody()
                     : HttpRequest.BodyPublishers.ofString(Json.write(body));
-            HttpRequest req = HttpRequest.newBuilder(URI.create(address + path))
+            HttpRequest.Builder req = HttpRequest.newBuilder(URI.create(address + path))
                     .header("Content-Type", "application/json")
                     .timeout(Duration.ofSeconds(40))
-                    .method(method, pub)
-                    .build();
-            HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
+                    .method(method, pub);
+            if (authToken != null && !authToken.isEmpty()) req.header("Authorization", "Bearer " + authToken);
+            HttpResponse<String> res = http.send(req.build(), HttpResponse.BodyHandlers.ofString());
             if (res.statusCode() == 204) return null; // long-poll expired
             Object parsed = res.body().isEmpty() ? new LinkedHashMap<String, Object>() : Json.parse(res.body());
             if (res.statusCode() >= 400) {
@@ -399,6 +422,23 @@ public final class Workflowd {
             a.start();
             while (!stopped.get()) Thread.sleep(200);
         }
+    }
+
+    /** An SSLContext trusting only the PEM certificates in caFile: for an engine with a private CA. */
+    public static SSLContext trustPem(Path caFile) throws IOException, GeneralSecurityException {
+        KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
+        trust.load(null, null);
+        try (InputStream in = Files.newInputStream(caFile)) {
+            int n = 0;
+            for (Certificate c : CertificateFactory.getInstance("X.509").generateCertificates(in)) {
+                trust.setCertificateEntry("ca-" + n++, c);
+            }
+        }
+        TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        tmf.init(trust);
+        SSLContext ctx = SSLContext.getInstance("TLS");
+        ctx.init(null, tmf.getTrustManagers(), null);
+        return ctx;
     }
 
     // ---- helpers ----

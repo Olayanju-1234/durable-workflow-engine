@@ -192,8 +192,9 @@ Followers answer with the leader's address, and the Go client follows it: give
 ## Limitations
 
 - **Pre-alpha.** No real production traffic yet; APIs may still change.
-- **No TLS or auth on gRPC.** `--auth-token` covers only the HTTP API's mutating routes. Bind to
-  localhost or put a proxy in front.
+- **Auth and TLS are opt-in, and one token.** `--tls-cert`/`--tls-key` and `--auth-token-file`
+  cover gRPC, the JSON API and metrics; `--raft-tls-*` gives cluster members mutual TLS. With
+  none set, every port is open plaintext, and there are no per-user identities or roles yet.
 - **Throughput.** One engine-wide lock and a full history read per operation, and listing is a
   full scan. It has not been load-tested.
 - **At-least-once activities.** An activity can run twice if a worker dies after doing the work

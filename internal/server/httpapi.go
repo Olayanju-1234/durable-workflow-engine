@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,9 +34,11 @@ import (
 type HTTPAPI struct {
 	src EngineSource
 	log *slog.Logger
-	// authToken guards every mutating /api route when set (Authorization:
+	// authToken guards every /api route but health when set (Authorization:
 	// Bearer <token>). Empty disables auth entirely — the pre-existing default.
 	authToken string
+	// publicReads leaves workflow list/describe open even with authToken set.
+	publicReads bool
 	// demoWorker is reported by /api/health so the dashboard can guide visitors.
 	demoWorker bool
 	// clusterStatus, when set, is reported by /api/health under "cluster".
@@ -61,6 +62,12 @@ type HTTPOption func(*HTTPAPI)
 // stay open; every other /api route requires "Authorization: Bearer <token>".
 func WithAuthToken(token string) HTTPOption {
 	return func(a *HTTPAPI) { a.authToken = token }
+}
+
+// WithPublicReads lets anyone list and describe workflows while a token is
+// still required to start, signal or terminate them and to run workers.
+func WithPublicReads() HTTPOption {
+	return func(a *HTTPAPI) { a.publicReads = true }
 }
 
 // WithDemoWorker reports in /api/health that an in-process demo worker is
@@ -136,18 +143,18 @@ func (a *HTTPAPI) Wrap(h http.Handler) http.Handler {
 	return a.logRequests(a.requireAuth(h))
 }
 
-// requireAuth enforces the bearer token on mutating API routes when one is
+// requireAuth enforces the bearer token on API routes when one is
 // configured. Comparison is constant-time; the header form is exact ("Bearer").
 func (a *HTTPAPI) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.authToken == "" || !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/health" {
+		if a.authToken == "" || !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/health" ||
+			(a.publicReads && isPublicRead(r)) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(a.authToken)) != 1 {
+		if !validBearer(r.Header.Get("Authorization"), a.authToken) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="workflowd"`)
-			writeError(w, http.StatusUnauthorized, errors.New("missing or invalid bearer token"))
+			writeError(w, http.StatusUnauthorized, errMissingToken)
 			return
 		}
 		next.ServeHTTP(w, r)

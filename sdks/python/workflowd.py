@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import random
+import ssl
 import threading
 import time
 import urllib.error
@@ -176,8 +177,15 @@ class Worker:
         address: str = "http://localhost:8233",
         worker_id: Optional[str] = None,
         sdk: str = SDK_VERSION,
+        token: Optional[str] = None,
+        ca_file: Optional[str] = None,
     ):
+        """``token`` is sent as ``Authorization: Bearer <token>`` for an engine
+        started with --auth-token-file. ``ca_file`` trusts a private CA for an
+        https address; without it the system trust store is used."""
         self.address = address.rstrip("/")
+        self.token = token
+        self._ssl = ssl.create_default_context(cafile=ca_file) if ca_file else None
         self.worker_id = worker_id or f"py-worker-{random.randrange(16**8):08x}"
         self.sdk = sdk
         self.workflows: Dict[str, Callable[[Context], Any]] = {}
@@ -207,14 +215,12 @@ class Worker:
 
     def _request(self, method: str, path: str, body: Optional[dict] = None, timeout: float = 40.0):
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(
-            self.address + path,
-            data=data,
-            method=method,
-            headers={"Content-Type": "application/json"},
-        )
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(self.address + path, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as res:
+            with urllib.request.urlopen(req, timeout=timeout, context=self._ssl) as res:
                 if res.status == 204:
                     return None  # long-poll expired
                 raw = res.read()

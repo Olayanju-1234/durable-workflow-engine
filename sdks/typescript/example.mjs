@@ -9,7 +9,8 @@
 import { Worker, WorkflowFailure } from './workflowd.mjs';
 
 const address = process.env.WORKFLOWD_ADDR ?? 'http://localhost:8233';
-const worker = new Worker({ address, workerId: 'ts-example' });
+// For an engine with auth on; for a private CA, set NODE_EXTRA_CA_CERTS.
+const worker = new Worker({ address, workerId: 'ts-example', token: process.env.WORKFLOWD_AUTH_TOKEN });
 
 // ---- the workflow: ordinary async JavaScript ----
 worker.workflow('TsOrder', async (ctx) => {
