@@ -26,6 +26,12 @@ make proto     # regenerate Go from proto/*.proto (commit the generated .pb.go)
 Generated protobuf code is committed, so CI does not run `protoc`. If you edit a `.proto`,
 run `make proto` and commit the result.
 
+CI also runs [buf](https://buf.build) on every PR: `buf lint` with the rules in
+`buf.yaml`, and `buf breaking` against the PR's base. History files on disk are
+protobuf, so a field number, type or JSON name may never change; add new fields
+instead, and `reserved` the numbers of removed ones. Run the same checks locally with
+`make buf` (once) and `make proto-check`.
+
 ## Code conventions
 
 - `gofmt` is mandatory (CI fails otherwise). Prefer `go vet`-clean code.

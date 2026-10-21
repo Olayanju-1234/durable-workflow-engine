@@ -71,3 +71,32 @@ jobs:
 
       - name: End to end against workflowd
         run: ./scripts/sdk-e2e.sh ${{ matrix.sdk }}
+
+  # Proto lint and wire-compatibility check (ADR-0002). buf is a CI tool, not a
+  # Go dependency; the binary is pinned and checksum-verified.
+  proto:
+    runs-on: ubuntu-latest
+    env:
+      BUF_VERSION: '1.73.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install buf
+        run: |
+          mkdir -p "$RUNNER_TEMP/buf" && cd "$RUNNER_TEMP/buf"
+          base="https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}"
+          curl -sSfLO "$base/buf-Linux-x86_64" && curl -sSfLO "$base/sha256.txt"
+          grep ' buf-Linux-x86_64$' sha256.txt | sha256sum -c -
+          chmod +x buf-Linux-x86_64 && mv buf-Linux-x86_64 buf
+          echo "$RUNNER_TEMP/buf" >> "$GITHUB_PATH"
+
+      - name: Lint
+        run: buf lint
+
+      # A PR is checked against its base; a push to main against the commit before it.
+      - name: Breaking changes
+        env:
+          AGAINST: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: buf breaking --against ".git#ref=${AGAINST},subdir=proto"

@@ -1,7 +1,7 @@
 GOBIN   := $(shell go env GOPATH)/bin
 MODULE  := github.com/olayanju-1234/durable-workflow-engine
 
-.PHONY: all tools proto fmt fmtcheck vet build test cover run cluster ci
+.PHONY: all tools buf proto proto-check fmt fmtcheck vet build test cover run cluster ci
 
 all: build
 
@@ -9,6 +9,16 @@ all: build
 tools:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+# buf lints the protos and checks wire compatibility (CI pins the same version).
+BUF_VERSION := v1.73.0
+buf:
+	go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+
+# Lint, and compare against main for wire-breaking changes. Needs `make buf`.
+proto-check:
+	PATH="$(GOBIN):$$PATH" buf lint
+	PATH="$(GOBIN):$$PATH" buf breaking --against '.git#branch=main,subdir=proto'
 
 # Regenerate Go bindings from proto/*.proto into their go_package dirs.
 # event.proto -> message types; service.proto -> messages + gRPC stubs;
