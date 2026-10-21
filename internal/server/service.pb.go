@@ -368,10 +368,13 @@ func (x *PollWorkflowTaskResponse) GetTask() *WorkflowTask {
 
 // ScheduleActivityCommand: run a named activity on a worker.
 type ScheduleActivityCommand struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StepName      string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
-	Sequence      int64                  `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	Input         []byte                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	StepName string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
+	Sequence int64                  `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Input    []byte                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
+	// Optional: overrides the engine's retry policy for this step name. It is
+	// recorded on the step, so the retries survive restarts and failovers.
+	RetryPolicy   *history.RetryPolicy `protobuf:"bytes,4,opt,name=retry_policy,json=retryPolicy,proto3" json:"retry_policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -423,6 +426,13 @@ func (x *ScheduleActivityCommand) GetSequence() int64 {
 func (x *ScheduleActivityCommand) GetInput() []byte {
 	if x != nil {
 		return x.Input
+	}
+	return nil
+}
+
+func (x *ScheduleActivityCommand) GetRetryPolicy() *history.RetryPolicy {
+	if x != nil {
+		return x.RetryPolicy
 	}
 	return nil
 }
@@ -1870,8 +1880,10 @@ type StepInfo struct {
 	Error    string `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
 	Output   []byte `protobuf:"bytes,7,opt,name=output,proto3" json:"output,omitempty"`
 	// Timer steps: unix-nanoseconds deadline. Signal steps: the awaited signal.
-	FireAt        int64  `protobuf:"varint,8,opt,name=fire_at,json=fireAt,proto3" json:"fire_at,omitempty"`
-	SignalName    string `protobuf:"bytes,9,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
+	FireAt     int64  `protobuf:"varint,8,opt,name=fire_at,json=fireAt,proto3" json:"fire_at,omitempty"`
+	SignalName string `protobuf:"bytes,9,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
+	// Marker steps: "version" or "side_effect".
+	Marker        string `protobuf:"bytes,10,opt,name=marker,proto3" json:"marker,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1965,6 +1977,13 @@ func (x *StepInfo) GetFireAt() int64 {
 func (x *StepInfo) GetSignalName() string {
 	if x != nil {
 		return x.SignalName
+	}
+	return ""
+}
+
+func (x *StepInfo) GetMarker() string {
+	if x != nil {
+		return x.Marker
 	}
 	return ""
 }
@@ -2149,11 +2168,12 @@ const file_service_proto_rawDesc = "" +
 	"task_token\x18\x04 \x01(\tR\ttaskToken\x12%\n" +
 	"\x0ehistory_length\x18\x05 \x01(\x03R\rhistoryLength\"I\n" +
 	"\x18PollWorkflowTaskResponse\x12-\n" +
-	"\x04task\x18\x01 \x01(\v2\x19.workflow.v1.WorkflowTaskR\x04task\"h\n" +
+	"\x04task\x18\x01 \x01(\v2\x19.workflow.v1.WorkflowTaskR\x04task\"\xa4\x01\n" +
 	"\x17ScheduleActivityCommand\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x14\n" +
-	"\x05input\x18\x03 \x01(\fR\x05input\"}\n" +
+	"\x05input\x18\x03 \x01(\fR\x05input\x12:\n" +
+	"\fretry_policy\x18\x04 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\"}\n" +
 	"\x11StartTimerCommand\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x19\n" +
@@ -2256,7 +2276,7 @@ const file_service_proto_rawDesc = "" +
 	"\tworkflows\x18\x01 \x03(\v2\x1c.workflow.v1.WorkflowSummaryR\tworkflows\"5\n" +
 	"\x12GetWorkflowRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
-	"workflowId\"\xf3\x01\n" +
+	"workflowId\"\x8b\x02\n" +
 	"\bStepInfo\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x12\n" +
@@ -2267,7 +2287,9 @@ const file_service_proto_rawDesc = "" +
 	"\x06output\x18\a \x01(\fR\x06output\x12\x17\n" +
 	"\afire_at\x18\b \x01(\x03R\x06fireAt\x12\x1f\n" +
 	"\vsignal_name\x18\t \x01(\tR\n" +
-	"signalName\"\xa8\x01\n" +
+	"signalName\x12\x16\n" +
+	"\x06marker\x18\n" +
+	" \x01(\tR\x06marker\"\xa8\x01\n" +
 	"\x13GetWorkflowResponse\x126\n" +
 	"\asummary\x18\x01 \x01(\v2\x1c.workflow.v1.WorkflowSummaryR\asummary\x12+\n" +
 	"\x05steps\x18\x02 \x03(\v2\x15.workflow.v1.StepInfoR\x05steps\x12\x14\n" +
@@ -2349,50 +2371,52 @@ var file_service_proto_goTypes = []any{
 	(*TerminateWorkflowRequest)(nil),     // 32: workflow.v1.TerminateWorkflowRequest
 	(*TerminateWorkflowResponse)(nil),    // 33: workflow.v1.TerminateWorkflowResponse
 	(*history.HistoryEvent)(nil),         // 34: history.v1.HistoryEvent
+	(*history.RetryPolicy)(nil),          // 35: history.v1.RetryPolicy
 }
 var file_service_proto_depIdxs = []int32{
 	34, // 0: workflow.v1.WorkflowTask.history:type_name -> history.v1.HistoryEvent
 	4,  // 1: workflow.v1.PollWorkflowTaskResponse.task:type_name -> workflow.v1.WorkflowTask
-	6,  // 2: workflow.v1.WorkflowCommand.schedule_activity:type_name -> workflow.v1.ScheduleActivityCommand
-	7,  // 3: workflow.v1.WorkflowCommand.start_timer:type_name -> workflow.v1.StartTimerCommand
-	8,  // 4: workflow.v1.WorkflowCommand.await_signal:type_name -> workflow.v1.AwaitSignalCommand
-	10, // 5: workflow.v1.WorkflowCommand.complete_workflow:type_name -> workflow.v1.CompleteWorkflowCommand
-	11, // 6: workflow.v1.WorkflowCommand.fail_workflow:type_name -> workflow.v1.FailWorkflowCommand
-	9,  // 7: workflow.v1.WorkflowCommand.record_marker:type_name -> workflow.v1.RecordMarkerCommand
-	12, // 8: workflow.v1.CompleteWorkflowTaskRequest.command:type_name -> workflow.v1.WorkflowCommand
-	18, // 9: workflow.v1.PollTaskResponse.task:type_name -> workflow.v1.Task
-	0,  // 10: workflow.v1.ListWorkflowsRequest.status_filter:type_name -> workflow.v1.WorkflowStatus
-	0,  // 11: workflow.v1.WorkflowSummary.status:type_name -> workflow.v1.WorkflowStatus
-	27, // 12: workflow.v1.ListWorkflowsResponse.workflows:type_name -> workflow.v1.WorkflowSummary
-	27, // 13: workflow.v1.GetWorkflowResponse.summary:type_name -> workflow.v1.WorkflowSummary
-	30, // 14: workflow.v1.GetWorkflowResponse.steps:type_name -> workflow.v1.StepInfo
-	15, // 15: workflow.v1.WorkflowService.StartWorkflow:input_type -> workflow.v1.StartWorkflowRequest
-	17, // 16: workflow.v1.WorkflowService.PollTask:input_type -> workflow.v1.PollTaskRequest
-	20, // 17: workflow.v1.WorkflowService.CompleteTask:input_type -> workflow.v1.CompleteTaskRequest
-	24, // 18: workflow.v1.WorkflowService.SignalWorkflow:input_type -> workflow.v1.SignalWorkflowRequest
-	22, // 19: workflow.v1.WorkflowService.Heartbeat:input_type -> workflow.v1.HeartbeatRequest
-	26, // 20: workflow.v1.WorkflowService.ListWorkflows:input_type -> workflow.v1.ListWorkflowsRequest
-	29, // 21: workflow.v1.WorkflowService.GetWorkflow:input_type -> workflow.v1.GetWorkflowRequest
-	32, // 22: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
-	1,  // 23: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
-	3,  // 24: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
-	13, // 25: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
-	16, // 26: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
-	19, // 27: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
-	21, // 28: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
-	25, // 29: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
-	23, // 30: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
-	28, // 31: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
-	31, // 32: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
-	33, // 33: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
-	2,  // 34: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
-	5,  // 35: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
-	14, // 36: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
-	26, // [26:37] is the sub-list for method output_type
-	15, // [15:26] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	35, // 2: workflow.v1.ScheduleActivityCommand.retry_policy:type_name -> history.v1.RetryPolicy
+	6,  // 3: workflow.v1.WorkflowCommand.schedule_activity:type_name -> workflow.v1.ScheduleActivityCommand
+	7,  // 4: workflow.v1.WorkflowCommand.start_timer:type_name -> workflow.v1.StartTimerCommand
+	8,  // 5: workflow.v1.WorkflowCommand.await_signal:type_name -> workflow.v1.AwaitSignalCommand
+	10, // 6: workflow.v1.WorkflowCommand.complete_workflow:type_name -> workflow.v1.CompleteWorkflowCommand
+	11, // 7: workflow.v1.WorkflowCommand.fail_workflow:type_name -> workflow.v1.FailWorkflowCommand
+	9,  // 8: workflow.v1.WorkflowCommand.record_marker:type_name -> workflow.v1.RecordMarkerCommand
+	12, // 9: workflow.v1.CompleteWorkflowTaskRequest.command:type_name -> workflow.v1.WorkflowCommand
+	18, // 10: workflow.v1.PollTaskResponse.task:type_name -> workflow.v1.Task
+	0,  // 11: workflow.v1.ListWorkflowsRequest.status_filter:type_name -> workflow.v1.WorkflowStatus
+	0,  // 12: workflow.v1.WorkflowSummary.status:type_name -> workflow.v1.WorkflowStatus
+	27, // 13: workflow.v1.ListWorkflowsResponse.workflows:type_name -> workflow.v1.WorkflowSummary
+	27, // 14: workflow.v1.GetWorkflowResponse.summary:type_name -> workflow.v1.WorkflowSummary
+	30, // 15: workflow.v1.GetWorkflowResponse.steps:type_name -> workflow.v1.StepInfo
+	15, // 16: workflow.v1.WorkflowService.StartWorkflow:input_type -> workflow.v1.StartWorkflowRequest
+	17, // 17: workflow.v1.WorkflowService.PollTask:input_type -> workflow.v1.PollTaskRequest
+	20, // 18: workflow.v1.WorkflowService.CompleteTask:input_type -> workflow.v1.CompleteTaskRequest
+	24, // 19: workflow.v1.WorkflowService.SignalWorkflow:input_type -> workflow.v1.SignalWorkflowRequest
+	22, // 20: workflow.v1.WorkflowService.Heartbeat:input_type -> workflow.v1.HeartbeatRequest
+	26, // 21: workflow.v1.WorkflowService.ListWorkflows:input_type -> workflow.v1.ListWorkflowsRequest
+	29, // 22: workflow.v1.WorkflowService.GetWorkflow:input_type -> workflow.v1.GetWorkflowRequest
+	32, // 23: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
+	1,  // 24: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
+	3,  // 25: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
+	13, // 26: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
+	16, // 27: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
+	19, // 28: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
+	21, // 29: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
+	25, // 30: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
+	23, // 31: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
+	28, // 32: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
+	31, // 33: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
+	33, // 34: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
+	2,  // 35: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
+	5,  // 36: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
+	14, // 37: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
+	27, // [27:38] is the sub-list for method output_type
+	16, // [16:27] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_service_proto_init() }

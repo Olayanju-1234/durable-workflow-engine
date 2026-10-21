@@ -85,6 +85,7 @@ func (e *Engine) GetWorkflow(workflowID string) (*GetWorkflowResponse, error) {
 			Output:     s.Output,
 			FireAt:     s.FireAt,
 			SignalName: s.Signal,
+			Marker:     s.Marker,
 		})
 	}
 	return &GetWorkflowResponse{

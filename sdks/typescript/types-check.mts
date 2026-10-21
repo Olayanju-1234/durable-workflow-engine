@@ -1,6 +1,6 @@
 // Compile-only check that workflowd.d.mts describes the SDK as the examples
 // use it (CI: tsc --noEmit). Not shipped in the npm package.
-import { ActivityFailure, decide, Worker, WorkflowFailure, type Context } from 'workflowd';
+import { ActivityFailure, DEFAULT_VERSION, decide, Worker, WorkflowFailure, type Context } from 'workflowd';
 
 const worker = new Worker({ address: 'https://localhost:8233', workerId: 'types', token: 'tok' });
 
@@ -18,6 +18,21 @@ worker.workflow('Order', async (ctx: Context) => {
   return ctx.activity('ship', reserved);
 });
 worker.activity('reserve', async (input: string) => `reserved(${input})`).activity('ship', (input) => input);
+
+const cluster = new Worker({ addresses: ['http://n1:8233', 'http://n2:8233'], activityConcurrency: 8 });
+cluster.workflow('Typed', async (ctx) => {
+  const order = ctx.inputAs<{ id: string }>('json');
+  const v: number = await ctx.getVersion('pricing', DEFAULT_VERSION, 1);
+  const id: string = await ctx.sideEffect('id', () => `${order.id}-${v}`);
+  const receipt = await ctx.activity<{ ok: boolean }>('charge', order, {
+    retry: { maxAttempts: 3, initialBackoffMs: 100 },
+    as: 'json',
+  });
+  const blob: Uint8Array = await ctx.activity('render', new Uint8Array([1, 2]), { as: 'bytes' });
+  const approved = await ctx.waitForSignal<{ yes: boolean }>('wait', 'approve', { as: 'json' });
+  return { id, ok: receipt.ok && approved.yes, size: blob.length };
+});
+cluster.activity('render', (bytes: Uint8Array, task) => (task.signal.aborted ? bytes : bytes.reverse()), { as: 'bytes' });
 
 async function client(): Promise<void> {
   const id: string = await worker.startWorkflow('Order', 'order-1');

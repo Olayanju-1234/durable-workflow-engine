@@ -47,9 +47,10 @@ type Func func(ctx Context, input []byte) ([]byte, error)
 // Context is implemented by workflowd; methods may be added in later releases.
 type Context interface {
 	// ExecuteActivity runs a named activity on a worker and returns its output.
-	// It returns an error if the activity failed (after any engine-side retries);
-	// the workflow can handle it, for example by compensating, or return it.
-	ExecuteActivity(name string, input []byte) ([]byte, error)
+	// It returns an error if the activity failed (after any retries); the
+	// workflow can handle it, for example by compensating, or return it.
+	// WithRetryPolicy makes the engine retry a failed attempt first.
+	ExecuteActivity(name string, input []byte, opts ...ActivityOption) ([]byte, error)
 
 	// Sleep pauses the workflow durably for d. The deadline is recorded, so the
 	// timer survives engine restarts and fires on time afterwards.
@@ -96,6 +97,31 @@ type Context interface {
 	// recorded result on every replay. Use it for small non-deterministic values
 	// such as a random id. It must not fail or do I/O; use an activity for that.
 	SideEffect(name string, fn func() []byte) []byte
+}
+
+// RetryPolicy retries a failed activity before the workflow sees its error.
+// MaxAttempts counts the first attempt (1 means no retries). The wait before
+// each retry starts at InitialBackoff and doubles, capped at MaxBackoff (zero
+// means no cap). The policy is recorded with the step, so retries continue
+// with it across engine restarts and failovers.
+type RetryPolicy struct {
+	MaxAttempts    int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+}
+
+// ActivityOption customises one ExecuteActivity call.
+type ActivityOption func(*ActivityOptions)
+
+// ActivityOptions is what the ActivityOption values of a call add up to.
+type ActivityOptions struct {
+	RetryPolicy *RetryPolicy
+}
+
+// WithRetryPolicy retries the activity per p, overriding any policy the
+// engine has for the step name.
+func WithRetryPolicy(p RetryPolicy) ActivityOption {
+	return func(o *ActivityOptions) { o.RetryPolicy = &p }
 }
 
 // Version identifies one variant of changed workflow code; see GetVersion.

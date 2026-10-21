@@ -7,14 +7,17 @@ logic can live in any language.
 | SDK | Path | Status |
 |-----|------|--------|
 | Go | [`../workflow/`](../workflow/), [`../worker/`](../worker/), [`../client/`](../client/) | ✅ tested end to end, including leader failover (gRPC) |
-| TypeScript / Node | [`typescript/`](typescript/) | ✅ run end to end in CI on every PR (Node 20) |
-| Python | [`python/`](python/) | ✅ run end to end in CI on every PR (Python 3.12) |
+| TypeScript / Node | [`typescript/`](typescript/) | ✅ run end to end in CI on every PR (Node 20), plus `sdks/sdk_e2e_test.go` |
+| Python | [`python/`](python/) | ✅ run end to end in CI on every PR (Python 3.12), plus `sdks/sdk_e2e_test.go` |
 | Java | [`java/`](java/) | ✅ compiled (`--release 11`, lint as errors) and run end to end in CI on every PR (JDK 21) |
 
 CI runs each SDK's example worker against a freshly built engine with
 [`scripts/sdk-e2e.sh`](../scripts/sdk-e2e.sh): an approved order must complete,
 and a rejected one must run its compensation and fail. Run it locally with
-`./scripts/sdk-e2e.sh typescript` (or `python`, `java`).
+`./scripts/sdk-e2e.sh typescript` (or `python`, `java`). `go test ./sdks` runs a
+longer TypeScript and Python scenario (leader hints, an engine restart, retry
+policies, versions, side effects, binary and JSON payloads, heartbeats) when
+`node` / `python3` are installed.
 
 Every SDK here is **dependency-free**: Node's `fetch`, Python's `urllib`, and
 Java's `HttpClient` are all built in. No protobuf toolchain. Each is also ready to
@@ -91,13 +94,49 @@ You need four things:
 Commands are a flat tagged union:
 
 ```json
-{"type": "schedule_activity", "step_name": "charge", "sequence": 2, "input": "..."}
+{"type": "schedule_activity", "step_name": "charge", "sequence": 2, "input": "...",
+ "retry_policy": {"max_attempts": 3, "initial_backoff_ms": 500, "max_backoff_ms": 10000}}
 {"type": "start_timer",       "step_name": "wait",   "sequence": 3, "delay_ms": 60000}
 {"type": "await_signal",      "step_name": "gate",   "sequence": 4, "signal_name": "approved"}
+{"type": "record_marker",     "step_name": "add-fraud-check", "sequence": 5, "marker": "version", "data": "1"}
 {"type": "complete_workflow", "output": "..."}
 {"type": "fail_workflow",     "error": "..."}
 {"type": "noop"}
 ```
+
+- **`retry_policy`** (optional) retries a failed attempt before the workflow sees
+  the error. It is recorded with the step, so retries continue across restarts,
+  and it overrides any policy the engine has for that step name.
+- **`record_marker`** is how `getVersion` / `sideEffect` work: a step that
+  completes as it is recorded. In `steps[]` it comes back with `"kind": "MARKER"`,
+  `"marker": "version"` or `"side_effect"`, and the value in `output`. A version
+  marker consumes a sequence only when it is there: an execution that predates
+  the `getVersion` call has no marker at that position and gets the default
+  version (-1) without moving the sequence, so its old history still lines up.
+
+### Payloads
+
+Payloads are bytes. Each travels as a JSON string (`input`, `output`,
+`payload`, `data`), and the engine adds a `<name>_base64` twin when the bytes
+are not valid UTF-8 (a JSON string cannot carry those exactly). Requests may
+send either; the base64 form wins. The SDKs send strings as text, byte arrays as
+base64 and anything else as JSON, and decode results as text unless asked for
+`json` or `bytes`.
+
+### Clusters and restarts
+
+Give a worker every node's address. A follower answers `503` with
+`{"leader_http": "host:port"}` (and an `X-Workflowd-Leader` header); move there.
+A `503` with no leader (an election is running) or an unreachable node means
+"try the next address after a short backoff". Every new engine (a restart, a new
+leader, a new term) starts with no registrations, so after any of those, call
+`POST /api/workflow-types` again before polling.
+
+### Heartbeats
+
+An activity running longer than its `lease_duration_ms` must call
+`POST /api/activity-tasks/heartbeat {"workflow_id", "lease_token", "worker_id"}`
+(the SDKs do it every third of the lease). `409` means the lease is gone: stop.
 
 ### The one hard part: how replay suspends
 

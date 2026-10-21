@@ -176,9 +176,9 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 	e.log.Warn("lease expired; reclaiming task", "workflow_id", tm.WorkflowID,
 		"worker_id", le.workerID, "step", le.stepName, "sequence", le.sequence, "attempt", tail.Attempts)
 
-	policy := e.retryPolicy(le.stepName)
+	policy := e.retryPolicy(tail)
 	if tail.Kind == state.KindActivity && tail.Attempts < policy.MaxAttempts {
-		e.scheduleRetryLocked(tm.WorkflowID, tail, policy.backoff(tail.Attempts))
+		e.scheduleRetryLocked(tm.WorkflowID, tail, policy.Delay(tail.Attempts))
 		return
 	}
 	e.advanceOrRetry(tm, tm.WorkflowID, st.WorkflowType)

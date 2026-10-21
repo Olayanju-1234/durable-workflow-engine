@@ -71,6 +71,7 @@ type replayContext struct {
 	next       int64
 	logger     *slog.Logger
 	versions   map[string]workflow.Version // changeID -> version, fixed by the first GetVersion call
+	retry      *state.RetryPolicy          // the current ExecuteActivity call's policy
 
 	suspended bool
 	decision  state.Decision
@@ -167,8 +168,25 @@ func (c *replayContext) Now() time.Time {
 	return time.Unix(0, c.now).UTC() // UTC: workers in other time zones must replay the same value
 }
 
-func (c *replayContext) ExecuteActivity(name string, input []byte) ([]byte, error) {
+func (c *replayContext) ExecuteActivity(name string, input []byte, opts ...workflow.ActivityOption) ([]byte, error) {
+	c.retry = retryPolicy(opts)
 	return c.command(state.KindActivity, name, "", input, 0)
+}
+
+// retryPolicy is the engine form of the call's options, nil when unset.
+func retryPolicy(opts []workflow.ActivityOption) *state.RetryPolicy {
+	var o workflow.ActivityOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.RetryPolicy == nil {
+		return nil
+	}
+	return &state.RetryPolicy{
+		MaxAttempts: o.RetryPolicy.MaxAttempts,
+		Backoff:     o.RetryPolicy.InitialBackoff,
+		MaxBackoff:  o.RetryPolicy.MaxBackoff,
+	}
 }
 
 func (c *replayContext) Sleep(name string, d time.Duration) {
@@ -264,6 +282,7 @@ func (c *replayContext) command(kind state.StepKind, name, signal string, input 
 	switch kind {
 	case state.KindActivity:
 		d.Type = state.DecideScheduleStep
+		d.Retry = c.retry
 	case state.KindTimer:
 		d.Type = state.DecideStartTimer
 		d.Delay = delay

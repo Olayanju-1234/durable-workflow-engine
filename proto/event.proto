@@ -50,6 +50,20 @@ message StepScheduledEvent {
   // are driven by history alone (no need to consult the workflow definition/code).
   bool awaits_signal = 4;
   string signal_name = 5;
+  // Set when the workflow code chose this activity's retry policy (Phase 5
+  // polish). Recorded so retries follow it across restarts; absent means the
+  // engine's policy for the step name applies. Older binaries ignore it.
+  RetryPolicy retry_policy = 6;
+}
+
+// RetryPolicy re-runs a failed activity before the workflow sees the error.
+// Backoff doubles after each failed attempt, capped at max_backoff_ms.
+message RetryPolicy {
+  // Attempts in total, counting the first: 1 means no retries.
+  int32 max_attempts = 1;
+  int64 initial_backoff_ms = 2;
+  // Zero means no cap.
+  int64 max_backoff_ms = 3;
 }
 
 message StepCompletedEvent {
