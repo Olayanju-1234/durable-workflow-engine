@@ -30,6 +30,7 @@ import (
 	"github.com/olayanju-1234/durable-workflow-engine/client"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/replay"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/rpc"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/sdkctx"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/workflow"
 )
@@ -50,11 +51,9 @@ type ActivityInfo struct {
 	Sequence   int64 // with WorkflowID, unique per step: a good idempotency key
 }
 
-type infoKey struct{}
-
 // GetActivityInfo returns the step an activity's ctx belongs to.
 func GetActivityInfo(ctx context.Context) (ActivityInfo, bool) {
-	info, ok := ctx.Value(infoKey{}).(ActivityInfo)
+	info, ok := ctx.Value(sdkctx.ActivityInfoKey{}).(ActivityInfo)
 	return info, ok
 }
 
@@ -339,7 +338,7 @@ func (w *Worker) execute(ctx context.Context, task *server.Task) {
 	// reported; only a lost lease cancels it.
 	actx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
-	actx = context.WithValue(actx, infoKey{}, ActivityInfo{
+	actx = context.WithValue(actx, sdkctx.ActivityInfoKey{}, ActivityInfo{
 		WorkflowID: task.GetWorkflowId(), StepName: task.GetStepName(), Sequence: task.GetSequence(),
 	})
 	stopBeats := w.heartbeat(actx, cancel, task, log)

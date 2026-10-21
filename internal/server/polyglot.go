@@ -328,6 +328,12 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 		return state.Decision{Type: state.DecideCompleteWorkflow, Output: c.CompleteWorkflow.GetOutput()}, nil
 	case *WorkflowCommand_FailWorkflow:
 		return state.Decision{Type: state.DecideFailWorkflow, Error: c.FailWorkflow.GetError()}, nil
+	case *WorkflowCommand_RecordMarker:
+		m := c.RecordMarker
+		return state.Decision{
+			Type: state.DecideRecordMarker, StepName: m.GetStepName(),
+			Sequence: m.GetSequence(), Marker: m.GetMarker(), Output: m.GetData(),
+		}, nil
 	default:
 		return state.Decision{}, fmt.Errorf("server: unknown workflow command %T", c)
 	}
@@ -353,6 +359,10 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 		return &WorkflowCommand{Command: &WorkflowCommand_CompleteWorkflow{CompleteWorkflow: &CompleteWorkflowCommand{Output: d.Output}}}
 	case state.DecideFailWorkflow:
 		return &WorkflowCommand{Command: &WorkflowCommand_FailWorkflow{FailWorkflow: &FailWorkflowCommand{Error: d.Error}}}
+	case state.DecideRecordMarker:
+		return &WorkflowCommand{Command: &WorkflowCommand_RecordMarker{RecordMarker: &RecordMarkerCommand{
+			StepName: d.StepName, Sequence: d.Sequence, Marker: d.Marker, Data: d.Output,
+		}}}
 	default:
 		return nil
 	}
@@ -380,6 +390,9 @@ func validateDecision(events []*history.HistoryEvent, d state.Decision) error {
 	}
 	if d.Type == state.DecideAwaitSignal && d.Signal == "" {
 		return fmt.Errorf("%w: await-signal command has an empty signal name", ErrInvalidCommand)
+	}
+	if d.Type == state.DecideRecordMarker && d.Marker != state.MarkerVersion && d.Marker != state.MarkerSideEffect {
+		return fmt.Errorf("%w: unknown marker kind %q", ErrInvalidCommand, d.Marker)
 	}
 	return nil
 }
