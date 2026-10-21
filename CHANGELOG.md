@@ -1,0 +1,33 @@
+# Changelog
+
+Notable changes to workflowd: the engine binary and its SDKs (npm `workflowd`, PyPI
+`workflowd`, Maven `io.github.olayanju-1234:workflowd`). The three SDKs share one version.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
+follow [SemVer](https://semver.org/): before 1.0, a minor version may change the API.
+
+## [Unreleased]
+
+The first published SDK release will be 0.1.0. Before publishing, rename this heading to
+`## [0.1.0] - YYYY-MM-DD`; the release workflow refuses to publish without it.
+
+### Added
+- SDKs for TypeScript/JavaScript, Python and Java: workflows as ordinary functions with
+  durable activities, sleeps and signals, Saga compensation by catching an activity failure,
+  and deterministic replay that workflow code cannot interrupt. Each is one dependency-free file.
+- Publish-ready packages: `sdks/typescript/package.json` with TypeScript declarations
+  (`workflowd.d.mts`), `sdks/python/pyproject.toml`, `sdks/java/pom.xml`, and a manual
+  release workflow (`.github/workflows/release-sdks.yml`).
+- Auth and TLS in the SDKs: a `token` option and `https://` addresses (a private CA via
+  `NODE_EXTRA_CA_CERTS`, Python `ca_file`, Java `Workflowd.trustPem`).
+- Engine: opt-in TLS on the gRPC, dashboard/API and metrics listeners (`--tls-cert`,
+  `--tls-key`, reloaded on renewal); a bearer token on the JSON API and gRPC from a file or
+  `$WORKFLOWD_AUTH_TOKEN` (`--auth-token-file`); `--auth-public-reads`; a separate metrics
+  token (`--metrics-auth-token-file`); mutual TLS between Raft peers (`--raft-tls-*`).
+- Go client: `client.Options.TLS`, `client.Options.AuthToken`, `client.ErrUnauthenticated`.
+- CI: every SDK runs end to end against a real engine, in plaintext and over TLS with a
+  required token; `buf lint` and `buf breaking` guard the protobuf wire format.
+
+### Changed
+- `--auth-token` now also requires the token on gRPC calls, not only the JSON API.
+- Java: `Workflowd` moved from the default package to `io.github.olayanju1234.workflowd`.
+- `worker.Run` (Go) returns at once when the engine rejects its token.

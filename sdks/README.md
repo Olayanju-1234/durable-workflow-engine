@@ -17,8 +17,16 @@ and a rejected one must run its compensation and fail. Run it locally with
 `./scripts/sdk-e2e.sh typescript` (or `python`, `java`).
 
 Every SDK here is **dependency-free**: Node's `fetch`, Python's `urllib`, and
-Java's `HttpClient` are all built in. No npm install, no pip install, no
-protobuf toolchain.
+Java's `HttpClient` are all built in. No protobuf toolchain. Each is also ready to
+publish (not published yet; see [Publishing](#publishing-the-sdks)):
+
+| SDK | Package | Install, once published |
+|-----|---------|-------------------------|
+| TypeScript | npm `workflowd` ([`package.json`](typescript/package.json), types in [`workflowd.d.mts`](typescript/workflowd.d.mts)) | `npm install workflowd` |
+| Python | PyPI `workflowd` ([`pyproject.toml`](python/pyproject.toml)) | `pip install workflowd` |
+| Java | Maven `io.github.olayanju-1234:workflowd` ([`pom.xml`](java/pom.xml)), class `io.github.olayanju1234.workflowd.Workflowd` | see [`java/README.md`](java/README.md) |
+
+Until then, copy the one file into your project.
 
 ## Auth and TLS
 
@@ -134,3 +142,59 @@ if it is rejected, the task was reassigned and your result must be discarded.
 
 Activity workers have been language-agnostic since Week 3 — the SDKs here simply
 bundle a loop for convenience.
+
+## Publishing the SDKs
+
+Nothing has been published. Everything is in place for a manual release:
+[`.github/workflows/release-sdks.yml`](../.github/workflows/release-sdks.yml) builds the
+three packages from `main` and publishes them with tokens stored as repository secrets.
+CI's `sdk-packages` job builds and validates them on every PR (npm pack, `tsc` against
+the declarations, `python -m build` + `twine check`, `mvn verify` with sources and
+javadoc jars), and `scripts/sdk-version.py` fails if the six version strings disagree.
+
+The names were free on 2026-10-21. Changing one before the first publish means editing
+`typescript/package.json` (`name`), `python/pyproject.toml` (`name`), and for Java the
+`pom.xml` `groupId`/`artifactId` plus the `package` line in `Workflowd.java` and the
+import in `Example.java`.
+
+**One-time setup (owner only).** Store each token with `gh secret set NAME -R
+Olayanju-1234/durable-workflow-engine`, which prompts for the value so it never lands in
+your shell history.
+
+1. **npm** (`NPM_TOKEN`). Create an npmjs.com account with 2FA. Under Access Tokens,
+   generate a granular token with read and write access to all packages (a new package
+   name can't be selected before it exists) and "bypass 2FA" ticked, so CI can publish.
+   npm caps the lifetime of write tokens, so set a reminder to rotate it. The workflow
+   publishes with `--provenance`, which links the package to the workflow run.
+2. **PyPI** (`PYPI_API_TOKEN`). Create a pypi.org account with 2FA, then an API token
+   scoped to the entire account (a project-scoped token needs the project to exist).
+   After the first upload, replace it with a token scoped to `workflowd`.
+3. **Maven Central** (`MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
+   `MAVEN_GPG_PRIVATE_KEY`, `MAVEN_GPG_PASSPHRASE`).
+   - Sign in to central.sonatype.com with GitHub; that verifies the
+     `io.github.olayanju-1234` namespace. Under Account, generate a user token: its
+     username and password are the first two secrets.
+   - Make a signing key and publish its public half, which Central checks:
+     ```sh
+     gpg --quick-generate-key "Joseph Olayanju <your email>" rsa4096 sign 2y
+     gpg --list-secret-keys --keyid-format long      # note the key id
+     gpg --keyserver keyserver.ubuntu.com --send-keys <KEYID>
+     gpg --armor --export-secret-keys <KEYID> | gh secret set MAVEN_GPG_PRIVATE_KEY -R Olayanju-1234/durable-workflow-engine
+     gh secret set MAVEN_GPG_PASSPHRASE -R Olayanju-1234/durable-workflow-engine
+     ```
+
+**Each release.**
+
+1. On `main`, bump the version in the six places `scripts/sdk-version.py` checks (the
+   three manifests and the `SDK_VERSION` strings; for 0.1.0 they are already set) and
+   rename `## [Unreleased]` in `CHANGELOG.md` to `## [0.1.0] - YYYY-MM-DD`. Merge that.
+2. Dry run, which builds and validates everything and publishes nothing:
+   `gh workflow run release-sdks.yml -R Olayanju-1234/durable-workflow-engine -f registries=all -f dry_run=true`
+3. Publish: the same command with `-f dry_run=false`. Use `-f registries=npm` (or
+   `pypi`, `maven`) to retry one registry. A version can be published only once per
+   registry, so bump the version to fix a bad release.
+4. Tag it: `git tag sdks-v0.1.0 && git push origin sdks-v0.1.0`.
+
+Maven Central validates the bundle and then publishes it automatically; it can take
+30 minutes or more to show up in search.
+

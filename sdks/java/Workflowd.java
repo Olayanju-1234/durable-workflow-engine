@@ -1,3 +1,5 @@
+package io.github.olayanju1234.workflowd;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;

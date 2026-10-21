@@ -16,11 +16,18 @@ coverage.html
 .env
 .env.*
 
-# SDK build artifacts (sdks/ is source-only; nothing here is compiled in CI)
+# SDK build artifacts, and the license copies packaging drops next to each SDK
 __pycache__/
 *.pyc
 node_modules/
 *.class
+/sdks/*/LICENSE
+/sdks/*/NOTICE
+/sdks/python/dist/
+/sdks/python/build/
+/sdks/python/*.egg-info/
+/sdks/java/target/
+/sdks/typescript/*.tgz
 
 # Editor / OS
 .DS_Store

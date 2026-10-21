@@ -2,6 +2,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import javax.net.ssl.SSLContext;
 
+import io.github.olayanju1234.workflowd.Workflowd;
+
 /**
  * Runnable example: an order workflow written entirely in Java, orchestrated by a Go engine
  * that has never seen this code.
