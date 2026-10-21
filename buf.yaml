@@ -1,0 +1,25 @@
+# buf lints the protos and blocks wire-breaking changes (ADR-0002). CI runs
+# `buf lint` and `buf breaking` against the PR's base; buf is a CI tool only.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Four packages share proto/ in flat files. Moving each into <pkg>/v1/ would
+    # rename every file descriptor and import path for no wire benefit.
+    - DIRECTORY_SAME_PACKAGE
+    - PACKAGE_DIRECTORY_MATCH
+  ignore_only:
+    # RaftService.Send takes Envelope and returns SendAck, the names the Raft
+    # core uses throughout; new RPCs must still use <Rpc>Request/<Rpc>Response.
+    RPC_REQUEST_STANDARD_NAME:
+      - proto/raft.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - proto/raft.proto
+breaking:
+  # History files on disk and every client speak binary protobuf, so the wire
+  # (field numbers, types) and JSON names are what must never break.
+  use:
+    - WIRE_JSON

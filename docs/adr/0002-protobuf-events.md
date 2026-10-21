@@ -38,9 +38,12 @@ The **record framing** around the protobuf payload (length + CRC32C) is still ha
   (old logs still parse); efficient binary encoding; strong typing; generated Go.
 - **Con:** requires `protoc` + `protoc-gen-go` in the toolchain; generated code is committed
   (so CI needn't run protoc). A `oneof` wrapper is slightly more verbose to construct in Go.
-- **Follow-up:** adopt **`buf`** (replaces raw `protoc`) for proto linting and automated
-  breaking-change detection — directly enforces the schema-evolution discipline. Tracked in
-  the roadmap backlog.
+- **Follow-up (done 2026-10-21):** **`buf`** lints the protos and runs breaking-change
+  detection in CI (`buf.yaml`, the `proto` job). Breaking rules are `WIRE_JSON`: field
+  numbers, types and JSON names are frozen, which is the schema-evolution discipline the
+  on-disk history needs. Lint is `STANDARD` minus the directory-layout rules (the flat
+  `proto/` layout stays, since moving files renames every descriptor) and the request/response
+  naming rules for `RaftService.Send` only. `protoc` still generates the Go code (`make proto`).
 
 ## Alternatives considered
 
