@@ -7,9 +7,14 @@ logic can live in any language.
 | SDK | Path | Status |
 |-----|------|--------|
 | Go | [`../workflow/`](../workflow/), [`../worker/`](../worker/), [`../client/`](../client/) | ✅ tested end to end, including leader failover (gRPC) |
-| TypeScript / Node | [`typescript/`](typescript/) | ✅ verified end-to-end against a live engine |
-| Python | [`python/`](python/) | ✅ verified end-to-end against a live engine |
-| Java | [`java/`](java/) | ⚠️ **written but never compiled** — no JDK was available on the machine it was authored on. Treat as a reference implementation until someone runs it. |
+| TypeScript / Node | [`typescript/`](typescript/) | ✅ run end to end in CI on every PR (Node 20) |
+| Python | [`python/`](python/) | ✅ run end to end in CI on every PR (Python 3.12) |
+| Java | [`java/`](java/) | ✅ compiled (`--release 11`, lint as errors) and run end to end in CI on every PR (JDK 21) |
+
+CI runs each SDK's example worker against a freshly built engine with
+[`scripts/sdk-e2e.sh`](../scripts/sdk-e2e.sh): an approved order must complete,
+and a rejected one must run its compensation and fail. Run it locally with
+`./scripts/sdk-e2e.sh typescript` (or `python`, `java`).
 
 Every SDK here is **dependency-free**: Node's `fetch`, Python's `urllib`, and
 Java's `HttpClient` are all built in. No npm install, no pip install, no

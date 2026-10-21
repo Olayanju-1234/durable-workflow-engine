@@ -34,3 +34,40 @@ jobs:
 
       - name: Test (race)
         run: go test ./... -race -count=1
+
+  # Each SDK's example worker runs against a real engine built in the same job:
+  # one approved order completes, one rejected order compensates and fails.
+  sdk-e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [typescript, python, java]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - if: matrix.sdk == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - if: matrix.sdk == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # JDK 21 compiles with --release 11 and lint warnings as errors (serial lint
+      # off: the SDK's exceptions are never serialized), so Java 11 is checked too.
+      - if: matrix.sdk == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: End to end against workflowd
+        run: ./scripts/sdk-e2e.sh ${{ matrix.sdk }}
