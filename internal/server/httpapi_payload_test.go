@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 )
 
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
@@ -127,5 +129,26 @@ func TestHTTPBatchCommands(t *testing.T) {
 	steps := task["steps"].([]any)
 	if steps[0].(map[string]any)["status"] != "SCHEDULED" || steps[1].(map[string]any)["resolved_event_id"] == nil {
 		t.Fatalf("steps %v: x still in flight, y resolved with its event id", steps)
+	}
+}
+
+func TestHTTPSignalRequestID(t *testing.T) {
+	h := newAPIHarness(t, state.WorkflowDefinition{Type: "Wait", Steps: []state.StepDef{state.AwaitSignal("w", "never")}})
+	_, start := h.do(t, "POST", "/api/workflows", `{"type":"Wait"}`)
+	id := start["workflow_id"].(string)
+	for range 3 {
+		if code, body := h.do(t, "POST", "/api/workflows/"+id+"/signal", `{"name":"noise","request_id":"r1"}`); code != http.StatusOK {
+			t.Fatalf("HTTP %d %v", code, body)
+		}
+	}
+	evs, _ := h.store.ReadAll(id)
+	n := 0
+	for _, ev := range evs {
+		if ev.GetSignalReceived() != nil {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d signals recorded for one request id, want 1", n)
 	}
 }

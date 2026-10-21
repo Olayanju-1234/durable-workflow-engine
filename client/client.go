@@ -141,11 +141,28 @@ func (c *Client) StartWorkflow(ctx context.Context, workflowType string, input [
 	return req.WorkflowId, nil
 }
 
-// SignalWorkflow sends a named signal with a payload to a running workflow. If
-// leadership changes while the call is in flight, the retry may record the
-// signal twice; workflows that care should make signal handling idempotent.
-func (c *Client) SignalWorkflow(ctx context.Context, workflowID, signal string, payload []byte) error {
-	req := &server.SignalWorkflowRequest{WorkflowId: workflowID, SignalName: signal, Payload: payload}
+// SignalOption customises SignalWorkflow.
+type SignalOption func(*signalOptions)
+
+type signalOptions struct{ requestID string }
+
+// WithSignalRequestID sets the signal's idempotency key, for a caller that
+// may send the same signal again from another process (a retried job, a
+// redelivered message): every send with the key is recorded once.
+func WithSignalRequestID(id string) SignalOption {
+	return func(o *signalOptions) { o.requestID = id }
+}
+
+// SignalWorkflow sends a named signal with a payload to a running workflow.
+// It is recorded exactly once: the call carries an idempotency key (generated
+// here unless WithSignalRequestID gives one) that every retry reuses, so a
+// retry after a lost reply or a leader change is recognised by the engine.
+func (c *Client) SignalWorkflow(ctx context.Context, workflowID, signal string, payload []byte, opts ...SignalOption) error {
+	so := signalOptions{requestID: randomSuffix()}
+	for _, o := range opts {
+		o(&so)
+	}
+	req := &server.SignalWorkflowRequest{WorkflowId: workflowID, SignalName: signal, Payload: payload, RequestId: so.requestID}
 	_, err := c.conn.Call(ctx, func(ctx context.Context, s server.WorkflowServiceClient, opt grpc.CallOption) error {
 		_, err := s.SignalWorkflow(ctx, req, opt)
 		return err

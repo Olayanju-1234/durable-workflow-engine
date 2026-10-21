@@ -117,6 +117,10 @@ message TimerFiredEvent {
 message SignalReceivedEvent {
   string signal_name = 1;
   bytes payload = 2;
+  // The sender's idempotency key, if it gave one: a SignalWorkflow retried
+  // with the same key (say, after a leader change hid the reply) finds it here
+  // and is not recorded again. Older binaries ignore it.
+  string request_id = 3;
 }
 
 // MarkerRecordedEvent records a value workflow code must see identically on

@@ -513,11 +513,15 @@ public final class Workflowd {
             return id;
         }
 
-        /** Send an external signal to a running workflow. */
+        /**
+         * Send an external signal to a running workflow. It is recorded once even if the
+         * request is retried: every attempt carries the same idempotency key.
+         */
         public void signal(String workflowId, String name, String payload) throws IOException, InterruptedException {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("name", name);
             body.put("payload", payload == null ? "" : payload);
+            body.put("request_id", java.util.UUID.randomUUID().toString());
             request("POST", "/api/workflows/" + enc(workflowId) + "/signal", body);
         }
 

@@ -7,19 +7,20 @@ import "github.com/olayanju-1234/durable-workflow-engine/internal/metrics"
 // (or, for dispatch/retry/lease facts, where the engine acts), so the numbers
 // on /metrics agree with what a replay of the histories would say.
 type engineMetrics struct {
-	workflowsStarted  *metrics.Counter
-	workflowsFinished *metrics.CounterVec // status: completed | failed | terminated
-	workflowsActive   *metrics.Gauge      // started or recovered, not yet terminal
-	tasksDispatched   *metrics.Counter
-	taskResults       *metrics.CounterVec // result: completed | failed (worker-reported)
-	leasesExpired     *metrics.Counter
-	retriesScheduled  *metrics.Counter
-	signalsReceived   *metrics.Counter
-	timersFired       *metrics.Counter
-	stepDuration      *metrics.Histogram // dispatch (lease grant) → worker result
-	workflowsPurged   *metrics.Counter   // finished histories deleted by retention
-	schedulesFired    *metrics.Counter   // workflows started by a schedule
-	schedulesSkipped  *metrics.Counter   // fires skipped because a run was still going
+	workflowsStarted    *metrics.Counter
+	workflowsFinished   *metrics.CounterVec // status: completed | failed | terminated
+	workflowsActive     *metrics.Gauge      // started or recovered, not yet terminal
+	tasksDispatched     *metrics.Counter
+	taskResults         *metrics.CounterVec // result: completed | failed (worker-reported)
+	leasesExpired       *metrics.Counter
+	retriesScheduled    *metrics.Counter
+	signalsReceived     *metrics.Counter
+	timersFired         *metrics.Counter
+	stepDuration        *metrics.Histogram // dispatch (lease grant) → worker result
+	workflowsPurged     *metrics.Counter   // finished histories deleted by retention
+	schedulesFired      *metrics.Counter   // workflows started by a schedule
+	signalsDeduplicated *metrics.Counter   // retried signals recognised by their request id
+	schedulesSkipped    *metrics.Counter   // fires skipped because a run was still going
 
 	// Polyglot: workflow decisions made by external SDK workers.
 	workflowTasksDispatched  *metrics.Counter
@@ -56,6 +57,8 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func
 			"Seconds from task dispatch to the worker's result.", nil),
 		workflowsPurged: reg.Counter("workflowd_workflows_purged_total",
 			"Finished workflow histories deleted by the retention policy."),
+		signalsDeduplicated: reg.Counter("workflowd_signals_deduplicated_total",
+			"Signals sent again with a request id already recorded, and not recorded twice."),
 		schedulesFired: reg.Counter("workflowd_schedule_runs_started_total",
 			"Workflows started by a cron schedule."),
 		schedulesSkipped: reg.Counter("workflowd_schedule_runs_skipped_total",

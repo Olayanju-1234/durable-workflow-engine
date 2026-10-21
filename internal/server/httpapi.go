@@ -435,6 +435,8 @@ func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 		Name          string  `json:"name"`
 		Payload       string  `json:"payload"`
 		PayloadBase64 *string `json:"payload_base64"`
+		// Optional idempotency key: a retry with the same key is recorded once.
+		RequestID string `json:"request_id"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -449,7 +451,7 @@ func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
-	if err := e.SignalWorkflow(r.PathValue("id"), body.Name, payload); err != nil {
+	if err := e.SignalWorkflowOnce(r.PathValue("id"), body.Name, body.RequestID, payload); err != nil {
 		switch {
 		case errors.Is(err, ErrNotLeader):
 			a.writeNotLeader(w, err)
