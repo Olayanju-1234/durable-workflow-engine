@@ -50,3 +50,19 @@ func TestParseClusterFlags(t *testing.T) {
 		})
 	}
 }
+
+// Clients sent to a leader need an address they can dial, not a wildcard.
+func TestAdvertisedAddress(t *testing.T) {
+	tests := []struct{ listen, want string }{
+		{":7233", "10.0.0.2:7233"},
+		{"0.0.0.0:8233", "10.0.0.2:8233"},
+		{"[::]:8233", "10.0.0.2:8233"},
+		{"127.0.0.1:7233", "127.0.0.1:7233"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := advertised(tt.listen, "10.0.0.2"); got != tt.want {
+			t.Errorf("advertised(%q) = %q, want %q", tt.listen, got, tt.want)
+		}
+	}
+}

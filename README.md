@@ -6,10 +6,11 @@
 
 ![workflowd's embedded dashboard: nine OrderSaga workflows completed and two TypeScript-SDK workflows waiting on a signal](docs/assets/dashboard.png)
 
-**Status:** 🚧 Pre-alpha — weeks 1–10 of 17 complete. Phases 1–3 are done: durable history,
+**Status:** 🚧 Pre-alpha — weeks 1–14 of 17 complete. Phases 1–4 are done: durable history,
 deterministic replay of real Go workflows, timers, signals, retries, Saga compensation, worker
-leases, Prometheus metrics, a visibility API and an embedded dashboard. Next up: Raft
-replication (Phase 4). Not production-ready — see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+leases, Prometheus metrics, a visibility API, an embedded dashboard, and opt-in high
+availability through a hand-rolled Raft cluster. Next up: SDK polish (Phase 5). Not
+production-ready — see [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Why
 
@@ -79,6 +80,29 @@ curl -X POST http://localhost:8233/api/workflows \
 
 Then open <http://localhost:8233> to watch it. Full guide: [`web/site/docs.html`](web/site/docs.html).
 
+## Running a cluster (optional)
+
+By default `workflowd` is a single node. Give it peers and it becomes one member of a Raft
+cluster: every history write is replicated to a majority before it counts, only the leader
+runs the engine, and if the leader dies another node takes over in a second or two and
+carries on every workflow from the replicated history.
+
+```sh
+make cluster    # three local nodes; see scripts/cluster.sh for the ports
+```
+
+or by hand, one command per node:
+
+```sh
+./workflowd --serve --node-id n1 --peers n1=10.0.0.1:7333,n2=10.0.0.2:7333,n3=10.0.0.3:7333 \
+  --data-dir data/n1 --addr :7233 --http-addr :8233
+```
+
+Any node answers `/api/health`; followers answer workflow calls with `503` (HTTP) or
+`Unavailable` (gRPC) plus the leader's address. What a cluster guarantees, and what it
+doesn't, is in [ADR-0004](docs/adr/0004-replicated-history-leader-only-engine.md). Keep the
+Raft port (`--raft-addr`) on a private network: it has no TLS or auth.
+
 ## Workflows in other languages
 
 Workflow code doesn't have to be Go. The engine owns durability; an SDK in your language owns
@@ -123,7 +147,9 @@ sdk/                workflows as Go functions (replay engine)        ✅ core
 sdks/               TypeScript · Python · Java SDKs (dependency-free) ✅
 web/dashboard/      embedded operational UI (go:embed)               ✅
 web/site/           landing page + developer documentation           ✅
-internal/raft/      consensus / replication                          ⬜ Phase 4
+internal/raft/      consensus: elections, replication, snapshots     ✅
+internal/cluster/   replicated history + leader-only engine          ✅
+internal/record/    shared CRC-framed record format                  ✅
 proto/              protobuf definitions
 docs/               architecture, roadmap, ADRs, session walkthroughs
 ```

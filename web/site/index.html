@@ -463,7 +463,7 @@ def capture(ctx):
           <tr><td>Infrastructure required</td><td>Redis + DB</td><td class="yes col-us">none</td><td>DB cluster + services</td></tr>
           <tr><td>Deploy artifact</td><td>your app</td><td class="yes col-us">1 binary</td><td>several services</td></tr>
           <tr><td>Time to first workflow</td><td>days of glue</td><td class="yes col-us">minutes</td><td>a sprint</td></tr>
-          <tr><td>Horizontal HA</td><td>varies</td><td class="no col-us">Phase 4 (Raft)</td><td class="yes">✓</td></tr>
+          <tr><td>Failover (HA)</td><td>varies</td><td class="yes col-us">✓ opt-in Raft cluster</td><td class="yes">✓</td></tr>
           <tr><td>Multi-language SDKs</td><td>n/a</td><td class="col-us">Go, TS, Python (+Java ref)</td><td class="yes">✓</td></tr>
           <tr><td>Battle-tested at scale</td><td>—</td><td class="no col-us">✗ pre-alpha</td><td class="yes">✓</td></tr>
         </tbody>
@@ -483,7 +483,7 @@ def capture(ctx):
       <h2>The pattern, section by section</h2>
       <p>
         This is a build-in-public engineering project, currently <strong>pre-alpha</strong>.
-        Weeks 1–10 of a 17-week plan are done. Don't put payroll on it yet.
+        Weeks 1–14 of a 17-week plan are done. Don't put payroll on it yet.
       </p>
     </div>
     <div class="phases">
@@ -502,13 +502,13 @@ def capture(ctx):
         <div><div class="label">Phase 3 — Multi-worker &amp; observability</div>
         <div class="desc">Leases, heartbeats, Prometheus metrics, visibility API, dashboard</div></div>
       </div>
+      <div class="phase done">
+        <span class="state">✓</span>
+        <div><div class="label">Phase 4 — Replication with Raft</div>
+        <div class="desc">Hand-rolled Raft: elections, log replication, snapshots, a leader-only engine, chaos tests</div></div>
+      </div>
       <div class="phase next">
         <span class="state">◐</span>
-        <div><div class="label">Phase 4 — Replication with Raft</div>
-        <div class="desc">Leader election, log replication, snapshots, chaos tests — in progress next</div></div>
-      </div>
-      <div class="phase">
-        <span class="state">○</span>
         <div><div class="label">Phase 5 — SDK polish &amp; DX</div>
         <div class="desc">Ergonomic public API, workflow versioning, testing framework, docs</div></div>
       </div>

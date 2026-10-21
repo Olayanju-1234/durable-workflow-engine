@@ -100,7 +100,10 @@ majority steps down) and §6 vote suppression. Durable Raft state lives in
 
 Replication: the leader appends proposals to its log and sends each follower
 what it is missing in `AppendEntries`, guarded by the prevLogIndex/prevLogTerm
-check (followers truncate only at a real conflict). An entry commits once a
+check (followers truncate only at a real conflict). Sending is pipelined with
+flow control: the leader moves a follower's `next` past what it sent (a lost
+message shows up as a rejection of the next one) and keeps at most 1024
+unacknowledged entries in flight per follower. An entry commits once a
 majority holds it on disk, counting only entries from the leader's own term; a
 new leader therefore opens its term with an empty entry. Each node's `Node`
 persists (hard state, then entries) before sending, and applies committed
@@ -116,7 +119,32 @@ snapshot's last entry, and otherwise replaces log and state with the snapshot.
 Testing: `sim_test.go` runs whole clusters in memory with no clock, goroutines or
 sockets, and a checker of the five Raft safety properties runs against 200
 seeded random failure schedules. Testing knobs that switch off one rule each
-prove the checker can fail. How the engine uses Raft is ADR-0004.
+prove the checker can fail.
+
+### The engine on Raft (`internal/cluster`, ADR-0004)
+
+```
+client ──▶ any node ──▶ follower?  ─▶ 503 / Unavailable + leader hint
+                    └─▶ leader ─▶ Engine (this term's) ─▶ HistoryLog.Append
+                                                         │ propose Command (term-fenced)
+                                       Raft log ◀────────┘ commit on a majority
+                                         │ apply on every node
+                                         ▼
+                              history store (<id>.history, raft_index stamps)
+```
+
+- **What is replicated:** history mutations (`AppendEvent`, `DeleteWorkflow`), the
+  engine's outputs. Followers never run workflow logic.
+- **State machine:** each node's history directory. Apply stamps each event with
+  its Raft index (idempotent replay after restart) and accepts it only at the next
+  event id (a deterministic fence). Files are written without fsync; the Raft log
+  is the write-ahead log, and `Sync` runs before a snapshot marks them durable.
+- **Leader-only engine:** a fresh `Engine` per term, built once the leader has
+  applied its term's opening entry, then `Recover()`: a leader change is a restart
+  elsewhere. Lost leadership closes the engine; pending writes fail.
+- **Routing:** `EngineSource` resolves the engine per call; followers answer with
+  the leader's id and client addresses (learned from metadata on Raft traffic).
+- **Snapshots:** the raw bytes of every history file in `internal/record` frames.
 
 ## Determinism (Phase 2+)
 

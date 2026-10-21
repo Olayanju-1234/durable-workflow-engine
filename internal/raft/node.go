@@ -19,6 +19,12 @@ const (
 	// DefaultSnapshotEvery is how many applied entries pile up before a node
 	// snapshots its state machine and compacts its log.
 	DefaultSnapshotEvery = 8192
+
+	// slowCommit and slowFlush are the thresholds above which a commit or a
+	// persist-and-send round is logged as a warning: a sign of a slow disk, an
+	// overloaded node, or a follower that can't keep up.
+	slowCommit = 500 * time.Millisecond
+	slowFlush  = 200 * time.Millisecond
 )
 
 var (
@@ -46,8 +52,11 @@ type StateMachine interface {
 	// Apply applies one committed entry and returns a result for the proposer,
 	// if it is waiting on this node. After a restart Apply sees again every
 	// entry since the latest snapshot, so a state machine that persists its own
-	// state must recognise entries it already applied.
-	Apply(entry *LogEntry) any
+	// state must recognise entries it already applied. A non-nil error means
+	// this node's copy of the state can no longer be trusted (a failed disk
+	// write, say) and stops the node; an outcome to report to the proposer,
+	// like a rejected command, belongs in the result instead.
+	Apply(entry *LogEntry) (any, error)
 	// Snapshot serializes the state as of the last applied entry.
 	Snapshot() ([]byte, error)
 	// Restore replaces the whole state with a snapshot's: at startup, and when
@@ -108,11 +117,12 @@ type Node struct {
 	appliedTerm uint64 // term of the last applied entry
 	snapIndex   uint64 // index of the latest snapshot this node has
 
-	mu      sync.Mutex
-	status  Status
-	applied uint64
-	changed chan struct{}        // closed and replaced whenever status changes
-	waiters map[uint64]*proposal // log index -> proposal waiting for it
+	mu       sync.Mutex
+	status   Status
+	progress string // leader's view of replication, refreshed each round (diagnostics)
+	applied  uint64
+	changed  chan struct{}        // closed and replaced whenever status changes
+	waiters  map[uint64]*proposal // log index -> proposal waiting for it
 }
 
 // applyItem is one unit of work for the applier, in log order: a committed
@@ -290,8 +300,16 @@ func (n *Node) Propose(ctx context.Context, term uint64, data []byte) (any, erro
 	case <-n.done:
 		return nil, ErrStopped
 	}
+	start := time.Now()
 	select {
 	case r := <-p.result:
+		if took := time.Since(start); took > slowCommit {
+			n.mu.Lock()
+			st, progress := n.status, n.progress
+			n.mu.Unlock()
+			n.logger.Warn("raft: slow commit", "index", p.index, "took", took,
+				"term", st.Term, "applied", st.Applied, "progress", progress)
+		}
 		return r.value, r.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -422,8 +440,16 @@ drain:
 
 // flush handles every pending Ready: persist, then send, then queue for apply.
 // The order is the whole point: nothing leaves this node, and nothing is
-// applied, until the state it reflects is durable.
+// applied, until the state it reflects is durable. The one exception is a
+// leader's AppendEntries (Ready.LeaderAppend), which replicates entries the
+// leader is still writing; its own copy counts only once written.
 func (n *Node) flush() error {
+	start := time.Now()
+	defer func() {
+		if took := time.Since(start); took > slowFlush {
+			n.logger.Warn("raft: slow persist-and-send round", "took", took)
+		}
+	}()
 	for n.core.hasReady() {
 		rd := n.core.ready()
 		if rd.HardState != nil {
@@ -442,13 +468,22 @@ func (n *Node) flush() error {
 			}
 			n.enqueueApply(applyItem{snap: rd.Snapshot})
 		}
+		if rd.LeaderAppend {
+			// Followers write their copies while we write ours: one fsync of
+			// latency per commit instead of two.
+			for _, m := range rd.Messages {
+				n.transport.Send(m)
+			}
+		}
 		if len(rd.Entries) > 0 {
 			if err := n.storage.appendEntries(rd.Entries); err != nil {
 				return fmt.Errorf("raft: persist entries: %w", err)
 			}
 		}
-		for _, m := range rd.Messages {
-			n.transport.Send(m)
+		if !rd.LeaderAppend {
+			for _, m := range rd.Messages {
+				n.transport.Send(m)
+			}
 		}
 		for _, e := range rd.CommittedEntries {
 			n.enqueueApply(applyItem{entry: e})
@@ -493,7 +528,11 @@ func (n *Node) applyLoop() {
 			}
 			var v any
 			if len(it.entry.GetData()) > 0 {
-				v = n.sm.Apply(it.entry)
+				var err error
+				if v, err = n.sm.Apply(it.entry); err != nil {
+					n.fail(fmt.Errorf("raft: apply entry %d: %w", it.entry.GetIndex(), err))
+					return
+				}
 			}
 			n.appliedTerm = it.entry.GetTerm()
 			n.applied1(it.entry, v)
@@ -551,8 +590,10 @@ func (n *Node) applied1(e *LogEntry, v any) {
 
 func (n *Node) publish() {
 	st := n.core.status()
+	progress := n.core.progressSummary()
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.progress = progress
 	st.Applied = n.applied
 	if st == n.status {
 		return

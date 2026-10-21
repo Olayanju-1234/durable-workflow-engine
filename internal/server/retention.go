@@ -51,7 +51,7 @@ func (e *Engine) purgeIfExpired(workflowID string, cutoff time.Time) (bool, erro
 	if !st.Status.IsTerminal() || time.Unix(0, events[len(events)-1].GetTimestamp()).After(cutoff) {
 		return false, nil
 	}
-	if err := e.store.Delete(workflowID); err != nil {
+	if err := e.hlog.Delete(workflowID); err != nil {
 		return false, err
 	}
 	e.metrics.workflowsPurged.Inc()

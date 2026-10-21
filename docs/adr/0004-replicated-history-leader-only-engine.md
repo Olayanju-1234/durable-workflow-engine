@@ -200,3 +200,25 @@ New in a cluster:
   deferred.
 - **Partition workflows across several Raft groups (sharding).** The way past
   the single-leader write ceiling; far beyond this phase.
+
+## Implementation notes (Week 14)
+
+Recorded after the design was built; the decisions above are unchanged.
+
+- **History files are not fsync'd per event in cluster mode.** The Raft log is
+  the durable write-ahead log; history files are its applied view. Events are
+  written without fsync (`HistoryStore.AppendBuffered`), and `Sync` runs before
+  a snapshot's marker promises the directory is durable (which is also the only
+  moment log entries are deleted). Anything a crash loses from a history file is
+  re-applied from the log on restart, which the `raft_index` stamps already made
+  safe. This replaces the "double write" consequence above: each event is
+  fsync'd once, in the Raft log. Single-node mode still fsyncs every append.
+- **A leader replicates while it writes its own copy** (paper §10.2.1) and counts
+  itself towards a majority only once its write is durable, so a commit costs
+  one fsync of latency rather than two.
+- **Measured cost:** on a MacBook (macOS `F_FULLFSYNC`, about 21 ms) with three
+  nodes sharing one disk, a commit took about 117 ms with per-event history
+  fsyncs and 60–80 ms after these two changes (the machine was busy, so timings
+  were noisy). With Raft-log fsyncs off it was
+  about 1 ms, so the disk was the entire cost. Separate machines with their own
+  disks pay one fsync per commit.

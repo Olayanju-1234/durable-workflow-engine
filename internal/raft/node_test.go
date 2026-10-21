@@ -23,11 +23,11 @@ type recordingSM struct {
 	restores int
 }
 
-func (m *recordingSM) Apply(e *LogEntry) any {
+func (m *recordingSM) Apply(e *LogEntry) (any, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.data = append(m.data, string(e.GetData()))
-	return len(m.data)
+	return len(m.data), nil
 }
 
 func (m *recordingSM) snapshot() []string {
@@ -135,7 +135,9 @@ func (c *grpcCluster) start(id string, lis net.Listener) {
 	sm := &recordingSM{}
 	node, err := NewNode(Config{
 		ID: id, Members: c.members(), Storage: storage, Transport: tr, StateMachine: sm, Logger: logger,
-		TickInterval: 10 * time.Millisecond, ElectionTicks: 20, HeartbeatTicks: 1,
+		// 0.5–1 s elections: generous, so a loaded CI machine (every package's
+		// tests in parallel, under -race) doesn't move leadership mid-test.
+		TickInterval: 10 * time.Millisecond, ElectionTicks: 50, HeartbeatTicks: 1,
 		SnapshotEvery: c.snapshotEvery,
 	})
 	if err != nil {

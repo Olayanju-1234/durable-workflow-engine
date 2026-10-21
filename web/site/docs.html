@@ -65,6 +65,7 @@
     <h4>Operating</h4>
     <a href="#recovery">Crash recovery</a>
     <a href="#leases">Leases &amp; dead workers</a>
+    <a href="#cluster">Running a cluster</a>
     <a href="#limitations">Limitations</a>
     <a href="#faq">FAQ</a>
   </aside>
@@ -573,6 +574,10 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--demo-worker</code></td><td><code>false</code></td><td>Run an in-process worker for the built-in demo activities (<code>reserve</code>, <code>charge</code>, <code>ship</code>, <code>release</code>), so <code>OrderSaga</code> and <code>OrderWorkflow</code> run with no separate worker. An input containing <code>decline</code> makes <code>charge</code> fail for good, which shows the saga compensating.</td></tr>
         <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated) this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
         <tr><td><code>--version</code></td><td>—</td><td>Print version and exit.</td></tr>
+        <tr><td><code>--peers</code></td><td>empty</td><td>Every cluster member as <code>id=host:port</code> of its Raft listener, comma-separated. Setting it turns on <a href="#cluster">cluster mode</a>; without it the engine is a single node.</td></tr>
+        <tr><td><code>--node-id</code></td><td>empty</td><td>This node's id in <code>--peers</code>.</td></tr>
+        <tr><td><code>--raft-addr</code></td><td>this node's <code>--peers</code> entry</td><td>Listen address for Raft traffic between nodes. Keep it on a private network.</td></tr>
+        <tr><td><code>--raft-tick</code></td><td><code>100ms</code></td><td>Raft clock: leaders heartbeat every tick; followers start an election after 10–20 silent ticks.</td></tr>
       </tbody>
     </table>
     <div class="callout warn">
@@ -791,11 +796,38 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
       <code>MaxAttempts &gt; 1</code> on activities that should tolerate worker crashes.
     </p>
 
-    <h2 id="limitations">Limitations</h2>
-    <p>Known and deliberate, as of Weeks 1–10:</p>
+    <h2 id="cluster">Running a cluster</h2>
+    <p>
+      Give each node the same <code>--peers</code> list and its own <code>--node-id</code> and data
+      directory, and three (or five) <code>workflowd</code> processes form a Raft cluster:
+    </p>
+    <pre data-lang="sh"><code>workflowd --serve --node-id n1 --peers n1=10.0.0.1:7333,n2=10.0.0.2:7333,n3=10.0.0.3:7333 \
+  --data-dir /var/lib/workflowd --addr :7233 --http-addr :8233</code></pre>
     <ul>
-      <li><strong>Single node.</strong> No replication or failover yet — Raft is Phase 4. The data
-        directory is a single point of failure; back it up.</li>
+      <li>Every history event is written to a majority of nodes before it counts, and every node
+        keeps a full copy of every workflow's history.</li>
+      <li>Only the <strong>leader</strong> runs the engine (task queue, timers, leases, the demo
+        worker, retention). Followers answer workflow calls with HTTP <code>503</code> or gRPC
+        <code>Unavailable</code>, naming the leader (<code>X-Workflowd-Leader</code> header, JSON body,
+        or <code>workflowd-leader*</code> trailers). <code>/api/health</code> works on every node.</li>
+      <li>If the leader dies, another node takes over within one to two election timeouts and resumes
+        every workflow from the replicated history, exactly as a restarted single node would.</li>
+      <li>A cluster survives losing any minority of nodes (one of three, two of five).</li>
+    </ul>
+    <div class="callout warn">
+      <strong>Still at-least-once.</strong> An activity can run twice across a failover, and a write
+      that was in flight during a leader change can return an error even though it succeeded. Retry
+      with the same <code>workflow_id</code>: a duplicate start returns <code>AlreadyExists</code>.
+    </div>
+
+    <h2 id="limitations">Limitations</h2>
+    <p>Known and deliberate, as of Weeks 1–14:</p>
+    <ul>
+      <li><strong>Clustering is young.</strong> Membership is fixed by <code>--peers</code>; the Raft
+        port has no TLS or auth; every history write is a Raft commit under one engine lock, so a
+        cluster adds availability, not write throughput; the TypeScript and Python SDKs don't follow
+        leader hints yet; and a single-node data directory can't be moved into a cluster. A single
+        node's data directory is its single point of failure; back it up.</li>
       <li><strong>No TLS</strong> on any port, and auth (when enabled) is a single shared bearer
         token on the JSON API only — gRPC and metrics are unauthenticated. Keep ports private.</li>
       <li><strong>Go workflows must be compiled into the engine binary</strong> (Go's

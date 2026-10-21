@@ -41,7 +41,8 @@ schedule next step → record result.** Four components, built across phases:
 | Observability    | `internal/metrics` | 3 ✅  | Zero-dep Prometheus `/metrics`; visibility API (List/Get/Terminate). |
 | Dashboard + site | `web/`             | 3 ✅  | `go:embed` operational UI + JSON HTTP API; public landing page & docs. |
 | Polyglot SDKs    | `sdks/`            | —  ✅  | Workflow-task protocol + TypeScript/Python/Java SDKs (dependency-free). |
-| Consensus (Raft) | `internal/raft`    | 4 🚧  | Election ✅ (Wk11), replication ✅ (Wk12), safety checker + snapshots ✅ (Wk13); engine wiring next (ADR-0004). |
+| Consensus (Raft) | `internal/raft`    | 4 ✅  | Elections, log replication, snapshots, five-property safety checker. |
+| Cluster          | `internal/cluster` | 4 ✅  | Replicated history state machine, leader-only per-term engine, leader hints (ADR-0004). |
 | Public SDK       | `sdk`              | 5     | Ergonomic Go API developers import. |
 
 ## Build / test / regenerate
@@ -83,6 +84,7 @@ source of truth because they travel with `git clone`; the global memory is the l
 
 ## Current status
 
+**Phase 4 complete (Weeks 1–14): Raft replication, opt-in with `--node-id`/`--peers`.**
 **Phase 3 complete (Weeks 1–10), plus polyglot workflows (Session 13, unplanned).**
 Week 9: observability (zero-dep Prometheus `/metrics`; visibility API). Week 10:
 JSON HTTP API + `go:embed` dashboard + public site under `web/`. Session 13:
@@ -104,6 +106,16 @@ flags (`--node-id`, `--peers`); cluster mode runs Raft only until Week 14. Sessi
 added log replication: majority commit, conflict repair, a durable Raft log and a
 term-fenced `Node.Propose`. Session 20 added the five-property safety checker (with
 teeth knobs) and snapshots; ADR-0004 fixes the design for wiring the engine in.
+Session 21 completed Phase 4: in cluster mode every history write is a Raft commit,
+only the leader runs an engine (a fresh one per term, after `Recover()`), followers
+answer with leader hints, and real-process chaos tests cover leader kill, partition
+and 100 workflows across a leader change. Production stays single-node.
+
+**Cluster invariants worth not breaking:** apply only committed entries; a new
+leader serves only after `Status.LeaderReady()` (its term's opening entry applied);
+engine writes are fenced by term; the history state machine's apply is a pure
+function of (file, entry) via `raft_index` stamps and the event-id fence; history
+files are fsync'd before a snapshot marker claims them durable.
 
 **Polyglot invariants worth not breaking:** SDK decisions are fenced by history
 length (stale → reject); a malformed command must leave the task *pending* or the

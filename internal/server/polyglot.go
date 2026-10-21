@@ -212,9 +212,15 @@ func (e *Engine) onDecisionTimeout(tm timer.Timer) {
 // decision. The returned task carries the workflow's entire history — the SDK
 // replays it to work out what comes next.
 func (e *Engine) PollWorkflowTask(ctx context.Context, workerID string, workflowTypes []string) (*WorkflowTask, error) {
+	ctx, cancel := e.pollContext(ctx)
+	defer cancel()
 	task, err := e.workflowQueue.poll(ctx, workflowTypes)
 	if err != nil {
-		return nil, err
+		return nil, e.pollError(err)
+	}
+	if ctx.Err() != nil {
+		e.workflowQueue.enqueue(task) // the poller left; keep the task for the next one
+		return nil, e.pollError(ctx.Err())
 	}
 	e.log.Debug("workflow task delivered", "worker_id", workerID,
 		"workflow_id", task.GetWorkflowId(), "type", task.GetWorkflowType())

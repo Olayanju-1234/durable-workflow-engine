@@ -10,11 +10,14 @@ package record
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
+	"path/filepath"
 )
 
 const (
@@ -84,4 +87,79 @@ func Scan(r *bufio.Reader, emit func(payload []byte) error) (int64, error) {
 		}
 		offset += HeaderSize + int64(length)
 	}
+}
+
+// WriteFile replaces dir/name with payloads framed as records, so that a crash
+// leaves either the old file or the new one, never a mix: write a temp file,
+// fsync it, rename it over the target, then fsync the directory so the rename
+// itself is durable.
+func WriteFile(dir, name string, payloads ...[]byte) error {
+	var data []byte
+	for _, p := range payloads {
+		rec, err := Encode(p)
+		if err != nil {
+			return err
+		}
+		data = append(data, rec...)
+	}
+	return ReplaceFile(dir, name, data)
+}
+
+// ReplaceFile is WriteFile for bytes that are already framed records.
+func ReplaceFile(dir, name string, data []byte) error {
+	tmp := filepath.Join(dir, name+".tmp")
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("record: create %s: %w", tmp, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return fmt.Errorf("record: write %s: %w", tmp, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("record: fsync %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("record: close %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
+		return fmt.Errorf("record: rename %s: %w", tmp, err)
+	}
+	return SyncDir(dir)
+}
+
+// ReadFile reads a file written by WriteFile and returns its payloads. A
+// missing file returns os.ErrNotExist. Because WriteFile replaces files whole,
+// a torn record here is damage, not an interrupted write, and is an error.
+func ReadFile(path string) ([][]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var payloads [][]byte
+	end, err := Scan(bufio.NewReader(bytes.NewReader(data)), func(p []byte) error {
+		payloads = append(payloads, p)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if end != int64(len(data)) {
+		return nil, fmt.Errorf("record: %s ends with a partial record", path)
+	}
+	return payloads, nil
+}
+
+// SyncDir fsyncs a directory, making renames and new files in it durable.
+func SyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("record: open dir: %w", err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("record: fsync dir: %w", err)
+	}
+	return nil
 }

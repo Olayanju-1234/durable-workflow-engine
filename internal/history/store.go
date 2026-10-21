@@ -2,6 +2,7 @@ package history
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +36,10 @@ type HistoryStore struct {
 
 	mu    sync.Mutex
 	files map[string]*os.File // workflowID -> open append handle
+	dirty map[string]bool     // written by AppendBuffered and not yet fsync'd
+	// dirDirty: AppendBuffered created a file whose directory entry is not yet
+	// fsync'd (Sync does it, with the files).
+	dirDirty bool
 
 	// writeFile is (*os.File).Write; tests swap it to inject a torn write.
 	writeFile func(f *os.File, b []byte) (int, error)
@@ -45,13 +50,58 @@ func NewHistoryStore(dir string) (*HistoryStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("history: create data dir: %w", err)
 	}
-	return &HistoryStore{dir: dir, files: make(map[string]*os.File), writeFile: (*os.File).Write}, nil
+	return &HistoryStore{dir: dir, files: make(map[string]*os.File), dirty: make(map[string]bool), writeFile: (*os.File).Write}, nil
 }
 
 // Append serializes event and writes it as a single durable record to the
 // workflow's history file, fsyncing before returning. A successful Append means
 // the event has survived to disk and will be recovered after a crash.
 func (s *HistoryStore) Append(workflowID string, event *HistoryEvent) error {
+	return s.append(workflowID, event, true)
+}
+
+// AppendBuffered is Append without the fsync: the record is written, readable
+// at once, but may not survive a crash until Sync. It is for callers that keep
+// their own write-ahead log and can replay what a crash loses, such as a
+// cluster node, whose Raft log holds every event until a snapshot syncs it.
+func (s *HistoryStore) AppendBuffered(workflowID string, event *HistoryEvent) error {
+	return s.append(workflowID, event, false)
+}
+
+// Sync fsyncs every history written by AppendBuffered since the last Sync,
+// and the directory entries of any files it created.
+func (s *HistoryStore) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dirDirty {
+		if err := s.syncDir(); err != nil {
+			return err
+		}
+		s.dirDirty = false
+	}
+	for id := range s.dirty {
+		f, cached := s.files[id]
+		if !cached {
+			// Released since it was written: fsync through a fresh descriptor,
+			// which flushes the same file.
+			var err error
+			if f, err = os.Open(s.path(id)); err != nil {
+				return fmt.Errorf("history: open %s to fsync: %w", id, err)
+			}
+		}
+		err := f.Sync()
+		if !cached {
+			f.Close()
+		}
+		if err != nil {
+			return fmt.Errorf("history: fsync %s: %w", id, err)
+		}
+		delete(s.dirty, id)
+	}
+	return nil
+}
+
+func (s *HistoryStore) append(workflowID string, event *HistoryEvent, sync bool) error {
 	if err := validateWorkflowID(workflowID); err != nil {
 		return err
 	}
@@ -68,7 +118,7 @@ func (s *HistoryStore) Append(workflowID string, event *HistoryEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	f, err := s.fileLocked(workflowID)
+	f, err := s.fileLocked(workflowID, sync)
 	if err != nil {
 		return err
 	}
@@ -77,6 +127,10 @@ func (s *HistoryStore) Append(workflowID string, event *HistoryEvent) error {
 	if _, err := s.writeFile(f, rec); err != nil {
 		s.releaseLocked(workflowID)
 		return fmt.Errorf("history: write record: %w", err)
+	}
+	if !sync {
+		s.dirty[workflowID] = true
+		return nil
 	}
 	if err := f.Sync(); err != nil {
 		s.releaseLocked(workflowID)
@@ -120,16 +174,86 @@ func (s *HistoryStore) ReadAll(workflowID string) ([]*HistoryEvent, error) {
 	return events, nil
 }
 
+// ReadRaw returns a workflow's history file exactly as stored, up to the last
+// complete record (a torn tail is left out). A missing file yields nil. It is
+// how a cluster snapshot copies histories without decoding them.
+func (s *HistoryStore) ReadRaw(workflowID string) ([]byte, error) {
+	if err := validateWorkflowID(workflowID); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := os.ReadFile(s.path(workflowID))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("history: read raw: %w", err)
+	}
+	end, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), nil)
+	if err != nil {
+		return nil, err
+	}
+	return data[:end], nil
+}
+
+// ReplaceAll makes the store hold exactly the given histories, keyed by
+// workflow id, as raw bytes from ReadRaw. Each file is written to a temp file
+// and renamed into place, and every history not listed is removed. It installs
+// a cluster snapshot; a crash part-way leaves a mix of old and new files, which
+// the caller repairs by installing the same snapshot again.
+func (s *HistoryStore) ReplaceAll(files map[string][]byte) error {
+	for id, data := range files {
+		if err := validateWorkflowID(id); err != nil {
+			return err
+		}
+		if _, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), nil); err != nil {
+			return fmt.Errorf("history: replace %s: %w", id, err)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.files {
+		s.releaseLocked(id)
+	}
+	clear(s.dirty) // every history is about to be rewritten durably
+	for id, data := range files {
+		if err := record.ReplaceFile(s.dir, id+historyExt, data); err != nil {
+			return fmt.Errorf("history: replace %s: %w", id, err)
+		}
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return fmt.Errorf("history: read data dir: %w", err)
+	}
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), historyExt)
+		if !ok || e.IsDir() {
+			continue
+		}
+		if _, keep := files[id]; !keep {
+			if err := os.Remove(filepath.Join(s.dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("history: remove %s: %w", id, err)
+			}
+		}
+	}
+	return s.syncDir()
+}
+
 // Close flushes and closes all open file handles. The store must not be used afterward.
 func (s *HistoryStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var firstErr error
 	for id, f := range s.files {
-		if err := f.Close(); err != nil && firstErr == nil {
+		if s.dirty[id] {
+			if err := f.Sync(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if err := s.releaseLocked(id); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		delete(s.files, id)
 	}
 	return firstErr
 }
@@ -143,7 +267,8 @@ func (s *HistoryStore) Release(workflowID string) error {
 	return s.releaseLocked(workflowID)
 }
 
-// releaseLocked is Release for callers that already hold s.mu.
+// releaseLocked is Release for callers that already hold s.mu. A buffered
+// history stays marked dirty; Sync reopens it.
 func (s *HistoryStore) releaseLocked(workflowID string) error {
 	f, ok := s.files[workflowID]
 	if !ok {
@@ -172,6 +297,7 @@ func (s *HistoryStore) Delete(workflowID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.dirty, workflowID) // no point syncing what is about to be removed
 	s.releaseLocked(workflowID)
 	if err := os.Remove(s.path(workflowID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("history: delete %s: %w", workflowID, err)
@@ -181,9 +307,9 @@ func (s *HistoryStore) Delete(workflowID string) error {
 
 // fileLocked returns a cached append handle for the workflow, opening one on
 // first use. On the first open of an existing file it recovers a torn tail; on
-// the first creation of a new file it fsyncs the parent directory. Callers must
-// hold s.mu.
-func (s *HistoryStore) fileLocked(workflowID string) (*os.File, error) {
+// the first creation of a new file it fsyncs the parent directory (or, with
+// syncDir false, leaves that to Sync). Callers must hold s.mu.
+func (s *HistoryStore) fileLocked(workflowID string, syncDir bool) (*os.File, error) {
 	if f, ok := s.files[workflowID]; ok {
 		return f, nil
 	}
@@ -198,7 +324,9 @@ func (s *HistoryStore) fileLocked(workflowID string) (*os.File, error) {
 		return nil, fmt.Errorf("history: open append: %w", err)
 	}
 
-	if isNew {
+	if isNew && !syncDir {
+		s.dirDirty = true
+	} else if isNew {
 		// A new file's name isn't durable until its parent directory is fsync'd;
 		// without this a crash could lose the file despite a synced first append.
 		if err := s.syncDir(); err != nil {

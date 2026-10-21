@@ -23,6 +23,15 @@ type Planner interface {
 	Decide(events []*history.HistoryEvent) (state.Decision, error)
 }
 
+// HistoryLog is where the engine records history mutations. Single-node mode
+// writes straight to the HistoryStore; a cluster replicates each mutation
+// through Raft and returns once it is applied locally. Reads always go to the
+// store, which in both modes holds every recorded event.
+type HistoryLog interface {
+	Append(workflowID string, ev *history.HistoryEvent) error
+	Delete(workflowID string) error
+}
+
 // Engine is the running heart of the workflow service: it owns the history
 // store and the task queue, and turns external events (a client starting a
 // workflow, a worker completing a step) into the same decision loop the Week-2
@@ -35,6 +44,7 @@ type Planner interface {
 // separately concurrent (a channel), so polling never contends with recording.
 type Engine struct {
 	store         *history.HistoryStore
+	hlog          HistoryLog
 	queue         *taskQueue
 	workflowQueue *workflowTaskQueue // polyglot: decisions awaiting an SDK worker
 
@@ -51,6 +61,7 @@ type Engine struct {
 	decisionTimeout time.Duration // immutable after NewEngine
 
 	closeOnce sync.Once
+	done      chan struct{} // closed by Close; ends long polls
 
 	mu               sync.Mutex
 	planners         map[string]Planner       // workflow type -> planner
@@ -70,6 +81,12 @@ func WithLeaseDuration(d time.Duration) Option {
 	return func(e *Engine) { e.leaseDuration = d }
 }
 
+// WithHistoryLog routes history writes through l instead of straight to the
+// store. A cluster passes its Raft-backed log here.
+func WithHistoryLog(l HistoryLog) Option {
+	return func(e *Engine) { e.hlog = l }
+}
+
 // WithDecisionTimeout sets how long an SDK worker may hold a workflow task
 // before the engine re-dispatches it. Re-deciding is always safe (replay is
 // pure and stale commands are fenced), so this only bounds how long a dead SDK
@@ -84,6 +101,8 @@ func WithDecisionTimeout(d time.Duration) Option {
 func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option) *Engine {
 	e := &Engine{
 		store:           store,
+		hlog:            store,
+		done:            make(chan struct{}),
 		queue:           newTaskQueue(),
 		log:             logger,
 		leaseDuration:   defaultLeaseDuration,
@@ -115,10 +134,12 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 	return e
 }
 
-// Close stops the engine's timer services. The history store is owned by the
-// caller and closed separately. Safe to call once.
+// Close stops the engine's timer services and ends its long polls. The history
+// store is owned by the caller and closed separately. Safe to call more than
+// once.
 func (e *Engine) Close() {
 	e.closeOnce.Do(func() {
+		close(e.done)
 		e.timers.Stop()
 		e.retryTimers.Stop()
 		e.leaseTimers.Stop()
@@ -376,16 +397,50 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 // token that CompleteTask and Heartbeat must present, and a deadline after
 // which the engine assumes the worker died and reassigns the work.
 func (e *Engine) PollTask(ctx context.Context, workerID string, stepNames ...string) (*Task, error) {
+	ctx, cancel := e.pollContext(ctx)
+	defer cancel()
 	t, err := e.queue.poll(ctx, stepNames)
 	if err != nil {
-		return nil, err
+		return nil, e.pollError(err)
 	}
 	e.mu.Lock()
+	if ctx.Err() != nil {
+		// The poller gave up just as the task arrived (or while we waited for
+		// the lock). Leasing it now would hand it to a worker that never sees
+		// it, stranding it until the lease expires and costing an attempt; put
+		// it back for the next poller.
+		e.mu.Unlock()
+		e.queue.enqueue(t)
+		return nil, e.pollError(ctx.Err())
+	}
 	le := e.claimLocked(t, workerID)
 	e.mu.Unlock()
 	e.log.Info("task dispatched", "worker_id", workerID, "workflow_id", t.GetWorkflowId(),
 		"step", t.GetStepName(), "sequence", t.GetSequence(), "lease_deadline", le.deadline)
 	return t, nil
+}
+
+// pollContext ends a long poll when either the caller gives up or the engine
+// closes, so a worker parked on a deposed leader's queue is told at once.
+func (e *Engine) pollContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-e.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+func (e *Engine) pollError(err error) error {
+	select {
+	case <-e.done:
+		return ErrEngineClosed
+	default:
+		return err
+	}
 }
 
 // SignalWorkflow delivers an external signal to a running workflow. The signal is
@@ -652,7 +707,7 @@ func (e *Engine) applyDecisionLocked(workflowID string, decision state.Decision,
 func (e *Engine) appendLocked(workflowID string, ev *history.HistoryEvent, eventID int64) error {
 	ev.EventId = eventID
 	ev.Timestamp = time.Now().UnixNano()
-	if err := e.store.Append(workflowID, ev); err != nil {
+	if err := e.hlog.Append(workflowID, ev); err != nil {
 		return fmt.Errorf("server: append %s: %w", workflowID, err)
 	}
 	if isTerminalEvent(ev) {

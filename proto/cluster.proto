@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package cluster.v1;
+
+// Generated Go lands in internal/cluster, next to the state machine that
+// applies these commands to the history store.
+option go_package = "github.com/olayanju-1234/durable-workflow-engine/internal/cluster;cluster";
+
+import "event.proto";
+
+// Command is one history mutation, the payload of a Raft log entry in cluster
+// mode (ADR-0004). The leader's engine decides it; every node applies it.
+message Command {
+  oneof command {
+    AppendEvent append = 1;
+    DeleteWorkflow delete = 2;
+  }
+}
+
+// AppendEvent adds one event to a workflow's history. event.event_id must be
+// the next position in that history, or every node rejects it.
+message AppendEvent {
+  string workflow_id = 1;
+  history.v1.HistoryEvent event = 2;
+}
+
+// DeleteWorkflow removes a finished workflow's history (retention).
+message DeleteWorkflow {
+  string workflow_id = 1;
+}
+
+// A history snapshot is a SnapshotHeader record followed by one
+// SnapshotWorkflow record per workflow, framed by internal/record.
+message SnapshotHeader {
+  uint32 version = 1;
+  uint64 workflows = 2;
+}
+
+message SnapshotWorkflow {
+  string workflow_id = 1;
+  // The workflow's history file, byte for byte.
+  bytes history = 2;
+}
