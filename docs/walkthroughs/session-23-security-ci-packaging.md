@@ -10,7 +10,7 @@ publish-ready npm, PyPI and Maven packages. PRs #16, #17, #18 and #20.*
 
 ```bash
 openssl rand -hex 32 > token && chmod 600 token
-go run ./internal/tlsconfig/tlstest/gencert certs       # a throwaway CA + localhost cert
+mkdir -p certs && go run ./internal/tlsconfig/tlstest/gencert certs   # throwaway CA + localhost cert
 go run ./cmd/workflowd --serve --auth-token-file token \
   --tls-cert certs/server.pem --tls-key certs/server-key.pem
 ```
