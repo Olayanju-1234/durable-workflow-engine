@@ -7,6 +7,10 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+### Changed
+- Releases: npm publishes through trusted publishing (OIDC) like PyPI; `NPM_TOKEN` is no
+  longer used. The npm job runs on Node 24 with npm 11.5.1+.
+
 ## [0.1.0] - 2026-10-22
 
 The first published SDK release: npm and PyPI on 2026-10-22; Maven Central to follow.

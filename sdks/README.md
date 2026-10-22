@@ -228,7 +228,8 @@ upload can't come from CI) and on PyPI (published by this workflow through trust
 publishing, the same day). Maven Central has not been published yet. Everything is in place
 for a manual release:
 [`.github/workflows/release-sdks.yml`](../.github/workflows/release-sdks.yml) builds the
-three packages from `main` and publishes them with tokens stored as repository secrets.
+three packages from `main` and publishes them: npm and PyPI through trusted publishing
+(GitHub's OIDC token, no secrets), Maven Central with tokens stored as repository secrets.
 CI's `sdk-packages` job builds and validates them on every PR (npm pack, `tsc` against
 the declarations, `python -m build` + `twine check`, `mvn verify` with sources and
 javadoc jars), and `scripts/sdk-version.py` fails if the six version strings disagree.
@@ -238,15 +239,17 @@ The names were free on 2026-10-21. Changing one before the first publish means e
 `pom.xml` `groupId`/`artifactId` plus the `package` line in `Workflowd.java` and the
 import in `Example.java`.
 
-**One-time setup (owner only).** Store each token with `gh secret set NAME -R
+**One-time setup (owner only).** For Maven, store each token with `gh secret set NAME -R
 Olayanju-1234/durable-workflow-engine`, which prompts for the value so it never lands in
 your shell history.
 
-1. **npm** (`NPM_TOKEN`). Create an npmjs.com account with 2FA. Under Access Tokens,
-   generate a granular token with read and write access to all packages (a new package
-   name can't be selected before it exists) and "bypass 2FA" ticked, so CI can publish.
-   npm caps the lifetime of write tokens, so set a reminder to rotate it. The workflow
-   publishes with `--provenance`, which links the package to the workflow run.
+1. **npm** (no secret: trusted publishing). A brand-new package's first upload has to be
+   done by hand (`npm login`, then `npm publish --access public` in `typescript/` with
+   LICENSE and NOTICE copied in). Then, on the package's npm page under Settings → Trusted
+   Publisher, add GitHub Actions: `Olayanju-1234` / `durable-workflow-engine`, workflow
+   `release-sdks.yml`, no environment, with "Allow npm publish" ticked (without it, CI can
+   only stage a release for manual approval). Set up for `workflowd` on 2026-10-22. The job
+   installs npm 11.5.1+, which trusted publishing needs, and keeps `--provenance`.
 2. **PyPI** (no secret: trusted publishing). Create a pypi.org account with 2FA. Under
    Account settings → Publishing, add a pending GitHub publisher: project `workflowd`,
    owner `Olayanju-1234`, repository `durable-workflow-engine`, workflow `release-sdks.yml`,

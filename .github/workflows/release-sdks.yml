@@ -1,8 +1,8 @@
 name: Release SDKs
 
 # Manual only: Actions → Release SDKs → Run workflow (on main). Builds the TypeScript,
-# Python and Java packages and, unless dry_run is ticked, publishes them using registry
-# tokens stored as repository secrets. Setup and the full steps: sdks/README.md.
+# Python and Java packages and, unless dry_run is ticked, publishes them: npm and PyPI by
+# trusted publishing (OIDC), Maven with repository secrets. Setup and steps: sdks/README.md.
 on:
   workflow_dispatch:
     inputs:
@@ -52,21 +52,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # npm provenance: links the package to this workflow run
+      id-token: write # npm trusted publishing (OIDC, no NPM_TOKEN) and provenance
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Check the token is set
-        if: ${{ !inputs.dry_run }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          [ -n "$NODE_AUTH_TOKEN" ] || { echo "::error::Repository secret NPM_TOKEN is not set"; exit 1; }
+      # Trusted publishing needs npm 11.5.1+; the package's npm settings name this workflow.
+      - name: Use an npm with trusted publishing
+        run: npm install -g npm@^11.5.1 && npm --version
 
       - name: Type-check the declarations
         working-directory: sdks/typescript
@@ -75,7 +72,6 @@ jobs:
       - name: Publish workflowd@${{ needs.version.outputs.version }}
         working-directory: sdks/typescript
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
         run: |
           cp ../../LICENSE ../../NOTICE .
