@@ -87,6 +87,10 @@ source of truth because they travel with `git clone`; the global memory is the l
 
 ## Current status
 
+**Session 25 (release):** the SDKs are on npm and PyPI as `workflowd` (0.1.1 latest),
+published from `release-sdks.yml` by trusted publishing on both registries; no registry
+tokens exist. Maven Central (Java) is still the owner's to set up.
+
 **Session 24 (engine backlog; parallel to Session 23):** SDK-chosen retry policies,
 version markers, binary/JSON payloads, heartbeats and leader hints in every SDK (#19);
 per-workflow locks + an in-memory state cache (#22); a visibility index and ADR-0006
