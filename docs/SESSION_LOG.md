@@ -5,6 +5,44 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-22 — Session 25: the SDKs are published (npm + PyPI, trusted publishing)
+
+**Done:**
+- **npm `workflowd`** 0.1.0 (hand upload: a brand-new npm package can't be created from
+  CI) and 0.1.1 (from `release-sdks.yml`). **PyPI `workflowd`** 0.1.0 and 0.1.1, both from CI.
+  Tags `sdks-v0.1.0`, `sdks-v0.1.1`. Every release verified by a clean install that ran an
+  OrderSaga on the public demo.
+- **Trusted publishing on both registries (no tokens anywhere).** PyPI: a pending GitHub
+  publisher for this repo + `release-sdks.yml`, job uses `pypa/gh-action-pypi-publish` with
+  `id-token: write` (#28). npm: a GitHub Actions trusted publisher with "Allow npm publish",
+  job installs npm 11.5.1+ on Node 24 (#32). 0.1.1 (#33) was cut to validate npm's config
+  before its 48-hour deadline; npm now shows it "Valid", and the publish carries signed
+  provenance in Sigstore's transparency log.
+- **Release-guard bug (#28):** `sdk-version.py --release` matched the substring
+  `## [0.1.0]`, which the changelog's own instructions contained, so an undated release
+  passed. A real publish attempt got through it (stopped later only by missing secrets). It
+  now requires a heading at the start of a line.
+- **Flaky test (#29):** `TestReplayWorkflowSurvivesRestart` (1 in 10 under `-race` load)
+  polled for a pause on a 40 ms timer and could miss it. Test-only fix: a 750 ms cooldown.
+- Docs: READMEs and CHANGELOG track what's published (#30, #31).
+
+**Next:** Maven Central for the Java SDK (owner: GPG key + Sonatype account). Optional:
+npm staged publishing (npm calls direct publish from CI "not recommended"), and npm's
+"disallow bypass-2FA tokens" setting.
+
+**Gotchas:**
+- Account creation, sign-in, 2FA setup and handling tokens/keys stay with the owner even
+  with permission. Claude filled the trusted-publisher forms in his signed-in Chrome.
+- npm 11.6.2 crashed ("Exit handler never called!") when Enter was pressed at its "open in
+  browser" prompt; cmd-click the printed link instead.
+- Reloading a page while npm's security-key prompt is up cancels the change.
+- A local `npm publish` must copy LICENSE + NOTICE into `sdks/typescript` first (CI does).
+- Don't run the release with `registries=all` until Maven secrets exist: the maven job
+  fails. Run `npm` and `pypi` separately.
+- npm showed a placeholder `0.0.0-stage` for about a minute after the first publish.
+
+---
+
 ## 2026-10-21 — Session 24 (engine backlog): SDK features, per-workflow locking, index, schedules, parallel steps, exactly-once signals
 
 Run in parallel with Session 23 (security/CI/packaging). PRs #19, #22, #23, #24, #25,
