@@ -26,8 +26,8 @@ are on npm and PyPI; Java is packaged and waiting on its first Maven Central rel
 
 | SDK | Package | Install |
 |-----|---------|-------------------------|
-| TypeScript | npm `workflowd` ([`package.json`](typescript/package.json), types in [`workflowd.d.mts`](typescript/workflowd.d.mts)) | `npm install workflowd` (0.1.0 on npm) |
-| Python | PyPI `workflowd` ([`pyproject.toml`](python/pyproject.toml)) | `pip install workflowd` (0.1.0 on PyPI) |
+| TypeScript | npm `workflowd` ([`package.json`](typescript/package.json), types in [`workflowd.d.mts`](typescript/workflowd.d.mts)) | `npm install workflowd` (on npm) |
+| Python | PyPI `workflowd` ([`pyproject.toml`](python/pyproject.toml)) | `pip install workflowd` (on PyPI) |
 | Java | Maven `io.github.olayanju-1234:workflowd` ([`pom.xml`](java/pom.xml)), class `io.github.olayanju1234.workflowd.Workflowd` | see [`java/README.md`](java/README.md) |
 
 Until Java is published, copy `Workflowd.java` into your project.
@@ -226,7 +226,7 @@ bundle a loop for convenience.
 0.1.0 is out on npm (published by hand on 2026-10-22, since a brand-new npm package's first
 upload can't come from CI) and on PyPI (published by this workflow through trusted
 publishing, the same day). Maven Central has not been published yet. Everything is in place
-for a manual release:
+for a manual release (0.1.1 went out this way on npm and PyPI, the same day):
 [`.github/workflows/release-sdks.yml`](../.github/workflows/release-sdks.yml) builds the
 three packages from `main` and publishes them: npm and PyPI through trusted publishing
 (GitHub's OIDC token, no secrets), Maven Central with tokens stored as repository secrets.
@@ -279,7 +279,7 @@ your shell history.
 3. Publish: the same command with `-f dry_run=false`. Use `-f registries=npm` (or
    `pypi`, `maven`) to retry one registry. A version can be published only once per
    registry, so bump the version to fix a bad release.
-4. Tag it: `git tag sdks-v0.1.0 && git push origin sdks-v0.1.0`.
+4. Tag it: `git tag -a sdks-v<version> -m ... && git push origin sdks-v<version>`.
 
 Maven Central validates the bundle and then publishes it automatically; it can take
 30 minutes or more to show up in search.

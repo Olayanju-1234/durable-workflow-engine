@@ -7,6 +7,11 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-22
+
+No SDK behaviour changes (only the reported version string); the first release published
+entirely from CI.
+
 ### Changed
 - Releases: npm publishes through trusted publishing (OIDC) like PyPI; `NPM_TOKEN` is no
   longer used. The npm job runs on Node 24 with npm 11.5.1+.
