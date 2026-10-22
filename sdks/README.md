@@ -20,16 +20,17 @@ policies, versions, side effects, binary and JSON payloads, heartbeats) when
 `node` / `python3` are installed.
 
 Every SDK here is **dependency-free**: Node's `fetch`, Python's `urllib`, and
-Java's `HttpClient` are all built in. No protobuf toolchain. Each is also ready to
-publish (not published yet; see [Publishing](#publishing-the-sdks)):
+Java's `HttpClient` are all built in. No protobuf toolchain. The TypeScript SDK is on npm;
+Python and Java are packaged and waiting on their first release (see
+[Publishing](#publishing-the-sdks)):
 
-| SDK | Package | Install, once published |
+| SDK | Package | Install |
 |-----|---------|-------------------------|
-| TypeScript | npm `workflowd` ([`package.json`](typescript/package.json), types in [`workflowd.d.mts`](typescript/workflowd.d.mts)) | `npm install workflowd` |
-| Python | PyPI `workflowd` ([`pyproject.toml`](python/pyproject.toml)) | `pip install workflowd` |
+| TypeScript | npm `workflowd` ([`package.json`](typescript/package.json), types in [`workflowd.d.mts`](typescript/workflowd.d.mts)) | `npm install workflowd` (0.1.0 on npm) |
+| Python | PyPI `workflowd` ([`pyproject.toml`](python/pyproject.toml)) | `pip install workflowd` (not published yet) |
 | Java | Maven `io.github.olayanju-1234:workflowd` ([`pom.xml`](java/pom.xml)), class `io.github.olayanju1234.workflowd.Workflowd` | see [`java/README.md`](java/README.md) |
 
-Until then, copy the one file into your project.
+Until Python and Java are published, copy the one file into your project.
 
 ## Auth and TLS
 
@@ -222,7 +223,9 @@ bundle a loop for convenience.
 
 ## Publishing the SDKs
 
-Nothing has been published. Everything is in place for a manual release:
+npm `workflowd@0.1.0` was published by hand on 2026-10-22 (a brand-new package's first
+upload can't come from CI). PyPI and Maven Central have not been published yet. Everything
+is in place for a manual release:
 [`.github/workflows/release-sdks.yml`](../.github/workflows/release-sdks.yml) builds the
 three packages from `main` and publishes them with tokens stored as repository secrets.
 CI's `sdk-packages` job builds and validates them on every PR (npm pack, `tsc` against

@@ -189,7 +189,7 @@ worker.workflow('OrderWorkflow', async (ctx) => {
 | SDK | Status |
 |-----|--------|
 | Go (`workflow`, `worker`, `client`) | tested end to end, including leader failover |
-| TypeScript (`sdks/typescript/`) | run end to end in CI (plaintext and TLS + token); npm-ready, not yet published |
+| TypeScript (`sdks/typescript/`) | run end to end in CI (plaintext and TLS + token); on npm: `npm install workflowd` |
 | Python (`sdks/python/`) | run end to end in CI (plaintext and TLS + token); PyPI-ready, not yet published |
 | Java (`sdks/java/`) | compiled for Java 11 and run end to end in CI; Maven-ready, not yet published |
 
