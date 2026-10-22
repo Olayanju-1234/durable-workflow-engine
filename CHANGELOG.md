@@ -7,9 +7,9 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-21
+## [0.1.0] - 2026-10-22
 
-The first published SDK release.
+The first published SDK release (npm on 2026-10-22; PyPI and Maven Central to follow).
 
 ### Added
 - SDKs for TypeScript/JavaScript, Python and Java: workflows as ordinary functions with
