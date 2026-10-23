@@ -1,6 +1,15 @@
 // Compile-only check that workflowd.d.mts describes the SDK as the examples
 // use it (CI: tsc --noEmit). Not shipped in the npm package.
-import { ActivityFailure, CancelledFailure, DEFAULT_VERSION, decide, Worker, WorkflowFailure, type Context } from 'workflowd';
+import {
+  ActivityFailure,
+  CancelledFailure,
+  DEFAULT_VERSION,
+  decide,
+  NonRetryableError,
+  Worker,
+  WorkflowFailure,
+  type Context,
+} from 'workflowd';
 
 const worker = new Worker({ address: 'https://localhost:8233', workerId: 'types', token: 'tok' });
 
@@ -12,12 +21,15 @@ worker.workflow('Order', async (ctx: Context) => {
   try {
     await ctx.activity('charge', reserved);
   } catch (err) {
-    if (err instanceof ActivityFailure) await ctx.activity('release', err.stepName);
+    if (err instanceof ActivityFailure && !err.nonRetryable && err.type !== 'BadRequest') await ctx.activity('release', err.stepName);
     throw err;
   }
   return ctx.activity('ship', reserved);
 });
 worker.activity('reserve', async (input: string) => `reserved(${input})`).activity('ship', (input) => input);
+worker.activity('charge', async () => {
+  throw new NonRetryableError('card declined', { type: 'Declined' });
+});
 
 const cluster = new Worker({ addresses: ['http://n1:8233', 'http://n2:8233'], activityConcurrency: 8 });
 cluster.workflow('Typed', async (ctx) => {
@@ -25,7 +37,7 @@ cluster.workflow('Typed', async (ctx) => {
   const v: number = await ctx.getVersion('pricing', DEFAULT_VERSION, 1);
   const id: string = await ctx.sideEffect('id', () => `${order.id}-${v}`);
   const receipt = await ctx.activity<{ ok: boolean }>('charge', order, {
-    retry: { maxAttempts: 3, initialBackoffMs: 100 },
+    retry: { maxAttempts: 3, initialBackoffMs: 100, nonRetryableErrorTypes: ['BadRequest'] },
     startToCloseTimeoutMs: 10_000,
     scheduleToCloseTimeoutMs: 60_000,
     as: 'json',

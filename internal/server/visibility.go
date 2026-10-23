@@ -74,6 +74,7 @@ func (e *Engine) GetWorkflow(workflowID string) (*GetWorkflowResponse, error) {
 			Status:     status,
 			Attempts:   int32(s.Attempts),
 			Error:      stepErr,
+			ErrorType:  s.ErrorType,
 			Output:     s.Output,
 			FireAt:     s.FireAt,
 			SignalName: s.Signal,

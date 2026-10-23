@@ -158,6 +158,7 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 			StepName: s.Name, Sequence: s.Sequence,
 			Kind: s.Kind.String(), Status: status,
 			Attempts: int32(s.Attempts), Error: s.Error,
+			ErrorType: s.ErrorType, NonRetryable: s.NonRetryable,
 			Output: string(s.Output), OutputBase64: base64Twin(s.Output),
 			FireAt: formatNanos(s.FireAt), SignalName: s.Signal, Marker: s.Marker,
 			ResolvedEventID: s.ResolvedEventID,
@@ -197,9 +198,10 @@ type commandDTO struct {
 }
 
 type retryPolicyDTO struct {
-	MaxAttempts      int32 `json:"max_attempts"`
-	InitialBackoffMs int64 `json:"initial_backoff_ms"`
-	MaxBackoffMs     int64 `json:"max_backoff_ms"`
+	MaxAttempts            int32    `json:"max_attempts"`
+	InitialBackoffMs       int64    `json:"initial_backoff_ms"`
+	MaxBackoffMs           int64    `json:"max_backoff_ms"`
+	NonRetryableErrorTypes []string `json:"non_retryable_error_types,omitempty"`
 }
 
 func (a *HTTPAPI) completeWorkflowTask(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +274,7 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 		if p := c.RetryPolicy; p != nil {
 			retry = &history.RetryPolicy{
 				MaxAttempts: p.MaxAttempts, InitialBackoffMs: p.InitialBackoffMs, MaxBackoffMs: p.MaxBackoffMs,
+				NonRetryableErrorTypes: p.NonRetryableErrorTypes,
 			}
 		}
 		return &WorkflowCommand{Command: &WorkflowCommand_ScheduleActivity{
@@ -363,6 +366,10 @@ func (a *HTTPAPI) completeActivityTask(w http.ResponseWriter, r *http.Request) {
 		Error      string `json:"error"`
 		// Set for binary activity results; takes precedence over Output.
 		OutputBase64 string `json:"output_base64"`
+		// With an error: its kind (matched against the retry policy's
+		// non_retryable_error_types), and whether to skip retries outright.
+		ErrorType    string `json:"error_type"`
+		NonRetryable bool   `json:"non_retryable"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -383,8 +390,15 @@ func (a *HTTPAPI) completeActivityTask(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
-	if err := e.CompleteTask(body.WorkflowID, body.StepName, body.Sequence,
-		body.LeaseToken, output, body.Error, body.Error != ""); err != nil {
+	var err error
+	if body.Error != "" {
+		err = e.FailTask(body.WorkflowID, body.StepName, body.Sequence, body.LeaseToken, TaskFailure{
+			Message: body.Error, Type: body.ErrorType, NonRetryable: body.NonRetryable,
+		})
+	} else {
+		err = e.CompleteTask(body.WorkflowID, body.StepName, body.Sequence, body.LeaseToken, output, "", false)
+	}
+	if err != nil {
 		if errors.Is(err, ErrNotLeader) {
 			a.writeNotLeader(w, err)
 			return

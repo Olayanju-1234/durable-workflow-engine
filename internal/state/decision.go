@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
@@ -46,11 +47,18 @@ const (
 // RetryPolicy controls automatic re-execution of a failed activity: the
 // workflow sees the error only once attempts are exhausted. MaxAttempts counts
 // the first try (1 = no retry); Backoff is the first delay, doubled after each
-// further failure and capped at MaxBackoff (zero = no cap).
+// further failure and capped at MaxBackoff (zero = no cap). A failure whose
+// error type is in NonRetryableErrorTypes is never retried.
 type RetryPolicy struct {
-	MaxAttempts int
-	Backoff     time.Duration
-	MaxBackoff  time.Duration
+	MaxAttempts            int
+	Backoff                time.Duration
+	MaxBackoff             time.Duration
+	NonRetryableErrorTypes []string
+}
+
+// Retries reports whether a failure of the given type may be retried at all.
+func (p RetryPolicy) Retries(errType string) bool {
+	return errType == "" || !slices.Contains(p.NonRetryableErrorTypes, errType)
 }
 
 // Delay is how long to wait before retrying after the given attempt failed

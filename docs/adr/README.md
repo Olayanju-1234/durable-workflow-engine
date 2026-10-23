@@ -15,6 +15,7 @@ that supersedes the old one.
 | [0007](0007-parallel-steps.md) | Parallel steps and batched commands | Accepted |
 | [0008](0008-timeouts.md) | Workflow and activity timeouts | Accepted |
 | [0009](0009-cancellation.md) | Cancelling workflows and steps | Accepted |
+| [0010](0010-non-retryable-failures.md) | Non-retryable failures and error types | Accepted |
 
 ## Template
 

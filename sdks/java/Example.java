@@ -35,8 +35,11 @@ public final class Example {
             }
 
             try {
-                // A charge attempt gets 30 seconds, and the whole step (retries included) two minutes.
+                // A charge attempt gets 30 seconds, and the whole step (retries included) two
+                // minutes; a declined card (NonRetryableException) or bad input is not retried.
                 ctx.activity("charge", reserved, new Workflowd.ActivityOptions()
+                        .withRetry(new Workflowd.RetryPolicy(3, Duration.ofMillis(200), null)
+                                .withNonRetryableErrorTypes("IllegalArgumentException"))
                         .withStartToCloseTimeout(Duration.ofSeconds(30))
                         .withScheduleToCloseTimeout(Duration.ofMinutes(2)));
             } catch (Workflowd.ActivityFailure e) {

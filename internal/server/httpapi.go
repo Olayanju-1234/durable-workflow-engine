@@ -216,7 +216,10 @@ type stepDTO struct {
 	Status   string `json:"status"`
 	Attempts int32  `json:"attempts"`
 	Error    string `json:"error,omitempty"`
-	Output   string `json:"output,omitempty"`
+	// Failed steps: the kind of failure, and whether the worker said not to retry it.
+	ErrorType    string `json:"error_type,omitempty"`
+	NonRetryable bool   `json:"non_retryable,omitempty"`
+	Output       string `json:"output,omitempty"`
 	// Set only when Output's bytes are not valid UTF-8 (see base64Twin).
 	OutputBase64 string `json:"output_base64,omitempty"`
 	FireAt       string `json:"fire_at,omitempty"`
@@ -343,6 +346,7 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 			Status:       s.GetStatus(),
 			Attempts:     s.GetAttempts(),
 			Error:        s.GetError(),
+			ErrorType:    s.GetErrorType(),
 			Output:       string(s.GetOutput()),
 			OutputBase64: base64Twin(s.GetOutput()),
 			FireAt:       formatNanos(s.GetFireAt()),

@@ -39,12 +39,22 @@ func (e *Engine) retryPolicy(step *state.Step) RetryPolicy {
 	return noRetry
 }
 
+// Error types the engine gives the failures it records itself. A retry policy
+// can list them in NonRetryableErrorTypes like any worker-reported type.
+const (
+	ErrorTypeLeaseExpired           = "LeaseExpired"
+	ErrorTypeStartToCloseTimeout    = "StartToCloseTimeout"
+	ErrorTypeScheduleToCloseTimeout = "ScheduleToCloseTimeout"
+)
+
 // retryAfter decides whether a failed attempt of step runs again, and after
-// how long. A retry must start before the step's schedule-to-close deadline:
-// one that could not is pointless, so the failure is final at once.
+// how long. Not if the worker said the failure is not worth retrying, or the
+// policy lists its error type; and a retry must start before the step's
+// schedule-to-close deadline: one that could not is pointless, so the failure
+// is final at once.
 func (e *Engine) retryAfter(step *state.Step, now time.Time) (time.Duration, bool) {
 	p := e.retryPolicy(step)
-	if step.Attempts >= p.MaxAttempts {
+	if step.Attempts >= p.MaxAttempts || step.NonRetryable || !p.Retries(step.ErrorType) {
 		return 0, false
 	}
 	d := p.Delay(step.Attempts)

@@ -53,6 +53,56 @@ var (
 	ErrLeaseLost         = errors.New("worker: activity lease lost")
 )
 
+// ActivityError is an activity failure with a kind (Type), which a retry
+// policy can list in NonRetryableErrorTypes, and optionally marked as not
+// worth retrying at all. Return one (or wrap one) from an ActivityFunc;
+// NonRetryable and Typed build them.
+type ActivityError struct {
+	Type         string
+	NonRetryable bool
+	Err          error
+}
+
+func (e *ActivityError) Error() string { return e.Err.Error() }
+func (e *ActivityError) Unwrap() error { return e.Err }
+
+// NonRetryable marks err so the engine fails the step at once instead of
+// retrying it: a 4xx answer, a validation error, anything that will fail the
+// same way again. The workflow sees err.
+//
+//	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+//		return nil, worker.NonRetryable(fmt.Errorf("webhook answered %d", resp.StatusCode))
+//	}
+func NonRetryable(err error) error {
+	if err == nil {
+		return nil
+	}
+	ae := &ActivityError{Err: err, NonRetryable: true}
+	var inner *ActivityError
+	if errors.As(err, &inner) {
+		ae.Type = inner.Type
+	}
+	return ae
+}
+
+// Typed names the kind of failure, so a retry policy can decide:
+// workflow.RetryPolicy{NonRetryableErrorTypes: []string{"BadRequest"}}.
+func Typed(errType string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ActivityError{Type: errType, Err: err}
+}
+
+// failureOf is how a worker reports an activity error to the engine.
+func failureOf(err error) (errType string, nonRetryable bool) {
+	var ae *ActivityError
+	if errors.As(err, &ae) {
+		return ae.Type, ae.NonRetryable
+	}
+	return "", false
+}
+
 // ActivityInfo identifies the step an activity is running for.
 type ActivityInfo struct {
 	WorkflowID string
@@ -372,6 +422,7 @@ func (w *Worker) execute(ctx context.Context, task *server.Task) {
 	}
 	if actErr != nil {
 		req.Result = &server.CompleteTaskRequest_Error{Error: actErr.Error()}
+		req.ErrorType, req.NonRetryable = failureOf(actErr)
 	} else {
 		req.Result = &server.CompleteTaskRequest_Output{Output: output}
 	}

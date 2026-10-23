@@ -71,12 +71,42 @@ public final class Workflowd {
         public WorkflowFailure(String message) { super(message); }
     }
 
-    /** Thrown when an activity recorded a failure. Catch it to compensate. */
+    /**
+     * Thrown when an activity recorded a failure. Catch it to compensate. {@code type} is the
+     * failure's kind (the activity exception's simple class name, or one of the engine's:
+     * LeaseExpired, StartToCloseTimeout, ScheduleToCloseTimeout); {@code nonRetryable} says the
+     * worker flagged it as not worth retrying.
+     */
     public static class ActivityFailure extends RuntimeException {
         public final String stepName;
+        public final String type;
+        public final boolean nonRetryable;
+
         public ActivityFailure(String stepName, String message) {
+            this(stepName, message, "", false);
+        }
+
+        public ActivityFailure(String stepName, String message, String type, boolean nonRetryable) {
             super(message);
             this.stepName = stepName;
+            this.type = type == null ? "" : type;
+            this.nonRetryable = nonRetryable;
+        }
+    }
+
+    /**
+     * Throw from an activity to fail its step at once, without retries: a 4xx answer, a
+     * validation error, anything that would fail the same way again.
+     */
+    public static class NonRetryableException extends RuntimeException {
+        final String errorType;
+
+        public NonRetryableException(String message) { this(message, null); }
+
+        /** {@code errorType} names the kind of failure; null means this class's name. */
+        public NonRetryableException(String message, String errorType) {
+            super(message);
+            this.errorType = errorType;
         }
     }
 
@@ -139,11 +169,22 @@ public final class Workflowd {
         final int maxAttempts;
         final Duration initialBackoff;
         final Duration maxBackoff;
+        final List<String> nonRetryableErrorTypes;
 
         public RetryPolicy(int maxAttempts, Duration initialBackoff, Duration maxBackoff) {
+            this(maxAttempts, initialBackoff, maxBackoff, List.of());
+        }
+
+        private RetryPolicy(int maxAttempts, Duration initialBackoff, Duration maxBackoff, List<String> nonRetryableErrorTypes) {
             this.maxAttempts = maxAttempts;
             this.initialBackoff = initialBackoff == null ? Duration.ZERO : initialBackoff;
             this.maxBackoff = maxBackoff == null ? Duration.ZERO : maxBackoff;
+            this.nonRetryableErrorTypes = nonRetryableErrorTypes;
+        }
+
+        /** A copy that does not retry failures of these types (activity exception class names). */
+        public RetryPolicy withNonRetryableErrorTypes(String... types) {
+            return new RetryPolicy(maxAttempts, initialBackoff, maxBackoff, List.of(types));
         }
 
         Map<String, Object> toWire() {
@@ -151,6 +192,8 @@ public final class Workflowd {
             m.put("max_attempts", (long) maxAttempts);
             m.put("initial_backoff_ms", Math.max(0L, initialBackoff.toMillis()));
             m.put("max_backoff_ms", Math.max(0L, maxBackoff.toMillis()));
+            // Only when set: an engine that predates the field refuses it.
+            if (!nonRetryableErrorTypes.isEmpty()) m.put("non_retryable_error_types", new ArrayList<Object>(nonRetryableErrorTypes));
             return m;
         }
     }
@@ -350,7 +393,8 @@ public final class Workflowd {
                 if ("COMPLETED".equals(status)) return recorded;
                 if ("FAILED".equals(status)) {
                     String err = str(recorded.get("error"));
-                    throw new ActivityFailure(name, err.isEmpty() ? "activity failed" : err);
+                    throw new ActivityFailure(name, err.isEmpty() ? "activity failed" : err,
+                            str(recorded.get("error_type")), Boolean.TRUE.equals(recorded.get("non_retryable")));
                 }
                 if ("CANCELLED".equals(status)) {
                     String err = str(recorded.get("error"));
@@ -682,11 +726,27 @@ public final class Workflowd {
                 putBytes(body, "output", fn.run(bytes(task, "input")));
             } catch (Exception e) {
                 body.put("error", e.getMessage() == null ? e.toString() : e.getMessage());
+                String type = e.getClass().getSimpleName();
+                if (e instanceof NonRetryableException) {
+                    NonRetryableException n = (NonRetryableException) e;
+                    if (n.errorType != null && !n.errorType.isEmpty()) type = n.errorType;
+                    body.put("non_retryable", Boolean.TRUE);
+                }
+                body.put("error_type", type);
             } finally {
                 if (beat != null) beat.cancel(false);
             }
             try {
-                request("POST", "/api/activity-tasks/complete", body, 3);
+                try {
+                    request("POST", "/api/activity-tasks/complete", body, 3);
+                } catch (HttpError e) {
+                    // An engine before 0.2.0 refuses the fields it doesn't know: report the
+                    // failure without them rather than lose it.
+                    if (e.status != 400 || !String.valueOf(e.getMessage()).contains("unknown field") || !body.containsKey("error_type")) throw e;
+                    body.remove("error_type");
+                    body.remove("non_retryable");
+                    request("POST", "/api/activity-tasks/complete", body, 3);
+                }
             } catch (HttpError e) {
                 if (e.status != 409) System.err.println("[workflowd] activity complete failed: " + e.getMessage());
             } catch (Exception e) {

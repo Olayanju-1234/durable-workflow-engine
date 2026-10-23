@@ -257,3 +257,46 @@ func TestHTTPCancellation(t *testing.T) {
 		t.Fatalf("heartbeat with an unknown token: HTTP %d %v, want 409 not cancelled", code, body)
 	}
 }
+
+// TestHTTPNonRetryable: a failure's error_type and non_retryable reach the
+// retry decision, the policy's non_retryable_error_types is honoured, and the
+// step shows its error type.
+func TestHTTPNonRetryable(t *testing.T) {
+	h := newAPIHarness(t)
+	if code, body := h.do(t, "POST", "/api/workflow-types", `{"workflow_types":["RemoteN"],"worker_id":"w"}`); code != http.StatusOK {
+		t.Fatalf("register: HTTP %d %v", code, body)
+	}
+	_, start := h.do(t, "POST", "/api/workflows", `{"type":"RemoteN"}`)
+	id := start["workflow_id"].(string)
+	_, task := h.do(t, "GET", "/api/workflow-tasks?types=RemoteN", "")
+	code, body := h.do(t, "POST", "/api/workflow-tasks/complete", fmt.Sprintf(
+		`{"workflow_id":%q,"task_token":%q,"commands":[`+
+			`{"type":"schedule_activity","step_name":"a","sequence":1,"retry_policy":{"max_attempts":5,"non_retryable_error_types":["BadRequest"]}},`+
+			`{"type":"schedule_activity","step_name":"b","sequence":2,"retry_policy":{"max_attempts":5}}]}`,
+		id, task["task_token"]))
+	if code != http.StatusOK {
+		t.Fatalf("complete: HTTP %d %v", code, body)
+	}
+	fail := func(step, extra string) {
+		t.Helper()
+		_, act := h.do(t, "GET", "/api/activity-tasks?activities="+step, "")
+		if code, body := h.do(t, "POST", "/api/activity-tasks/complete", fmt.Sprintf(
+			`{"workflow_id":%q,"step_name":%q,"sequence":%v,"lease_token":%q,"error":"nope"%s}`,
+			id, step, act["sequence"], act["lease_token"], extra)); code != http.StatusOK {
+			t.Fatalf("fail %s: HTTP %d %v", step, code, body)
+		}
+	}
+	fail("a", `,"error_type":"BadRequest"`)
+	fail("b", `,"error_type":"Whatever","non_retryable":true`)
+	_, task = h.do(t, "GET", "/api/workflow-tasks?types=RemoteN", "")
+	for _, s := range task["steps"].([]any) {
+		step := s.(map[string]any)
+		if step["status"] != "FAILED" || step["attempts"] != float64(1) || step["error_type"] == nil {
+			t.Fatalf("step %v, want FAILED after 1 attempt with its error type", step)
+		}
+	}
+	_, wf := h.do(t, "GET", "/api/workflows/"+id, "")
+	if steps := wf["steps"].([]any); steps[0].(map[string]any)["error_type"] != "BadRequest" {
+		t.Fatalf("GET workflow steps %v, want error_type BadRequest", steps)
+	}
+}

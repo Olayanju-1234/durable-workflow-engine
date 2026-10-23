@@ -421,6 +421,35 @@ out, err := c.WaitForResult(ctx, id)     // blocks until it finishes</code></pre
       Backoffs are durable: if the engine restarts during one, the retry is re-armed.
     </p>
     <p>
+      <strong>Some failures are not worth retrying</strong>: a <code>404</code> from a webhook, a
+      validation error. An activity can say so, and the step fails on that attempt whatever the
+      policy allows; or the policy can list error types it should not retry:
+    </p>
+    <pre data-lang="go"><code>// In the activity:
+if resp.StatusCode >= 400 &amp;&amp; resp.StatusCode &lt; 500 {
+	return nil, worker.NonRetryable(fmt.Errorf("webhook answered %d", resp.StatusCode))
+}
+return nil, worker.Typed("RateLimited", err) // a kind a policy can name
+
+// In the workflow:
+_, err := ctx.ExecuteActivity("deliver", event, workflow.WithRetryPolicy(workflow.RetryPolicy{
+	MaxAttempts: 6, InitialBackoff: 5 * time.Second,
+	NonRetryableErrorTypes: []string{"RateLimited", "StartToCloseTimeout"},
+}))
+var ae *workflow.ActivityError
+if errors.As(err, &amp;ae) &amp;&amp; ae.NonRetryable { ... } // ae.Type, ae.Message</code></pre>
+    <p>
+      TypeScript: <code>throw new NonRetryableError('webhook answered 404')</code> (or any error with
+      <code>nonRetryable: true</code>); the error's <code>name</code> is its type, so
+      <code>class BadRequest extends Error</code> plus <code>retry: { nonRetryableErrorTypes: ['BadRequest'] }</code>
+      works too, and <code>ActivityFailure</code> carries <code>type</code> and <code>nonRetryable</code>.
+      Python: <code>raise NonRetryableError(...)</code>; the exception's class name is its type
+      (<code>RetryPolicy(non_retryable_error_types=("ValueError",))</code>). Java:
+      <code>throw new Workflowd.NonRetryableException(...)</code>,
+      <code>RetryPolicy.withNonRetryableErrorTypes(...)</code>. The engine's own failures have types
+      too: <code>LeaseExpired</code>, <code>StartToCloseTimeout</code>, <code>ScheduleToCloseTimeout</code>.
+    </p>
+    <p>
       <strong>Saga compensation needs no special machinery.</strong> Once retries are exhausted,
       the activity error is returned to your Go code, so "undo" is just an ordinary error branch
       that calls more activities, as in the <code>release-stock</code> calls in the example above.

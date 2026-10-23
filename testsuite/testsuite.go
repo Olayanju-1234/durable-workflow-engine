@@ -286,13 +286,17 @@ func (e *Env) runAttempt(d state.Decision) (bool, error) {
 	if d.Retry != nil {
 		policy = *d.Retry
 	}
-	willRetry := attempt < policy.MaxAttempts
+	errType, nonRetryable := failureOf(err)
+	willRetry := attempt < policy.MaxAttempts && !nonRetryable && policy.Retries(errType)
 	if willRetry && step.ScheduleToClose > 0 {
 		deadline := time.Unix(0, step.ScheduledAt).Add(step.ScheduleToClose)
 		willRetry = e.now.Add(policy.Delay(attempt)).Before(deadline)
 	}
 	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
-		StepFailed: &history.StepFailedEvent{StepName: d.StepName, Sequence: d.Sequence, Error: err.Error(), RetryCount: int32(attempt), WillRetry: willRetry},
+		StepFailed: &history.StepFailedEvent{
+			StepName: d.StepName, Sequence: d.Sequence, Error: err.Error(), RetryCount: int32(attempt), WillRetry: willRetry,
+			ErrorType: errType, NonRetryable: nonRetryable,
+		},
 	}})
 	if willRetry {
 		e.push(happening{at: e.now.Add(policy.Delay(attempt)), retry: &d})
@@ -323,6 +327,15 @@ func (e *Env) cancelStep(d state.Decision) error {
 		return false
 	})
 	return nil
+}
+
+// failureOf reads an activity error the way a worker reports it.
+func failureOf(err error) (string, bool) {
+	var ae *worker.ActivityError
+	if errors.As(err, &ae) {
+		return ae.Type, ae.NonRetryable
+	}
+	return "", false
 }
 
 // deliverSignals completes every signal wait a buffered signal satisfies, the

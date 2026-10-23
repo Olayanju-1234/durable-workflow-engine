@@ -283,16 +283,18 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 	}
 	attempt := *step
 	workflowType := st.WorkflowType
-	delay, willRetry := e.retryAfter(&attempt, time.Now())
 	reason := fmt.Sprintf("lease expired: worker %q missed its deadline", le.workerID)
+	attempt.ErrorType, attempt.NonRetryable = ErrorTypeLeaseExpired, false
 	if timedOut {
 		reason = fmt.Sprintf("activity timed out: start-to-close timeout of %s exceeded on worker %q",
 			attempt.StartToClose, le.workerID)
+		attempt.ErrorType = ErrorTypeStartToCloseTimeout
 	}
+	delay, willRetry := e.retryAfter(&attempt, time.Now())
 	failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 		StepFailed: &history.StepFailedEvent{
 			StepName: le.stepName, Sequence: le.sequence, Error: reason,
-			RetryCount: int32(attempt.Attempts), WillRetry: willRetry,
+			RetryCount: int32(attempt.Attempts), WillRetry: willRetry, ErrorType: attempt.ErrorType,
 		},
 	}}
 	if err := e.appendLocked(w, failedEv, int64(len(events)+1)); err != nil {
