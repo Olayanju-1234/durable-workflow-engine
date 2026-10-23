@@ -30,7 +30,7 @@ found = {
     "typescript/package.json": json.loads((sdks / "typescript" / "package.json").read_text())["version"],
     "python/pyproject.toml": first(r'^version\s*=\s*"([^"]+)"', sdks / "python" / "pyproject.toml"),
     "java/pom.xml": pom.find("m:version", ns).text,
-    "typescript/workflowd.mjs": first(r"typescript/(\d+\.\d+\.\d+[^'\"]*)", sdks / "typescript" / "workflowd.mjs"),
+    "typescript/workflowd.cjs": first(r"typescript/(\d+\.\d+\.\d+[^'\"]*)", sdks / "typescript" / "workflowd.cjs"),
     "python/workflowd.py": first(r"python/(\d+\.\d+\.\d+[^'\"]*)", sdks / "python" / "workflowd.py"),
     "java/Workflowd.java": first(r"java/(\d+\.\d+\.\d+[^'\"]*)", sdks / "java" / "Workflowd.java"),
 }
