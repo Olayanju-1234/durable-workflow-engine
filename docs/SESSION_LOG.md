@@ -5,6 +5,69 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-23 — Session 26: the correctness release (SDKs 0.2.0), from running liftoff
+
+liftoff (NestJS) began running webhooks and custom steps on a private workflowd on 2026-10-22;
+a product review ranked the gaps it hit. Four PRs, each squash-merged on green CI, then a release.
+
+**Done:**
+- #35 **Timeouts** (ADR-0008): `execution_timeout_ms` on start (`WorkflowFailed{timed_out}` →
+  `TIMED_OUT`), `start_to_close_timeout_ms` (per attempt, on the lease timer: `lease.due()`,
+  heartbeats can't extend it) and `schedule_to_close_timeout_ms` (whole step; a retry is planned
+  only if its backoff ends before the deadline) on `schedule_activity`. Durations recorded next
+  to the event they start from; new `deadlines` timer service; recovery re-arms. New fold rule:
+  a final `StepFailed` may close a step between retries. Every SDK, testsuite, docs.
+- #36 **Cancellation** (ADR-0009): `CancelWorkflow` (gRPC, `POST /api/workflows/{id}/cancel`, Go
+  client, TS/Python/Java `worker.cancel`, dashboard Cancel button) → `WorkflowFailed{cancelled}`,
+  status `CANCELLED` (enum 7). `cancel_step` command → `StepFailed{cancelled}`, step status
+  `CANCELLED` (Go `ctx.CancelStep`, TS `ctx.cancel` / `waitAny(..., { cancelRest })`, Python
+  `future.cancel()` / `wait_any(cancel_rest=)`). Lease tombstones tell workers "cancelled"
+  (409 `"cancelled": true`, gRPC `ActivityCancelled` detail). A finished workflow's open steps
+  are presented as `CANCELLED`. Reproduced liftoff's race bug, including an abandoned signal wait
+  swallowing a later signal.
+- #37 **Non-retryable failures** (ADR-0010): `error_type` + `non_retryable` on activity
+  completion and `StepFailed`; `RetryPolicy.non_retryable_error_types`; engine types its own
+  failures (`LeaseExpired`, `StartToCloseTimeout`, `ScheduleToCloseTimeout`); one decision in
+  `retryAfter`. SDK error type = class name; `NonRetryableError` (TS/Python),
+  `NonRetryableException` (Java), `worker.NonRetryable` / `worker.Typed` (Go); `ActivityError` /
+  `ActivityFailure.type`. SDKs resend without the new fields on `400 unknown field`.
+- #38 **TypeScript ergonomics**: implementation in `workflowd.cjs`, `workflowd.mjs` re-exports it
+  (one module for `import` and `require`; `check-package.sh` in CI and release); `ctx.now()`
+  (results are a `Promise` subclass whose `then` moves the clock), `ctx.random()` (sfc32 seeded
+  by workflow id + start), `ctx.sleepUntil`, `waitForSignal(..., { timeoutMs })`; activity tasks
+  carry `attempt` + `activity_id`; workflow tasks `started_at` + `resolved_at`. Dashboard: error
+  type tag, future times "in …".
+- #39 release 0.2.0: npm run 39923818020 (dry run 39923737509 first), PyPI run 39923903841,
+  tag `sdks-v0.2.0` @ `81c98f8`. Verified by clean installs (npm via `require`, PyPI in a venv)
+  running workflows on the public demo.
+- **Deployed `81c98f8`** to the demo (site too) and to the private `workflowd-liftoff` engine
+  (its binary had to change: SDK 0.2.0 needs `started_at`, `cancel_step` and the new fields);
+  fresh backups taken first; liftoff's worker re-registered in 200 ms.
+
+**Bugs found on the way:** Go `ctx.Now()` moved to a marker's time on replay but not on the first
+run (markers no longer move the clock); the dashboard showed future times as "0s ago".
+
+**Teeth:** 35 mutations across the four PRs, all caught; one first survived (the replay's local
+"already cancelled" mark only saves a round trip) and is now pinned by a replay-level test.
+
+**Next:** liftoff adopts 0.2.0 (its own repo): `require`, `ctx.now()`, `NonRetryableError` for
+4xx, `waitForSignal` with `timeoutMs`, `worker.cancel` on request cancel. Graceful cancellation
+handlers; `ctx.now()`/`random` in Python and Java; Maven Central (owner).
+
+**Gotchas:**
+- No JDK on the laptop: Java compiles only in CI. #35 first failed on `activity(name, input,
+  null)` becoming ambiguous between the `RetryPolicy` and `ActivityOptions` overloads.
+- `scripts/sdk-version.py` reads the TS version from `workflowd.cjs` now (the `.mjs` is a wrapper).
+- Rollback past this release: older binaries refuse a history where a step between retries was
+  closed by a deadline or cancel; they read cancelled/timed-out workflows as FAILED. Check the
+  data dir first. `workflowd.prev` on both instances is the `9f19ab8` build.
+- `await` adopts a native Promise without calling an overridden `then` on the instance; only a
+  subclass instance goes through `then`. That is why `Observed extends Promise`.
+- The browser pane's `preview_start` reads the main checkout's `.claude/launch.json`, not a
+  worktree's; the shell sandbox here can't reach a local preview port (seed it from the page).
+
+---
+
 ## 2026-10-22 — Session 25: the SDKs are published (npm + PyPI, trusted publishing)
 
 **Done:**

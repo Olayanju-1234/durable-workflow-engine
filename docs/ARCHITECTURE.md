@@ -251,6 +251,28 @@ signal whose key is already in the history succeeds without being recorded again
 the workflow finished and on a new leader (the key replicates with the history). The Go client
 makes one key per call and reuses it on every retry; the HTTP SDKs send one per signal.
 
+## Timeouts, cancellation and failure types (ADR-0008 to ADR-0010)
+
+Every limit and every cancellation is history, so recovery and replay see it:
+
+- **Deadlines are durations next to the event they start from**: `WorkflowStarted.execution_timeout_ms`,
+  `StepScheduled.start_to_close_timeout_ms` / `schedule_to_close_timeout_ms`. The `deadlines` timer
+  service holds execution and schedule-to-close deadlines; start-to-close rides on the lease timer
+  (`lease.due()` = the earlier of the heartbeat-extended deadline and the attempt's hard stop).
+- **Terminal reasons are flags on `WorkflowFailed`** (`terminated`, `timed_out`, `cancelled`), so an
+  older binary still reads the history, as `FAILED`.
+- **A cancelled step is a `StepFailed` with `cancelled` set**, for any step kind. A final failure may
+  also close a step that is between retries (a deadline or a cancel during backoff): the only new
+  structural rule, and the one an older binary refuses.
+- **One retry decision**, `retryAfter`: attempts left, not flagged `non_retryable`, its `error_type` not
+  in the policy's `non_retryable_error_types`, and the backoff ends before the schedule-to-close
+  deadline. It reads all of this from history.
+- **Workers learn they were cancelled**: dropping a lease for a cancel or a finished workflow leaves a
+  bounded in-memory tombstone, so the next heartbeat or completion answers "cancelled" (HTTP 409
+  `"cancelled": true`, gRPC `ActivityCancelled` detail) rather than "lease lost".
+- A finished workflow's still-open steps are presented as `CANCELLED` by `GetWorkflow`; nothing is
+  recorded for them.
+
 ## Why no sticky queues
 
 Temporal's sticky queues route a workflow's tasks back to the worker that holds it in memory,
