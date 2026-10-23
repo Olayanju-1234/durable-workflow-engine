@@ -21,6 +21,21 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `execution_timeout_ms`, `start_to_close_timeout_ms`, `schedule_to_close_timeout_ms`.
 - Engine metric `workflowd_activity_timeouts_total{timeout}`;
   `workflowd_workflows_finished_total{status="timed_out"}`.
+- Cancellation (ADR-0009). **Cancel a workflow**: it ends as `CANCELLED` (gRPC
+  `CancelWorkflow`, `POST /api/workflows/{id}/cancel`, Go `client.CancelWorkflow`, TS/Python/Java
+  `worker.cancel`, a dashboard button). **Cancel a step** the code no longer wants, such as a
+  race's loser: Go `ctx.CancelStep(f)` / `workflow.ErrCancelled`, TS `ctx.cancel(p)` /
+  `ctx.waitAny(ps, { cancelRest: true })` / `CancelledFailure`, Python `future.cancel()` /
+  `wait_any(..., cancel_rest=True)` / `CancelledFailure`; the `cancel_step` command. A cancelled
+  signal wait no longer swallows a later signal meant for the next wait.
+- Workers learn that their activity was cancelled (its step or workflow): heartbeat and complete
+  answer 409 `"cancelled": true` / gRPC `ActivityCancelled`; Go activity ctx cause
+  `worker.ErrActivityCancelled`, TS `task.signal` aborts with `CancelledFailure`, Python sets
+  `cancelled`. Metric `workflowd_steps_cancelled_total`.
+
+### Fixed
+- A finished workflow's steps that were still open (a race's losing timer, say) showed as
+  `SCHEDULED` forever; they now show as `CANCELLED` ("not needed").
 
 ## [0.1.1] - 2026-10-22
 

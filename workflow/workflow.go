@@ -31,9 +31,13 @@
 package workflow
 
 import (
+	"errors"
 	"log/slog"
 	"time"
 )
+
+// ErrCancelled is what Future.Get returns for a step that was cancelled.
+var ErrCancelled = errors.New("workflow: step cancelled")
 
 // Func is a workflow: orchestration logic over the Context's durable primitives.
 // Its return value is the workflow's output; a returned error fails the workflow.
@@ -89,6 +93,16 @@ type Context interface {
 	//	deadline := ctx.NewTimer("deadline", 48*time.Hour)
 	//	if ctx.WaitAny(reply, deadline) == 1 { ... timed out ... }
 	WaitAny(futures ...Future) int
+
+	// CancelStep closes a step the workflow no longer wants, such as the loser
+	// of a WaitAny race: a timer stops mattering, a signal wait stops taking
+	// signals (a later wait for the same signal gets the next one), and an
+	// activity's worker is told to stop. Its Get returns an error matching
+	// ErrCancelled. A step that already has a result is left alone.
+	//
+	//	i := ctx.WaitAny(reply, deadline)
+	//	ctx.CancelStep([]workflow.Future{reply, deadline}[1-i])
+	CancelStep(f Future)
 
 	// Input is the workflow's start input.
 	Input() []byte

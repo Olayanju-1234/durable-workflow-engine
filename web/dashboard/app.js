@@ -170,6 +170,7 @@ function renderChipCounts(list) {
     COMPLETED: list.filter((w) => w.status === 'COMPLETED').length,
     FAILED: list.filter((w) => w.status === 'FAILED').length,
     TERMINATED: list.filter((w) => w.status === 'TERMINATED').length,
+    CANCELLED: list.filter((w) => w.status === 'CANCELLED').length,
   };
   for (const el of document.querySelectorAll('.chip-count')) {
     el.textContent = counts[el.dataset.count] ?? '';
@@ -259,7 +260,7 @@ function renderDetail(w) {
     ? steps.map(renderStep).join('')
     : `<li class="pick"><div class="pick-rail"></div><div class="pick-body muted" style="font-style:italic;font-family:var(--serif)">The loom is threaded but no picks have been made yet.</div></li>`;
 
-  // Only a live workflow can be signalled or terminated.
+  // Only a live workflow can be signalled, cancelled or terminated.
   const live = w.status === 'RUNNING' || w.status === 'WAITING';
   $('d-actions').hidden = !live;
 }
@@ -307,6 +308,23 @@ async function terminate() {
       body: JSON.stringify({ reason: $('term-reason').value }),
     });
     toast('Warp cut — workflow terminated');
+    $('term-reason').value = '';
+    await refresh();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function cancelWorkflow() {
+  const id = state.selected;
+  if (!id) return;
+  if (!confirm(`Cancel ${id}? It ends as CANCELLED, and workers running its activities are told to stop.`)) return;
+  try {
+    await api(`/api/workflows/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: $('term-reason').value }),
+    });
+    toast('Workflow cancelled');
     $('term-reason').value = '';
     await refresh();
   } catch (err) {
@@ -437,6 +455,7 @@ function init() {
   $('scrim').addEventListener('click', closeDrawer);
   $('signal-form').addEventListener('submit', (e) => { e.preventDefault(); sendSignal(); });
   $('terminate-form').addEventListener('submit', (e) => { e.preventDefault(); terminate(); });
+  $('d-cancel').addEventListener('click', cancelWorkflow);
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;

@@ -30,6 +30,7 @@ import (
 //	POST /api/workflows                      {"type","input","workflow_id","execution_timeout_ms"}
 //	GET  /api/workflows/{id}
 //	POST /api/workflows/{id}/terminate       {"reason"}
+//	POST /api/workflows/{id}/cancel          {"reason"}
 //	POST /api/workflows/{id}/signal          {"name","payload"}
 type HTTPAPI struct {
 	src EngineSource
@@ -124,6 +125,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/workflows", a.startWorkflow)
 	mux.HandleFunc("GET /api/workflows/{id}", a.getWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/terminate", a.terminateWorkflow)
+	mux.HandleFunc("POST /api/workflows/{id}/cancel", a.cancelWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
@@ -404,10 +406,19 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *HTTPAPI) terminateWorkflow(w http.ResponseWriter, r *http.Request) {
+	a.endWorkflow(w, r, "terminated", (*Engine).TerminateWorkflow)
+}
+
+func (a *HTTPAPI) cancelWorkflow(w http.ResponseWriter, r *http.Request) {
+	a.endWorkflow(w, r, "cancelled", (*Engine).CancelWorkflow)
+}
+
+// endWorkflow serves terminate and cancel: {"reason"} in, {"status"} out.
+func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done string, end func(*Engine, string, string) error) {
 	var body struct {
 		Reason string `json:"reason"`
 	}
-	// An empty body is a valid terminate (reason is optional).
+	// An empty body is valid (reason is optional).
 	if r.ContentLength > 0 {
 		if err := decodeJSON(r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -418,7 +429,7 @@ func (a *HTTPAPI) terminateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
-	err := e.TerminateWorkflow(r.PathValue("id"), body.Reason)
+	err := end(e, r.PathValue("id"), body.Reason)
 	switch {
 	case errors.Is(err, ErrNotLeader):
 		a.writeNotLeader(w, err)
@@ -429,7 +440,7 @@ func (a *HTTPAPI) terminateWorkflow(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err)
 	default:
-		writeJSON(w, http.StatusOK, map[string]string{"status": "terminated"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": done})
 	}
 }
 

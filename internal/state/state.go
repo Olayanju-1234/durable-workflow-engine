@@ -15,6 +15,7 @@ import (
 //	Completed  → terminal: WorkflowCompleted was recorded.
 //	Failed     → terminal: WorkflowFailed was recorded.
 //	TimedOut   → terminal: the engine ended it when its execution timeout passed.
+//	Cancelled  → terminal: a client cancelled it.
 type Status int
 
 const (
@@ -24,6 +25,7 @@ const (
 	StatusCompleted
 	StatusFailed
 	StatusTimedOut
+	StatusCancelled
 )
 
 func (s Status) String() string {
@@ -40,6 +42,8 @@ func (s Status) String() string {
 		return "FAILED"
 	case StatusTimedOut:
 		return "TIMED_OUT"
+	case StatusCancelled:
+		return "CANCELLED"
 	default:
 		return fmt.Sprintf("Status(%d)", int(s))
 	}
@@ -47,7 +51,7 @@ func (s Status) String() string {
 
 // IsTerminal reports whether the workflow has reached an end state.
 func (s Status) IsTerminal() bool {
-	return s == StatusCompleted || s == StatusFailed || s == StatusTimedOut
+	return s == StatusCompleted || s == StatusFailed || s == StatusTimedOut || s == StatusCancelled
 }
 
 // StepStatus is the lifecycle of a single step within a workflow.
@@ -57,6 +61,7 @@ const (
 	StepScheduled StepStatus = iota // dispatched to a worker, result not yet recorded
 	StepCompleted                   // worker reported success
 	StepFailed                      // worker reported failure
+	StepCancelled                   // workflow code cancelled it before it had a result
 )
 
 func (s StepStatus) String() string {
@@ -67,6 +72,8 @@ func (s StepStatus) String() string {
 		return "COMPLETED"
 	case StepFailed:
 		return "FAILED"
+	case StepCancelled:
+		return "CANCELLED"
 	default:
 		return fmt.Sprintf("StepStatus(%d)", int(s))
 	}
@@ -82,7 +89,7 @@ type Step struct {
 	Status   StepStatus
 	Input    []byte
 	Output   []byte       // set once Status == StepCompleted
-	Error    string       // set once Status == StepFailed
+	Error    string       // set once Status == StepFailed (the reason, once StepCancelled)
 	FireAt   int64        // timer steps only: unix-nanos deadline (from TimerStarted), for recovery re-arm
 	Signal   string       // signal steps only: the awaited signal name
 	Marker   string       // marker steps only: "version" or "side_effect"
@@ -363,6 +370,9 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			// A final failure closes a step between attempts (its deadline
 			// passed, or it was cancelled): the retry will not happen.
 			s.Error, s.Retrying, s.ResolvedEventID = sf.GetError(), false, ev.GetEventId()
+			if sf.GetCancelled() {
+				s.Status = StepCancelled
+			}
 			f.retrying--
 			resolves = true
 			break
@@ -373,6 +383,11 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		}
 		s.Status, s.Error = StepFailed, sf.GetError()
 		f.open--
+		if sf.GetCancelled() {
+			s.Status, s.ResolvedEventID = StepCancelled, ev.GetEventId()
+			resolves = true
+			break
+		}
 		if sf.GetWillRetry() {
 			s.Retrying = true
 			f.retrying++
@@ -391,6 +406,9 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		st.Status = StatusFailed
 		if attr.WorkflowFailed.GetTimedOut() {
 			st.Status = StatusTimedOut
+		}
+		if attr.WorkflowFailed.GetCancelled() {
+			st.Status = StatusCancelled
 		}
 		st.Error = attr.WorkflowFailed.GetError()
 		st.Terminated = attr.WorkflowFailed.GetTerminated()

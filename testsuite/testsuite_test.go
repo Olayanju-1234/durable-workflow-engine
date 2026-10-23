@@ -206,3 +206,24 @@ func TestParallelStepsInVirtualTime(t *testing.T) {
 		t.Fatalf("elapsed %s, want 1h30 (b's retry at 1h, then the signal)", env.Elapsed())
 	}
 }
+
+// TestCancelStepInVirtualTime: the deadline wins, the losing signal wait is
+// cancelled, and a later signal goes to the wait that still wants it.
+func TestCancelStepInVirtualTime(t *testing.T) {
+	env := testsuite.NewEnv()
+	env.SignalAfter(2*time.Hour, "reply", []byte("late"))
+	out, err := env.ExecuteWorkflow(func(ctx workflow.Context, in []byte) ([]byte, error) {
+		reply := ctx.WaitForSignalAsync("reply", "reply")
+		deadline := ctx.NewTimer("deadline", time.Hour)
+		if ctx.WaitAny(reply, deadline) == 1 {
+			ctx.CancelStep(reply)
+		}
+		if _, err := reply.Get(); !errors.Is(err, workflow.ErrCancelled) {
+			return nil, err
+		}
+		return ctx.WaitForSignal("again", "reply"), nil
+	}, nil)
+	if err != nil || string(out) != "late" || env.Elapsed() != 2*time.Hour {
+		t.Fatalf("out %q err %v elapsed %s", out, err, env.Elapsed())
+	}
+}

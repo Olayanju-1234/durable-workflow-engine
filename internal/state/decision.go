@@ -122,6 +122,7 @@ const (
 	DecideCompleteWorkflow                     // all steps done: record success
 	DecideFailWorkflow                         // a step failed: record failure
 	DecideRecordMarker                         // record a marker step, then decide again
+	DecideCancelStep                           // close a step the code no longer wants
 )
 
 func (d DecisionType) String() string {
@@ -140,6 +141,8 @@ func (d DecisionType) String() string {
 		return "FAIL_WORKFLOW"
 	case DecideRecordMarker:
 		return "RECORD_MARKER"
+	case DecideCancelStep:
+		return "CANCEL_STEP"
 	default:
 		return fmt.Sprintf("DecisionType(%d)", int(d))
 	}
@@ -182,7 +185,8 @@ type Decision struct {
 	// Set when Type == DecideCompleteWorkflow or DecideRecordMarker.
 	Output []byte
 
-	// Set when Type == DecideFailWorkflow.
+	// Set when Type == DecideFailWorkflow; the reason when DecideCancelStep
+	// (which names its step by StepName and Sequence).
 	Error string
 }
 

@@ -1,6 +1,6 @@
 // Compile-only check that workflowd.d.mts describes the SDK as the examples
 // use it (CI: tsc --noEmit). Not shipped in the npm package.
-import { ActivityFailure, DEFAULT_VERSION, decide, Worker, WorkflowFailure, type Context } from 'workflowd';
+import { ActivityFailure, CancelledFailure, DEFAULT_VERSION, decide, Worker, WorkflowFailure, type Context } from 'workflowd';
 
 const worker = new Worker({ address: 'https://localhost:8233', workerId: 'types', token: 'tok' });
 
@@ -32,7 +32,10 @@ cluster.workflow('Typed', async (ctx) => {
   });
   const blob: Uint8Array = await ctx.activity('render', new Uint8Array([1, 2]), { as: 'bytes' });
   const [a, b] = await Promise.all([ctx.activity('a', 1), ctx.activity('b', 2)]);
-  const timedOut: boolean = (await ctx.waitAny([ctx.waitForSignal('late', 'x'), ctx.sleep('deadline', 1000)])) === 1;
+  const timedOut: boolean = (await ctx.waitAny([ctx.waitForSignal('late', 'x'), ctx.sleep('deadline', 1000)], { cancelRest: true })) === 1;
+  const hedge = ctx.activity('hedge', 1);
+  ctx.cancel(hedge, 'not needed');
+  await hedge.catch((err: unknown) => (err instanceof CancelledFailure ? err.stepName : null));
   const approved = await ctx.waitForSignal<{ yes: boolean }>('wait', 'approve', { as: 'json' });
   void [a, b, timedOut];
   return { id, ok: receipt.ok && approved.yes, size: blob.length };
@@ -43,6 +46,7 @@ async function client(): Promise<void> {
   const id: string = await worker.startWorkflow('Order', 'order-1');
   await worker.startWorkflow('Order', 'order-2', 'order-2', { executionTimeoutMs: 3_600_000 });
   await worker.signal(id, 'approved', 'yes');
+  await worker.cancel(id, 'customer cancelled');
   const wf = await worker.describe(id);
   const decision = await decide(async (ctx) => ctx.input, { workflow_id: id, input: 'x', steps: [] });
   console.log(wf.status, decision.command?.type, decision.replayError);

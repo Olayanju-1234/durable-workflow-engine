@@ -192,6 +192,20 @@ func (c *Client) TerminateWorkflow(ctx context.Context, workflowID, reason strin
 	return wrap("terminate workflow", err)
 }
 
+// CancelWorkflow ends a running workflow with StatusCancelled, recording the
+// reason. Workers still running its activities are told to stop at their next
+// heartbeat or completion (the activity's ctx is cancelled with cause
+// worker.ErrActivityCancelled). It fails with ErrNotRunning if the workflow has
+// already finished.
+func (c *Client) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	req := &server.CancelWorkflowRequest{WorkflowId: workflowID, Reason: reason}
+	_, err := c.conn.Call(ctx, func(ctx context.Context, s server.WorkflowServiceClient, opt grpc.CallOption) error {
+		_, err := s.CancelWorkflow(ctx, req, opt)
+		return err
+	})
+	return wrap("cancel workflow", err)
+}
+
 // DescribeWorkflow returns a workflow's status, steps, input and output.
 func (c *Client) DescribeWorkflow(ctx context.Context, workflowID string) (*WorkflowDescription, error) {
 	var resp *server.GetWorkflowResponse
@@ -224,7 +238,7 @@ func (c *Client) WaitForResult(ctx context.Context, workflowID string) ([]byte, 
 		switch d.Status {
 		case StatusCompleted:
 			return d.Output, nil
-		case StatusFailed, StatusTerminated, StatusTimedOut, StatusUnknown:
+		case StatusFailed, StatusTerminated, StatusTimedOut, StatusCancelled, StatusUnknown:
 			return nil, fmt.Errorf("%w: %s %s: %s", ErrWorkflowFailed, workflowID, d.Status, d.Error)
 		}
 		select {

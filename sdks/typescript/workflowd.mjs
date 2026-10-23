@@ -61,6 +61,19 @@ export class ActivityFailure extends Error {
   }
 }
 
+/**
+ * A step that was cancelled: awaiting it rejects with this (workflow code), and
+ * an activity's `task.signal` aborts with it when the engine says the work is
+ * no longer wanted (its step was cancelled or its workflow finished).
+ */
+export class CancelledFailure extends Error {
+  constructor(stepName, message) {
+    super(message || 'cancelled');
+    this.name = 'CancelledFailure';
+    this.stepName = stepName;
+  }
+}
+
 /** The version `getVersion` returns to executions that predate the change. */
 export const DEFAULT_VERSION = -1;
 
@@ -169,6 +182,8 @@ class Context {
     this._versions = new Map();
     this._pending = []; // new commands, in sequence order
     this._replayError = null;
+    this._open = new Map(); // seq -> { name, reject } for steps with no result yet
+    this._cancelled = new Map(); // seq -> cancel order, for steps cancelled in this replay
   }
 
   /** The start input decoded as 'text' (same as ctx.input), 'json' or 'bytes'. */
@@ -226,19 +241,57 @@ class Context {
    *   const deadline = ctx.sleep('deadline', 48 * 3600 * 1000);
    *   if ((await ctx.waitAny([reply, deadline])) === 1) { ... timed out ... }
    */
-  waitAny(promises) {
+  //
+  // opts.cancelRest cancels the others once one wins (see ctx.cancel): do it
+  // for a race whose losers nothing will await again, so a losing timer stops
+  // mattering and a losing signal wait stops taking signals.
+  waitAny(promises, opts = {}) {
     let best = -1;
     let bestId = 0;
     promises.forEach((p, i) => {
       if (typeof p?._seq !== 'number') throw new TypeError('waitAny takes promises returned by ctx calls');
-      const rec = this._steps[p._seq - 1];
-      const id = rec?.resolved_event_id ?? 0;
-      if (rec && (rec.status === 'COMPLETED' || rec.status === 'FAILED') && (best < 0 || id < bestId)) {
+      const id = this._resolvedId(p._seq);
+      if (id !== null && (best < 0 || id < bestId)) {
         best = i;
         bestId = id;
       }
     });
-    return best < 0 ? FOREVER() : Promise.resolve(best);
+    if (best < 0) return FOREVER();
+    if (opts.cancelRest) promises.forEach((p, i) => i !== best && this.cancel(p, 'lost a waitAny race'));
+    return Promise.resolve(best);
+  }
+
+  /**
+   * Cancel a step the workflow no longer wants (an activity, sleep or signal
+   * wait): a timer stops mattering, a signal wait stops taking signals (a
+   * later wait for the same signal gets the next one), and an activity's
+   * worker is told to stop. Awaiting it rejects with CancelledFailure. A step
+   * that already has a result is left alone.
+   */
+  cancel(promise, reason = '') {
+    const seq = promise?._seq;
+    if (typeof seq !== 'number') throw new TypeError('cancel takes a promise returned by a ctx call');
+    if (this._resolvedId(seq) !== null) return;
+    const open = this._open.get(seq);
+    this._cancelled.set(seq, this._cancelled.size + 1);
+    const command = { type: 'cancel_step', step_name: open?.name ?? this._steps[seq - 1]?.step_name, sequence: seq };
+    if (reason) command.reason = reason;
+    this._pending.push(command);
+    open?.reject(new CancelledFailure(command.step_name, 'cancelled'));
+  }
+
+  /**
+   * Orders a step's result for waitAny: its event id, or for a step this replay
+   * cancelled, a place after every recorded result (the cancel is recorded
+   * next). null while it has no result.
+   */
+  _resolvedId(seq) {
+    const rec = this._steps[seq - 1];
+    if (rec && (rec.status === 'COMPLETED' || rec.status === 'FAILED' || rec.status === 'CANCELLED')) {
+      return rec.resolved_event_id ?? 0;
+    }
+    const n = this._cancelled.get(seq);
+    return n === undefined ? null : Number.MAX_SAFE_INTEGER / 2 + n;
   }
 
   /**
@@ -325,7 +378,7 @@ class Context {
     if (!recorded) {
       // No history for this step: start it, and wait for its result.
       this._pending.push({ ...command, sequence: seq });
-      return FOREVER();
+      return this._unresolved(seq, name);
     }
     // Determinism check: the call the code is making now must be the step
     // history recorded at this position. A mismatch means the code changed in
@@ -349,7 +402,28 @@ class Context {
       // A genuine, catchable error: this is how Saga compensation works.
       return rejected(new ActivityFailure(name, recorded.error || 'activity failed'));
     }
-    return FOREVER(); // SCHEDULED: in flight (or being retried)
+    if (recorded.status === 'CANCELLED') {
+      return rejected(new CancelledFailure(name, recorded.error || 'cancelled'));
+    }
+    return this._unresolved(seq, name); // SCHEDULED: in flight (or being retried)
+  }
+
+  /**
+   * A step with no result settles only if this replay cancels it. Until then it
+   * never settles (see FOREVER); a rejection nobody awaits is not reported.
+   */
+  _unresolved(seq, name) {
+    const p = new Promise((_resolve, reject) => {
+      this._open.set(seq, {
+        name,
+        reject: (err) => {
+          reject(err);
+          this._open.delete(seq);
+        },
+      });
+    });
+    p.catch(() => {});
+    return p;
   }
 }
 
@@ -389,9 +463,10 @@ export async function decide(fn, task) {
 }
 
 class HTTPError extends Error {
-  constructor(status, message) {
+  constructor(status, message, body = {}) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -469,7 +544,7 @@ class Connection {
         }
         continue;
       }
-      if (!res.ok) throw new HTTPError(res.status, parsed.error ?? `HTTP ${res.status}`);
+      if (!res.ok) throw new HTTPError(res.status, parsed.error ?? `HTTP ${res.status}`, parsed);
       return parsed;
     }
   }
@@ -575,6 +650,17 @@ export class Worker {
     });
   }
 
+  /**
+   * Cancel a running workflow: it ends as CANCELLED, and workers running its
+   * activities are told to stop (their task.signal aborts with CancelledFailure).
+   */
+  async cancel(workflowId, reason = '') {
+    await this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}/cancel`, {
+      method: 'POST',
+      body: { reason },
+    });
+  }
+
   /** Fetch a workflow's current state. */
   async describe(workflowId) {
     return this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}`);
@@ -656,13 +742,15 @@ export class Worker {
     try {
       await this.conn.request('/api/activity-tasks/complete', { method: 'POST', body: result, attempts: 3 });
     } catch (err) {
-      // A lost lease means the task was reassigned; drop the result.
+      // A lost lease means the task was reassigned, and a cancelled step's
+      // result is not wanted: either way, drop it.
       if (err.status !== 409) console.error('[workflowd] activity complete failed:', err.message);
     }
   }
 
   // Extend the lease every third of its duration; a 409 means it is gone, so
-  // the activity's signal aborts.
+  // the activity's signal aborts, with CancelledFailure when the engine says the
+  // work is no longer wanted.
   _heartbeat(task, abort) {
     const every = Math.floor((task.lease_duration_ms ?? 0) / 3);
     if (every <= 0) return () => {};
@@ -676,7 +764,7 @@ export class Worker {
       } catch (err) {
         if (err.status === 409) {
           clearInterval(timer);
-          abort.abort(new Error('lease lost'));
+          abort.abort(err.body?.cancelled ? new CancelledFailure(task.step_name, err.message) : new Error('lease lost'));
         }
       }
     }, every);

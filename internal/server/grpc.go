@@ -121,9 +121,9 @@ func (s *GRPCServer) CompleteTask(ctx context.Context, req *CompleteTaskRequest)
 			return nil, s.notLeader(ctx, err)
 		}
 		// The step result didn't match the in-flight step (stale/duplicate), the
-		// lease was lost (task reassigned), or the workflow wasn't waiting — a
-		// precondition the client must fix.
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		// lease was lost (task reassigned), the step was cancelled, or the
+		// workflow wasn't waiting — a precondition the client must fix.
+		return nil, leaseStatus(err)
 	}
 	return &CompleteTaskResponse{}, nil
 }
@@ -134,10 +134,26 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *HeartbeatRequest) (*Hea
 		return nil, err
 	}
 	if err := e.Heartbeat(req.GetWorkflowId(), req.GetLeaseToken()); err != nil {
-		// Lost lease: the worker should stop working on this task.
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		if errors.Is(err, ErrNotLeader) {
+			return nil, s.notLeader(ctx, err)
+		}
+		// Lost lease or cancelled: the worker should stop working on this task.
+		return nil, leaseStatus(err)
 	}
 	return &HeartbeatResponse{}, nil
+}
+
+// leaseStatus is FailedPrecondition for a worker that must stop, with an
+// ActivityCancelled detail when the work is no longer wanted at all. Workers
+// that predate the detail stop on the code alone.
+func leaseStatus(err error) error {
+	st := status.New(codes.FailedPrecondition, err.Error())
+	if errors.Is(err, ErrActivityCancelled) {
+		if withDetail, derr := st.WithDetails(&ActivityCancelled{Reason: err.Error()}); derr == nil {
+			st = withDetail
+		}
+	}
+	return st.Err()
 }
 
 func (s *GRPCServer) SignalWorkflow(ctx context.Context, req *SignalWorkflowRequest) (*SignalWorkflowResponse, error) {
@@ -251,20 +267,35 @@ func (s *GRPCServer) GetWorkflow(ctx context.Context, req *GetWorkflowRequest) (
 }
 
 func (s *GRPCServer) TerminateWorkflow(ctx context.Context, req *TerminateWorkflowRequest) (*TerminateWorkflowResponse, error) {
-	e, err := s.engine(ctx)
-	if err != nil {
+	if err := s.endWorkflow(ctx, req.GetWorkflowId(), req.GetReason(), (*Engine).TerminateWorkflow); err != nil {
 		return nil, err
 	}
-	err = e.TerminateWorkflow(req.GetWorkflowId(), req.GetReason())
-	switch {
-	case errors.Is(err, ErrNotLeader):
-		return nil, s.notLeader(ctx, err)
-	case errors.Is(err, ErrNotFound):
-		return nil, status.Errorf(codes.NotFound, "%v", err)
-	case errors.Is(err, ErrAlreadyTerminal):
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
-	case err != nil:
-		return nil, status.Errorf(codes.Internal, "%v", err)
-	}
 	return &TerminateWorkflowResponse{}, nil
+}
+
+func (s *GRPCServer) CancelWorkflow(ctx context.Context, req *CancelWorkflowRequest) (*CancelWorkflowResponse, error) {
+	if err := s.endWorkflow(ctx, req.GetWorkflowId(), req.GetReason(), (*Engine).CancelWorkflow); err != nil {
+		return nil, err
+	}
+	return &CancelWorkflowResponse{}, nil
+}
+
+func (s *GRPCServer) endWorkflow(ctx context.Context, id, reason string, end func(*Engine, string, string) error) error {
+	e, err := s.engine(ctx)
+	if err != nil {
+		return err
+	}
+	err = end(e, id, reason)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrNotLeader):
+		return s.notLeader(ctx, err)
+	case errors.Is(err, ErrNotFound):
+		return status.Errorf(codes.NotFound, "%v", err)
+	case errors.Is(err, ErrAlreadyTerminal):
+		return status.Errorf(codes.FailedPrecondition, "%v", err)
+	default:
+		return status.Errorf(codes.Internal, "%v", err)
+	}
 }

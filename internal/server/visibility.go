@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
@@ -27,6 +28,9 @@ var (
 	// ErrInvalidCommand: an SDK returned a structurally invalid command (bad
 	// step sequence, empty name). A client bug, not a transient condition.
 	ErrInvalidCommand = errors.New("server: invalid workflow command")
+	// ErrActivityCancelled: a worker reported on an activity whose step was
+	// cancelled or whose workflow finished. It should stop the work.
+	ErrActivityCancelled = errors.New("server: activity cancelled")
 )
 
 // ListWorkflows summarizes every workflow, sorted by id. When filter is not
@@ -58,13 +62,18 @@ func (e *Engine) GetWorkflow(workflowID string) (*GetWorkflowResponse, error) {
 
 	steps := make([]*StepInfo, 0, len(st.Steps))
 	for _, s := range st.Steps {
+		status, stepErr := s.Status.String(), s.Error
+		if st.Status.IsTerminal() && s.Open() {
+			// Abandoned: a race's loser, say. Nothing will ever use it.
+			status, stepErr = state.StepCancelled.String(), "not needed: the workflow is "+protoStatusName(st)
+		}
 		steps = append(steps, &StepInfo{
 			StepName:   s.Name,
 			Sequence:   s.Sequence,
 			Kind:       s.Kind.String(),
-			Status:     s.Status.String(),
+			Status:     status,
 			Attempts:   int32(s.Attempts),
-			Error:      s.Error,
+			Error:      stepErr,
 			Output:     s.Output,
 			FireAt:     s.FireAt,
 			SignalName: s.Signal,
@@ -87,37 +96,17 @@ func (e *Engine) GetWorkflow(workflowID string) (*GetWorkflowResponse, error) {
 // harmless: every timer callback re-checks history and no-ops on a terminal
 // workflow.
 func (e *Engine) TerminateWorkflow(workflowID, reason string) error {
-	if err := validateID(workflowID); err != nil {
-		return fmt.Errorf("%w: %q", ErrNotFound, workflowID)
-	}
-	w := e.lockWorkflow(workflowID)
-	defer e.unlockWorkflow(w)
-
-	events, st, err := e.historyLocked(w)
-	if err != nil {
-		return err
-	}
-	if len(events) == 0 {
-		return fmt.Errorf("%w: %q", ErrNotFound, workflowID)
-	}
-	if st.Status.IsTerminal() {
-		return fmt.Errorf("%w: %q is %s", ErrAlreadyTerminal, workflowID, st.Status)
-	}
-
 	msg := "terminated by operator"
 	if reason != "" {
 		msg += ": " + reason
 	}
-	failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowFailed{
-		WorkflowFailed: &history.WorkflowFailedEvent{Error: msg, Terminated: true},
-	}}
-	if err := e.appendLocked(w, failedEv, int64(len(events)+1)); err != nil {
-		return err
-	}
-	e.metrics.workflowsFinished.With("terminated").Inc()
-	e.metrics.workflowsActive.Dec()
-	e.log.Warn("workflow terminated", "workflow_id", workflowID, "reason", reason)
-	return nil
+	return e.endWorkflow(workflowID, "terminated", reason,
+		&history.WorkflowFailedEvent{Error: msg, Terminated: true})
+}
+
+// protoStatusName is the status as the API spells it ("COMPLETED").
+func protoStatusName(st *state.State) string {
+	return strings.TrimPrefix(protoStatus(st).String(), "WORKFLOW_STATUS_")
 }
 
 func summaryFrom(workflowID string, events []*history.HistoryEvent, st *state.State) *WorkflowSummary {
@@ -153,6 +142,8 @@ func protoStatus(st *state.State) WorkflowStatus {
 		return WorkflowStatus_WORKFLOW_STATUS_FAILED
 	case state.StatusTimedOut:
 		return WorkflowStatus_WORKFLOW_STATUS_TIMED_OUT
+	case state.StatusCancelled:
+		return WorkflowStatus_WORKFLOW_STATUS_CANCELLED
 	default:
 		return WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED
 	}

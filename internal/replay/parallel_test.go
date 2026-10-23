@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -133,5 +135,37 @@ func TestCompletingLeavesStepsBehind(t *testing.T) {
 	ds := decideAll(t, fn, at(started("")))
 	if len(ds) != 2 || ds[0].Type != state.DecideStartTimer || ds[1].Type != state.DecideCompleteWorkflow {
 		t.Fatalf("got %+v", ds)
+	}
+}
+
+// TestCancelStepIsPartOfTheBatch: a cancel takes effect in the replay that
+// issues it, so the cancelled future's Get returns ErrCancelled at once and
+// the code's next step goes out with the cancel, not one round trip later.
+// Once history shows the cancel, replay issues nothing for it again.
+func TestCancelStepIsPartOfTheBatch(t *testing.T) {
+	fn := func(ctx workflow.Context, in []byte) ([]byte, error) {
+		reply := ctx.WaitForSignalAsync("reply", "approved")
+		deadline := ctx.NewTimer("deadline", time.Hour)
+		if ctx.WaitAny(reply, deadline) == 1 {
+			ctx.CancelStep(reply)
+			if _, err := reply.Get(); !errors.Is(err, workflow.ErrCancelled) {
+				return nil, fmt.Errorf("cancelled reply: %v", err)
+			}
+		}
+		return ctx.ExecuteActivity("next", nil)
+	}
+	waitSig := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{StepScheduled: &history.StepScheduledEvent{
+		StepName: "reply", Sequence: 1, AwaitsSignal: true, SignalName: "approved"}}}
+	base := []*history.HistoryEvent{started("x"), waitSig, timerStarted("deadline", 2), timerFired("deadline", 2)}
+	ds := decideAll(t, fn, at(base...))
+	if len(ds) != 2 || ds[0].Type != state.DecideCancelStep || ds[0].Sequence != 1 || ds[0].StepName != "reply" ||
+		ds[1].Type != state.DecideScheduleStep || ds[1].StepName != "next" || ds[1].Sequence != 3 {
+		t.Fatalf("decisions %+v, want [cancel reply#1, schedule next#3]", ds)
+	}
+	cancelled := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{StepFailed: &history.StepFailedEvent{
+		StepName: "reply", Sequence: 1, Error: "cancelled", Cancelled: true}}}
+	ds = decideAll(t, fn, at(append(base, cancelled, scheduled("next", 3))...))
+	if len(ds) != 1 || ds[0].Type != state.DecideNoop {
+		t.Fatalf("after the cancel was recorded: %+v, want a noop", ds)
 	}
 }

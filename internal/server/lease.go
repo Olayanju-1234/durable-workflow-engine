@@ -118,16 +118,70 @@ func (e *Engine) dropLease(workflowID string, sequence int64) {
 }
 
 // dropLeases forgets every lease of a finished workflow, so workers still
-// running its steps are turned away when they report.
-func (e *Engine) dropLeases(workflowID string) {
+// running its steps are turned away, as cancelled, when they report.
+func (e *Engine) dropLeases(workflowID, reason string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for key, le := range e.leases {
 		if key.workflowID == workflowID {
 			delete(e.leaseTokens, le.token)
 			delete(e.leases, key)
+			e.tombstoneLocked(le.token, reason)
 		}
 	}
+}
+
+// cancelLease drops a cancelled step's lease, so its worker is told to stop.
+func (e *Engine) cancelLease(workflowID string, sequence int64, reason string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	key := leaseKey{workflowID, sequence}
+	if le, ok := e.leases[key]; ok {
+		delete(e.leaseTokens, le.token)
+		delete(e.leases, key)
+		e.tombstoneLocked(le.token, reason)
+	}
+}
+
+// maxTombstones bounds how many cancelled leases the engine remembers. A
+// worker that reports after its tombstone is evicted (or after a restart) is
+// still turned away; it is only told less precisely why.
+const maxTombstones = 4096
+
+// tombstoneLocked remembers why a lease was taken away, so the worker's next
+// heartbeat or completion can say "cancelled" rather than "lease lost". The
+// caller must hold e.mu.
+func (e *Engine) tombstoneLocked(token, reason string) {
+	if _, ok := e.tombstones[token]; ok {
+		return
+	}
+	e.tombstones[token] = reason
+	e.tombstoneOrder = append(e.tombstoneOrder, token)
+	if len(e.tombstoneOrder) > maxTombstones {
+		delete(e.tombstones, e.tombstoneOrder[0])
+		e.tombstoneOrder = e.tombstoneOrder[1:]
+	}
+}
+
+// leaseGone explains a lease token the engine no longer holds: the step was
+// cancelled or its workflow finished (ErrActivityCancelled), or the lease was
+// simply lost (reassigned, or the engine restarted).
+func (e *Engine) leaseGone(workflowID, token string, lost error) error {
+	e.mu.Lock()
+	reason, ok := e.tombstones[token]
+	e.mu.Unlock()
+	if ok {
+		return fmt.Errorf("%w: %s", ErrActivityCancelled, reason)
+	}
+	if validateID(workflowID) != nil {
+		return lost
+	}
+	w := e.lockWorkflow(workflowID)
+	defer e.unlockWorkflow(w)
+	if _, st, err := e.historyLocked(w); err == nil && st.Status.IsTerminal() {
+		return fmt.Errorf("%w: workflow %s (%w)", ErrActivityCancelled, st.Status, lost)
+	}
+	return lost
 }
 
 // Heartbeat extends the caller's lease, proving the worker is still alive. It
@@ -135,13 +189,18 @@ func (e *Engine) dropLeases(workflowID string) {
 // abandon the work, because another worker now owns (or will own) the task.
 // Expiry is judged when the reaper runs, so a heartbeat that lands after the
 // deadline but before reclamation still rescues the lease.
+//
+// A worker whose step was cancelled, or whose workflow finished, gets an error
+// matching ErrActivityCancelled: the work is no longer wanted at all.
 func (e *Engine) Heartbeat(workflowID, token string) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	le, ok := e.leaseTokens[token]
 	if !ok || le.workflowID != workflowID {
-		return fmt.Errorf("server: no active lease for workflow %q with this token (lease expired, task reassigned, or engine restarted)", workflowID)
+		e.mu.Unlock()
+		return e.leaseGone(workflowID, token, fmt.Errorf(
+			"server: no active lease for workflow %q with this token (lease expired, task reassigned, or engine restarted)", workflowID))
 	}
+	defer e.mu.Unlock()
 	le.deadline = time.Now().Add(e.leaseDuration)
 	e.log.Debug("lease extended", "workflow_id", workflowID, "worker_id", le.workerID,
 		"step", le.stepName, "sequence", le.sequence, "deadline", le.deadline)

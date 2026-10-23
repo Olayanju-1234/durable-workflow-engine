@@ -11,6 +11,16 @@ export class ActivityFailure extends Error {
   readonly stepName: string;
 }
 
+/**
+ * A cancelled step: awaiting it rejects with this. An activity's `task.signal` aborts with it
+ * when the engine says the work is no longer wanted (its step or workflow was cancelled, or
+ * its workflow finished).
+ */
+export class CancelledFailure extends Error {
+  constructor(stepName: string | undefined, message?: string);
+  readonly stepName: string | undefined;
+}
+
 /** The version `getVersion` returns to executions that predate the change. */
 export const DEFAULT_VERSION: -1;
 
@@ -65,7 +75,13 @@ export interface Context {
    * Resolve to the index of the first of several ctx promises to settle, by the order history
    * recorded their results, so every replay agrees. Use it instead of Promise.race.
    */
-  waitAny(promises: Array<Promise<unknown>>): Promise<number>;
+  waitAny(promises: Array<Promise<unknown>>, opts?: { cancelRest?: boolean }): Promise<number>;
+  /**
+   * Cancel a step the workflow no longer wants: a timer stops mattering, a signal wait stops
+   * taking signals, and an activity's worker is told to stop. Awaiting it rejects with
+   * CancelledFailure. A step that already has a result is left alone.
+   */
+  cancel(step: Promise<unknown>, reason?: string): void;
   /** Block until a matching external signal arrives; resolves to its payload. */
   waitForSignal(name: string, signalName: string, opts?: { as?: 'text' }): Promise<string>;
   waitForSignal(name: string, signalName: string, opts: { as: 'bytes' }): Promise<Uint8Array>;
@@ -176,6 +192,8 @@ export class Worker {
   startWorkflow(type: string, input?: Payload, workflowId?: string, opts?: StartWorkflowOptions): Promise<string>;
   /** Send an external signal to a running workflow; recorded once, even when retried. */
   signal(workflowId: string, name: string, payload?: Payload, opts?: { requestId?: string }): Promise<void>;
+  /** End a running workflow as CANCELLED; workers running its activities are told to stop. */
+  cancel(workflowId: string, reason?: string): Promise<void>;
   /** The engine's view of a workflow: status, steps, output, error. */
   describe(workflowId: string): Promise<Record<string, unknown>>;
   /** Register, then serve workflow decisions and activities until stop(). */

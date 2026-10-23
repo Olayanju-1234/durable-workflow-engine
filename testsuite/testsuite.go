@@ -158,6 +158,10 @@ func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 					e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_MarkerRecorded{
 						MarkerRecorded: &history.MarkerRecordedEvent{StepName: d.StepName, Sequence: d.Sequence, Marker: d.Marker, Data: d.Output},
 					}})
+				case state.DecideCancelStep:
+					if err := e.cancelStep(d); err != nil {
+						return nil, err
+					}
 				case state.DecideCompleteWorkflow:
 					return d.Output, nil
 				case state.DecideFailWorkflow:
@@ -294,6 +298,31 @@ func (e *Env) runAttempt(d state.Decision) (bool, error) {
 		e.push(happening{at: e.now.Add(policy.Delay(attempt)), retry: &d})
 	}
 	return !willRetry, nil
+}
+
+// cancelStep closes an open step the way the engine does, and forgets what
+// was planned for it (an attempt, a retry, a timer).
+func (e *Env) cancelStep(d state.Decision) error {
+	st, err := e.state()
+	if err != nil {
+		return err
+	}
+	step := st.Step(d.Sequence)
+	if step == nil || !step.Open() {
+		return nil
+	}
+	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
+		StepFailed: &history.StepFailedEvent{StepName: step.Name, Sequence: step.Sequence, Error: "cancelled", Cancelled: true},
+	}})
+	e.agenda = slices.DeleteFunc(e.agenda, func(h happening) bool {
+		for _, planned := range []*state.Decision{h.attempt, h.retry, h.timer} {
+			if planned != nil && planned.Sequence == d.Sequence {
+				return true
+			}
+		}
+		return false
+	})
+	return nil
 }
 
 // deliverSignals completes every signal wait a buffered signal satisfies, the

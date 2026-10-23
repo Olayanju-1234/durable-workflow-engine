@@ -27,6 +27,7 @@ const (
 	WorkflowService_ListWorkflows_FullMethodName        = "/workflow.v1.WorkflowService/ListWorkflows"
 	WorkflowService_GetWorkflow_FullMethodName          = "/workflow.v1.WorkflowService/GetWorkflow"
 	WorkflowService_TerminateWorkflow_FullMethodName    = "/workflow.v1.WorkflowService/TerminateWorkflow"
+	WorkflowService_CancelWorkflow_FullMethodName       = "/workflow.v1.WorkflowService/CancelWorkflow"
 	WorkflowService_RegisterWorkflowType_FullMethodName = "/workflow.v1.WorkflowService/RegisterWorkflowType"
 	WorkflowService_PollWorkflowTask_FullMethodName     = "/workflow.v1.WorkflowService/PollWorkflowTask"
 	WorkflowService_CompleteWorkflowTask_FullMethodName = "/workflow.v1.WorkflowService/CompleteWorkflowTask"
@@ -71,6 +72,11 @@ type WorkflowServiceClient interface {
 	ListWorkflows(ctx context.Context, in *ListWorkflowsRequest, opts ...grpc.CallOption) (*ListWorkflowsResponse, error)
 	GetWorkflow(ctx context.Context, in *GetWorkflowRequest, opts ...grpc.CallOption) (*GetWorkflowResponse, error)
 	TerminateWorkflow(ctx context.Context, in *TerminateWorkflowRequest, opts ...grpc.CallOption) (*TerminateWorkflowResponse, error)
+	// CancelWorkflow ends a running workflow as CANCELLED: the expected outcome
+	// when its work is no longer wanted (terminate is the operator's emergency
+	// stop). Workers still running its activities learn it from their next
+	// heartbeat or completion, which fail with an ActivityCancelled detail.
+	CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error)
 	// ---- Polyglot workflow execution -------------------------------------
 	//
 	// Workflow code does not have to run inside the engine. These three RPCs let
@@ -195,6 +201,16 @@ func (c *workflowServiceClient) TerminateWorkflow(ctx context.Context, in *Termi
 	return out, nil
 }
 
+func (c *workflowServiceClient) CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelWorkflowResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_CancelWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *workflowServiceClient) RegisterWorkflowType(ctx context.Context, in *RegisterWorkflowTypeRequest, opts ...grpc.CallOption) (*RegisterWorkflowTypeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RegisterWorkflowTypeResponse)
@@ -291,6 +307,11 @@ type WorkflowServiceServer interface {
 	ListWorkflows(context.Context, *ListWorkflowsRequest) (*ListWorkflowsResponse, error)
 	GetWorkflow(context.Context, *GetWorkflowRequest) (*GetWorkflowResponse, error)
 	TerminateWorkflow(context.Context, *TerminateWorkflowRequest) (*TerminateWorkflowResponse, error)
+	// CancelWorkflow ends a running workflow as CANCELLED: the expected outcome
+	// when its work is no longer wanted (terminate is the operator's emergency
+	// stop). Workers still running its activities learn it from their next
+	// heartbeat or completion, which fail with an ActivityCancelled detail.
+	CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error)
 	// ---- Polyglot workflow execution -------------------------------------
 	//
 	// Workflow code does not have to run inside the engine. These three RPCs let
@@ -358,6 +379,9 @@ func (UnimplementedWorkflowServiceServer) GetWorkflow(context.Context, *GetWorkf
 }
 func (UnimplementedWorkflowServiceServer) TerminateWorkflow(context.Context, *TerminateWorkflowRequest) (*TerminateWorkflowResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TerminateWorkflow not implemented")
+}
+func (UnimplementedWorkflowServiceServer) CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelWorkflow not implemented")
 }
 func (UnimplementedWorkflowServiceServer) RegisterWorkflowType(context.Context, *RegisterWorkflowTypeRequest) (*RegisterWorkflowTypeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterWorkflowType not implemented")
@@ -542,6 +566,24 @@ func _WorkflowService_TerminateWorkflow_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkflowService_CancelWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelWorkflowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).CancelWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_CancelWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).CancelWorkflow(ctx, req.(*CancelWorkflowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WorkflowService_RegisterWorkflowType_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterWorkflowTypeRequest)
 	if err := dec(in); err != nil {
@@ -688,6 +730,10 @@ var WorkflowService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TerminateWorkflow",
 			Handler:    _WorkflowService_TerminateWorkflow_Handler,
+		},
+		{
+			MethodName: "CancelWorkflow",
+			Handler:    _WorkflowService_CancelWorkflow_Handler,
 		},
 		{
 			MethodName: "RegisterWorkflowType",

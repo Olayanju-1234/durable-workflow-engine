@@ -28,9 +28,9 @@ await worker.run();
 More of the API:
 
 ```js
-// Run activities in parallel; race a signal against a deadline.
+// Run activities in parallel; race a signal against a deadline, cancelling the loser.
 const [stock, price] = await Promise.all([ctx.activity('stock', sku), ctx.activity('price', sku)]);
-const late = (await ctx.waitAny([ctx.waitForSignal('reply', 'approved'), ctx.sleep('sla', 3_600_000)])) === 1;
+const late = (await ctx.waitAny([ctx.waitForSignal('reply', 'approved'), ctx.sleep('sla', 3_600_000)], { cancelRest: true })) === 1;
 
 // Retry a failed attempt before the workflow sees the error; JSON and bytes payloads.
 const receipt = await ctx.activity('charge', { amount: 42 }, { retry: { maxAttempts: 3, initialBackoffMs: 500 }, as: 'json' });
@@ -47,6 +47,9 @@ const id = await ctx.sideEffect('id', () => crypto.randomUUID());
 A cluster: `new Worker({ addresses: ['http://n1:8233', 'http://n2:8233', 'http://n3:8233'] })`
 follows the leader. Activities longer than the lease heartbeat automatically; `task.signal`
 (the second argument) aborts if the lease is lost.
+
+Cancel a whole workflow with `worker.cancel(id, reason)`: it ends as `CANCELLED` and the
+activities it was running get their `task.signal` aborted with a `CancelledFailure`.
 
 For an engine with auth and TLS: `new Worker({ address: 'https://…:8233', token })`, and
 `NODE_EXTRA_CA_CERTS=/path/ca.pem` for a private CA.
