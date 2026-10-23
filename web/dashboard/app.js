@@ -31,9 +31,13 @@ function fmtTime(iso) {
   if (isNaN(d)) return '—';
   const now = Date.now();
   const diff = (now - d.getTime()) / 1000;
-  if (diff < 60) return `${Math.max(0, Math.floor(diff))}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  // A timer's deadline is usually ahead of us.
+  const ahead = diff < 0;
+  const abs = Math.abs(diff);
+  const say = (n, unit) => (ahead ? `in ${n}${unit}` : `${n}${unit} ago`);
+  if (abs < 60) return say(Math.floor(abs), 's');
+  if (abs < 3600) return say(Math.floor(abs / 60), 'm');
+  if (abs < 86400) return say(Math.floor(abs / 3600), 'h');
   return d.toLocaleString();
 }
 
@@ -271,7 +275,7 @@ function renderStep(s) {
   const errType = s.error_type ? `<span class="tag" title="error type">${esc(s.error_type)}</span>` : '';
   const waitingFor = s.signal_name
     ? `<span class="step-meta">parked until “${esc(s.signal_name)}” arrives</span>` : '';
-  const fireAt = s.fire_at
+  const fireAt = s.fire_at && s.status !== 'CANCELLED'
     ? `<span class="step-meta">pick fires ${esc(fmtTime(s.fire_at))}</span>` : '';
   const err = s.error ? `<div class="step-body"><pre class="err">${esc(s.error)}</pre></div>` : '';
   const out = (!s.error && s.output)
