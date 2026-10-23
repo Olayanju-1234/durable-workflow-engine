@@ -35,10 +35,20 @@ import (
 // test binary re-executed into main), with its own data dir and ports. Every
 // Raft link between two nodes goes through a TCP proxy owned by the test, so
 // cutting proxies is a real network partition, and SIGKILL is a real crash.
+// The test binds every node's ports and holds them for its whole run; each run
+// of a node inherits the sockets, so no other listener can take a port between.
 
 const (
 	chaosEnvNode = "WORKFLOWD_CHAOS_NODE" // "1" in a node process
 	chaosEnvArgs = "WORKFLOWD_CHAOS_ARGS" // the node's flags, JSON-encoded
+)
+
+// A node's sockets, in the order it inherits them as fds 3, 4 and 5.
+const (
+	portRaft = iota
+	portGRPC
+	portHTTP
+	chaosPorts
 )
 
 // TestChaosNodeHelper is the node process. Under a normal `go test` it skips.
@@ -50,6 +60,22 @@ func TestChaosNodeHelper(t *testing.T) {
 	if err := json.Unmarshal([]byte(os.Getenv(chaosEnvArgs)), &args); err != nil {
 		t.Fatal(err)
 	}
+	inherited := map[string]net.Listener{}
+	for i := range chaosPorts {
+		f := os.NewFile(uintptr(3+i), "inherited")
+		lis, err := net.FileListener(f)
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		inherited[lis.Addr().String()] = lis
+	}
+	listen = func(_, addr string) (net.Listener, error) {
+		if lis, ok := inherited[addr]; ok {
+			return lis, nil
+		}
+		return nil, fmt.Errorf("chaos node: the test handed over no socket for %s", addr)
+	}
 	os.Args = append([]string{"workflowd"}, args...)
 	flag.CommandLine = flag.NewFlagSet("workflowd", flag.ExitOnError)
 	// These tests kill processes, never machines: a killed process's writes
@@ -59,23 +85,26 @@ func TestChaosNodeHelper(t *testing.T) {
 	main() // runs until the parent kills or signals this process
 }
 
-func reservePort(t *testing.T) string {
+// holdPort binds a port for the rest of the test.
+func holdPort(t *testing.T) *net.TCPListener {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lis.Close()
-	return lis.Addr().String()
+	t.Cleanup(func() { lis.Close() })
+	return lis.(*net.TCPListener)
 }
 
-// linkProxy forwards one direction of Raft traffic (node a sending to node b).
+// linkProxy forwards connections to one node: one direction of Raft traffic
+// (node a sending to node b), or the test's own gRPC or HTTP calls.
 type linkProxy struct {
 	lis    net.Listener
 	target string
 
 	mu    sync.Mutex
-	cut   bool
+	cut   bool // a network partition
+	down  bool // the target node is not running
 	conns map[net.Conn]struct{}
 }
 
@@ -85,7 +114,7 @@ func newLinkProxy(t *testing.T, target string) *linkProxy {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &linkProxy{lis: lis, target: target, conns: map[net.Conn]struct{}{}}
+	p := &linkProxy{lis: lis, target: target, down: true, conns: map[net.Conn]struct{}{}}
 	go p.serve()
 	t.Cleanup(func() { lis.Close(); p.setCut(true) })
 	return p
@@ -97,9 +126,14 @@ func (p *linkProxy) serve() {
 		if err != nil {
 			return
 		}
-		up, err := net.Dial("tcp", p.target)
+		// Not even dialed while refusing: a down node's port is still bound by
+		// the test, so the connection would wait there instead of failing.
+		var up net.Conn
+		if !p.refusing() {
+			up, err = net.Dial("tcp", p.target)
+		}
 		p.mu.Lock()
-		if err != nil || p.cut {
+		if up == nil || err != nil || p.cut || p.down {
 			p.mu.Unlock()
 			c.Close()
 			if up != nil {
@@ -124,12 +158,24 @@ func (p *linkProxy) pipe(dst, src net.Conn) {
 	p.mu.Unlock()
 }
 
-// setCut drops every open connection and refuses new ones (or stops refusing).
-func (p *linkProxy) setCut(cut bool) {
+func (p *linkProxy) refusing() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.cut = cut
-	if cut {
+	return p.cut || p.down
+}
+
+// setCut drops every open connection and refuses new ones (or stops refusing).
+func (p *linkProxy) setCut(cut bool) { p.set(&p.cut, cut) }
+
+// setDown is setCut for the target process stopping and starting, kept apart
+// so heal never reconnects a node that is not running.
+func (p *linkProxy) setDown(down bool) { p.set(&p.down, down) }
+
+func (p *linkProxy) set(flag *bool, on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	*flag = on
+	if on {
 		for c := range p.conns {
 			c.Close()
 		}
@@ -137,14 +183,18 @@ func (p *linkProxy) setCut(cut bool) {
 }
 
 type chaosNode struct {
-	id, dataDir, raft, grpc, http string
-	args                          []string
-	cmd                           *exec.Cmd
-	exited                        chan struct{} // closed once cmd has been reaped
-	logPath                       string
-	client                        server.WorkflowServiceClient
-	conn                          *grpc.ClientConn
+	id, dataDir, logPath string
+	ports                [chaosPorts]*net.TCPListener // bound by the test, served by the node
+	grpc, http           string                       // where the test calls the node: proxies
+	inbound              []*linkProxy                 // every proxy to this node; down while it is not running
+	args                 []string
+	cmd                  *exec.Cmd
+	exited               chan struct{} // closed once cmd has been reaped
+	client               server.WorkflowServiceClient
+	conn                 *grpc.ClientConn
 }
+
+func (n *chaosNode) addr(port int) string { return n.ports[port].Addr().String() }
 
 type chaosCluster struct {
 	t       *testing.T
@@ -168,15 +218,23 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 	cc := &chaosCluster{t: t, ids: []string{"n1", "n2", "n3"}, nodes: map[string]*chaosNode{}, proxies: map[[2]string]*linkProxy{}}
 	base := t.TempDir()
 	for _, id := range cc.ids {
-		cc.nodes[id] = &chaosNode{
-			id: id, dataDir: filepath.Join(base, id), logPath: filepath.Join(base, id+".log"),
-			raft: reservePort(t), grpc: reservePort(t), http: reservePort(t),
+		n := &chaosNode{id: id, dataDir: filepath.Join(base, id), logPath: filepath.Join(base, id+".log")}
+		for i := range n.ports {
+			n.ports[i] = holdPort(t)
 		}
+		// The test's calls are proxied too, so a dead node refuses them instead
+		// of leaving them queued on a socket nobody accepts from.
+		toGRPC, toHTTP := newLinkProxy(t, n.addr(portGRPC)), newLinkProxy(t, n.addr(portHTTP))
+		n.grpc, n.http = toGRPC.lis.Addr().String(), toHTTP.lis.Addr().String()
+		n.inbound = []*linkProxy{toGRPC, toHTTP}
+		cc.nodes[id] = n
 	}
 	for _, from := range cc.ids {
 		for _, to := range cc.ids {
 			if from != to {
-				cc.proxies[[2]string{from, to}] = newLinkProxy(t, cc.nodes[to].raft)
+				p := newLinkProxy(t, cc.nodes[to].addr(portRaft))
+				cc.proxies[[2]string{from, to}] = p
+				cc.nodes[to].inbound = append(cc.nodes[to].inbound, p)
 			}
 		}
 	}
@@ -184,15 +242,15 @@ func newChaosCluster(t *testing.T) *chaosCluster {
 		n := cc.nodes[id]
 		var peers []string
 		for _, other := range cc.ids {
-			addr := n.raft
+			addr := n.addr(portRaft)
 			if other != id {
 				addr = cc.proxies[[2]string{id, other}].lis.Addr().String()
 			}
 			peers = append(peers, other+"="+addr)
 		}
 		n.args = []string{
-			"--serve", "--node-id", id, "--peers", strings.Join(peers, ","), "--raft-addr", n.raft,
-			"--data-dir", n.dataDir, "--addr", n.grpc, "--http-addr", n.http, "--metrics-addr", "",
+			"--serve", "--node-id", id, "--peers", strings.Join(peers, ","), "--raft-addr", n.addr(portRaft),
+			"--data-dir", n.dataDir, "--addr", n.addr(portGRPC), "--http-addr", n.addr(portHTTP), "--metrics-addr", "",
 			"--raft-tick", "50ms",
 		}
 		conn, err := grpc.NewClient(n.grpc, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -277,12 +335,23 @@ func (cc *chaosCluster) start(id string) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestChaosNodeHelper$")
 	cmd.Env = append(os.Environ(), chaosEnvNode+"=1", chaosEnvArgs+"="+string(args))
 	cmd.Stdout, cmd.Stderr = logf, logf
+	for _, lis := range n.ports {
+		f, err := lis.File() // a duplicate, closed once the child has its own
+		if err != nil {
+			cc.t.Fatal(err)
+		}
+		defer f.Close()
+		cmd.ExtraFiles = append(cmd.ExtraFiles, f)
+	}
 	if err := cmd.Start(); err != nil {
 		cc.t.Fatal(err)
 	}
 	cc.mu.Lock()
 	n.cmd, n.exited = cmd, make(chan struct{})
 	cc.mu.Unlock()
+	for _, p := range n.inbound {
+		p.setDown(false)
+	}
 	go func(exited chan struct{}) {
 		cmd.Wait()
 		logf.Close()
@@ -300,6 +369,9 @@ func (cc *chaosCluster) kill(id string) {
 	if cmd != nil {
 		_ = cmd.Process.Kill()
 		<-exited
+	}
+	for _, p := range n.inbound {
+		p.setDown(true)
 	}
 }
 
