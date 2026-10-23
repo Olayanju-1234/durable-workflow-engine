@@ -67,7 +67,7 @@ jobs:
 
       - name: Type-check the declarations
         working-directory: sdks/typescript
-        run: npx -y -p typescript@5.6.3 tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --lib es2022,dom types-check.mts
+        run: ./check-package.sh
 
       - name: Publish workflowd@${{ needs.version.outputs.version }}
         working-directory: sdks/typescript

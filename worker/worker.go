@@ -108,6 +108,10 @@ type ActivityInfo struct {
 	WorkflowID string
 	StepName   string
 	Sequence   int64 // with WorkflowID, unique per step: a good idempotency key
+	// ActivityID is "<WorkflowID>/<Sequence>": the same for every attempt.
+	ActivityID string
+	// Attempt counts from 1; more means the engine is retrying the step.
+	Attempt int
 }
 
 // GetActivityInfo returns the step an activity's ctx belongs to.
@@ -411,6 +415,7 @@ func (w *Worker) execute(ctx context.Context, task *server.Task) {
 	}
 	actx = context.WithValue(actx, sdkctx.ActivityInfoKey{}, ActivityInfo{
 		WorkflowID: task.GetWorkflowId(), StepName: task.GetStepName(), Sequence: task.GetSequence(),
+		ActivityID: task.GetActivityId(), Attempt: int(task.GetAttempt()),
 	})
 	stopBeats := w.heartbeat(actx, cancel, task, log)
 	output, actErr := runActivity(actx, fn, task.GetInput())

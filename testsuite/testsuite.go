@@ -274,6 +274,7 @@ func (e *Env) runAttempt(d state.Decision) (bool, error) {
 	attempt := step.Attempts
 	ctx := context.WithValue(context.Background(), sdkctx.ActivityInfoKey{}, worker.ActivityInfo{
 		WorkflowID: WorkflowID, StepName: d.StepName, Sequence: d.Sequence,
+		ActivityID: fmt.Sprintf("%s/%d", WorkflowID, d.Sequence), Attempt: attempt,
 	})
 	out, err := e.activities[d.StepName](ctx, d.Input)
 	if err == nil {

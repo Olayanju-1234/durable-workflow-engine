@@ -48,6 +48,8 @@ func activityTask(workflowID string, s *state.Step) *Task {
 	return &Task{
 		WorkflowId: workflowID, StepName: s.Name, Sequence: s.Sequence, Input: s.Input,
 		StartToCloseTimeoutMs: s.StartToClose.Milliseconds(),
+		Attempt:               int32(max(s.Attempts, 1)),
+		ActivityId:            fmt.Sprintf("%s/%d", workflowID, s.Sequence),
 	}
 }
 

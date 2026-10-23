@@ -122,9 +122,9 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 			seq = a.StepFailed.GetSequence()
 		case *history.HistoryEvent_TimerFired:
 			seq = a.TimerFired.GetSequence()
-		case *history.HistoryEvent_MarkerRecorded:
-			seq = a.MarkerRecorded.GetSequence()
 		default:
+			// Markers too: the code recorded them itself, so on the first run
+			// it never "observed" their time, and a replay must not either.
 			continue
 		}
 		c.resolvedAt[seq] = ev.GetTimestamp() // a retried step keeps its last result's time

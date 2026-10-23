@@ -229,9 +229,9 @@ result: Hello, Ada! 👋</code></pre>
     <table>
       <thead><tr><th>Don't</th><th>Do</th><th>Why</th></tr></thead>
       <tbody>
-        <tr><td><code>time.Now()</code></td><td><code>ctx.Now()</code> (the time of the latest recorded event, in UTC)</td><td>Wall clock differs on every replay</td></tr>
+        <tr><td><code>time.Now()</code>, <code>Date.now()</code></td><td><code>ctx.Now()</code> / TypeScript <code>ctx.now()</code> (when the latest result the code received was recorded)</td><td>Wall clock differs on every replay</td></tr>
         <tr><td><code>time.Sleep</code></td><td><code>ctx.Sleep(...)</code></td><td>Only a recorded timer survives a restart</td></tr>
-        <tr><td><code>rand</code>, <code>uuid.New()</code></td><td><code>ctx.SideEffect(...)</code>, or generate inside an activity</td><td>New value each replay</td></tr>
+        <tr><td><code>rand</code>, <code>uuid.New()</code>, <code>Math.random()</code></td><td><code>ctx.SideEffect(...)</code>, TypeScript <code>ctx.random()</code>, or generate inside an activity</td><td>New value each replay</td></tr>
         <tr><td>HTTP calls, DB queries, file I/O</td><td><code>ctx.ExecuteActivity(...)</code></td><td>Side effects would repeat on every replay</td></tr>
         <tr><td><code>go func(){}</code>, channels</td><td><code>ctx.ExecuteActivityAsync</code>, <code>ctx.WaitAny</code> (<a href="#parallel">Parallel steps</a>)</td><td>Goroutine scheduling is non-deterministic</td></tr>
         <tr><td>Reading global mutable state</td><td>Pass data through the workflow input and step outputs</td><td>Process memory is gone after a restart</td></tr>
@@ -677,7 +677,7 @@ w := worker.New(srv.Client(), worker.Options{})
     </div>
 
     <h3 id="polyglot-quickstart">TypeScript</h3>
-    <pre data-lang="js"><code>import { Worker, WorkflowFailure } from './workflowd.mjs';
+    <pre data-lang="js"><code>import { Worker, WorkflowFailure } from 'workflowd'; // or require('workflowd')
 
 const worker = new Worker({ address: 'http://localhost:8233' });
 
@@ -699,7 +699,14 @@ worker.workflow('OrderWorkflow', async (ctx) => {
 
 worker.activity('reserve', async (input) => `reserved:${input}`);
 await worker.run();</code></pre>
-    <p>Run it with <code>node example.mjs</code> — no install step.</p>
+    <p>
+      <code>npm install workflowd</code> (Node 18+); it loads with <code>import</code> or
+      <code>require</code>, one copy either way. Time and randomness have deterministic
+      versions: <code>ctx.now()</code>, <code>ctx.random()</code>, <code>ctx.sleepUntil(name, date)</code>.
+      <code>ctx.waitForSignal(name, signal, { timeoutMs })</code> resolves to <code>undefined</code>
+      if no signal comes in time. An activity's second argument carries <code>attempt</code> (from 1)
+      and <code>activityId</code> (the same on every attempt, for idempotency keys).
+    </p>
 
     <h3>Python</h3>
     <pre data-lang="py"><code>from workflowd import Worker, WorkflowFailure, ActivityFailure

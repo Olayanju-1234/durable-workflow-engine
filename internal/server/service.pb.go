@@ -1683,8 +1683,14 @@ type Task struct {
 	// The attempt's start-to-close timeout, zero if none: the engine fails the
 	// attempt this long after dispatch, so a worker may stop the work then too.
 	StartToCloseTimeoutMs int64 `protobuf:"varint,7,opt,name=start_to_close_timeout_ms,json=startToCloseTimeoutMs,proto3" json:"start_to_close_timeout_ms,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Which attempt this is, from 1. Retries and re-dispatches of the same step
+	// share sequence; the attempt counts the engine's retries.
+	Attempt int32 `protobuf:"varint,8,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// "<workflow_id>/<sequence>": the same for every attempt of the step, so a
+	// good idempotency key for the side effect the activity performs.
+	ActivityId    string `protobuf:"bytes,9,opt,name=activity_id,json=activityId,proto3" json:"activity_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Task) Reset() {
@@ -1764,6 +1770,20 @@ func (x *Task) GetStartToCloseTimeoutMs() int64 {
 		return x.StartToCloseTimeoutMs
 	}
 	return 0
+}
+
+func (x *Task) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *Task) GetActivityId() string {
+	if x != nil {
+		return x.ActivityId
+	}
+	return ""
 }
 
 type PollTaskResponse struct {
@@ -2958,7 +2978,7 @@ const file_service_proto_rawDesc = "" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1d\n" +
 	"\n" +
-	"step_names\x18\x02 \x03(\tR\tstepNames\"\xfd\x01\n" +
+	"step_names\x18\x02 \x03(\tR\tstepNames\"\xb8\x02\n" +
 	"\x04Task\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1b\n" +
@@ -2968,7 +2988,10 @@ const file_service_proto_rawDesc = "" +
 	"\vlease_token\x18\x05 \x01(\tR\n" +
 	"leaseToken\x12*\n" +
 	"\x11lease_duration_ms\x18\x06 \x01(\x03R\x0fleaseDurationMs\x128\n" +
-	"\x19start_to_close_timeout_ms\x18\a \x01(\x03R\x15startToCloseTimeoutMs\"9\n" +
+	"\x19start_to_close_timeout_ms\x18\a \x01(\x03R\x15startToCloseTimeoutMs\x12\x18\n" +
+	"\aattempt\x18\b \x01(\x05R\aattempt\x12\x1f\n" +
+	"\vactivity_id\x18\t \x01(\tR\n" +
+	"activityId\"9\n" +
 	"\x10PollTaskResponse\x12%\n" +
 	"\x04task\x18\x01 \x01(\v2\x11.workflow.v1.TaskR\x04task\"\x90\x02\n" +
 	"\x13CompleteTaskRequest\x12\x1f\n" +

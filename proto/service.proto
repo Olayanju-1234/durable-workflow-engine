@@ -313,6 +313,12 @@ message Task {
   // The attempt's start-to-close timeout, zero if none: the engine fails the
   // attempt this long after dispatch, so a worker may stop the work then too.
   int64 start_to_close_timeout_ms = 7;
+  // Which attempt this is, from 1. Retries and re-dispatches of the same step
+  // share sequence; the attempt counts the engine's retries.
+  int32 attempt = 8;
+  // "<workflow_id>/<sequence>": the same for every attempt of the step, so a
+  // good idempotency key for the side effect the activity performs.
+  string activity_id = 9;
 }
 
 message PollTaskResponse {

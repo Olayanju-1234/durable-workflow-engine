@@ -3,16 +3,24 @@
   "version": "0.1.1",
   "description": "TypeScript/JavaScript SDK for workflowd, a single-binary durable workflow engine. Zero dependencies.",
   "type": "module",
-  "main": "./workflowd.mjs",
-  "types": "./workflowd.d.mts",
+  "main": "./workflowd.cjs",
+  "types": "./workflowd.d.cts",
   "exports": {
     ".": {
-      "types": "./workflowd.d.mts",
-      "default": "./workflowd.mjs"
+      "import": {
+        "types": "./workflowd.d.mts",
+        "default": "./workflowd.mjs"
+      },
+      "require": {
+        "types": "./workflowd.d.cts",
+        "default": "./workflowd.cjs"
+      }
     }
   },
   "files": [
+    "workflowd.cjs",
     "workflowd.mjs",
+    "workflowd.d.cts",
     "workflowd.d.mts",
     "README.md",
     "LICENSE",

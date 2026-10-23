@@ -152,6 +152,8 @@ and returns them as one batch:
   are in flight, so code waiting on one result continues as soon as it lands.
 - A step whose attempt failed and will be retried is sent as `SCHEDULED`: it has no
   result yet, and workflow code must keep waiting on it.
+- Each resolved step carries `resolved_at` (RFC 3339) and the task carries `started_at`:
+  an SDK's deterministic clock reads them (the TypeScript `ctx.now()`).
 - Each resolved step carries `resolved_event_id`. "Wait for whichever finishes first"
   must pick the step with the lowest one, not the first in code order: the order of
   results is fixed in history, so every replay makes the same choice. (A plain
@@ -231,7 +233,9 @@ report it as a replay error, which fails the workflow rather than corrupting it.
 Activities are where real side effects happen, and they need no replay at all —
 just "run this, report the result". Poll `GET /api/activity-tasks`, do the work,
 `POST /api/activity-tasks/complete`. Present the `lease_token` you were given;
-if it is rejected, the task was reassigned and your result must be discarded.
+if it is rejected, the task was reassigned and your result must be discarded. The task
+carries `attempt` (from 1) and `activity_id` (`<workflow_id>/<sequence>`, the same on every
+attempt: an idempotency key for the activity's side effect).
 
 A failure is `{"error": "..."}`, optionally with `"error_type"` (the kind of failure;
 the SDKs send the exception's class name, which a retry policy can list in

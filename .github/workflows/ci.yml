@@ -135,7 +135,7 @@ jobs:
         working-directory: sdks/typescript
         run: |
           cp ../../LICENSE ../../NOTICE .
-          npx -y -p typescript@5.6.3 tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --lib es2022,dom types-check.mts
+          ./check-package.sh
           npm pack --dry-run
 
       - name: Python package

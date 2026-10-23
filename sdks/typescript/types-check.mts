@@ -49,10 +49,20 @@ cluster.workflow('Typed', async (ctx) => {
   ctx.cancel(hedge, 'not needed');
   await hedge.catch((err: unknown) => (err instanceof CancelledFailure ? err.stepName : null));
   const approved = await ctx.waitForSignal<{ yes: boolean }>('wait', 'approve', { as: 'json' });
+  const now: Date = ctx.now();
+  const jitter: number = Math.floor(ctx.random() * 1000);
+  await ctx.sleepUntil('next-business-day', new Date(now.getTime() + 86_400_000 + jitter));
+  const maybe: string | undefined = await ctx.waitForSignal('callback', 'callback', { timeoutMs: 60_000 });
+  const typed = await ctx.waitForSignal<{ ok: boolean }>('typed', 'callback', { as: 'json', timeoutMs: 1000 });
+  void [maybe, typed?.ok];
   void [a, b, timedOut];
   return { id, ok: receipt.ok && approved.yes, size: blob.length };
 });
 cluster.activity('render', (bytes: Uint8Array, task) => (task.signal.aborted ? bytes : bytes.reverse()), { as: 'bytes' });
+cluster.activity('charge', async (_input: unknown, task) => {
+  const key: string = `${task.activityId}#${task.attempt}`;
+  return key;
+});
 
 async function client(): Promise<void> {
   const id: string = await worker.startWorkflow('Order', 'order-1');
