@@ -714,7 +714,7 @@ class Worker {
     address = 'http://localhost:8233',
     addresses,
     workerId,
-    sdk = 'typescript/0.1.1',
+    sdk = 'typescript/0.2.0',
     token,
     activityConcurrency = 4,
     workflowConcurrency = 2,

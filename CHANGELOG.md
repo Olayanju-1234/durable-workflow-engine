@@ -7,6 +7,13 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-23
+
+The first correctness release, from running liftoff (a NestJS app) on workflowd in
+production: timeouts, cancellation, non-retryable failures and TypeScript ergonomics. The new
+SDK features need an engine from this release; an older engine refuses the new fields, and an
+older SDK keeps working against this engine.
+
 ### Added
 - Timeouts (ADR-0008), all optional and recorded in history: a workflow **execution timeout**
   (ends it as `TIMED_OUT`), and per-activity **start-to-close** (one attempt, heartbeats
