@@ -109,6 +109,10 @@ func main() {
 	logger.Info("engine bootstrapped; pass --serve to run the gRPC server or --demo for a smoke test")
 }
 
+// listen opens every socket the daemon serves on. The chaos tests swap it for
+// sockets the test process bound, so a port never changes hands between runs.
+var listen = net.Listen
+
 // shutdownGracePeriod bounds how long GracefulStop waits for in-flight RPCs to
 // drain before a forced Stop, so an idle worker parked on a long-poll PollTask
 // can't hang shutdown indefinitely.
@@ -179,7 +183,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 		logger.Info("metrics endpoint listening", "addr", cfg.metricsAddr, "path", "/metrics")
 	}
 
-	lis, err := net.Listen("tcp", cfg.addr)
+	lis, err := listen("tcp", cfg.addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.addr, err)
 	}
@@ -258,11 +262,15 @@ func startHTTP(ctx context.Context, addr string, handler http.Handler, name stri
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	go func() {
-		serve := srv.ListenAndServe
-		if tlsCfg != nil {
-			serve = func() error { return srv.ListenAndServeTLS("", "") }
+		lis, err := listen("tcp", addr)
+		if err == nil {
+			if tlsCfg != nil {
+				err = srv.ServeTLS(lis, "", "")
+			} else {
+				err = srv.Serve(lis)
+			}
 		}
-		if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server stopped", "server", name, "addr", addr, "err", err)
 		}
 	}()

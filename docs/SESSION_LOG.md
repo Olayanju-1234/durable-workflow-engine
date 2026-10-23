@@ -5,6 +5,38 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-23 — Chaos tests keep their ports (CI flake on #40)
+
+`TestChaosKillLeaderMidWorkflow` failed on CI run 39924292452 (docs-only #40): `reservePort`
+closed each listener at once, the n1→n3 Raft proxy was then given n3's freed gRPC port (42839),
+n3 exited on `bind: address already in use`, and killing the leader left one live node.
+
+**Done:**
+- The chaos harness binds every node's Raft, gRPC and HTTP ports itself and holds them for the
+  whole test. Every run of a node, restarts included, inherits the sockets as fds 3–5
+  (`cmd.ExtraFiles` → `net.FileListener`), so nothing binds between picking a port and serving it.
+- Seams: `main.listen` (`net.Listen` in production; the HTTP servers now use it via
+  `Serve`/`ServeTLS`) and `cluster.Config.Listen` for the Raft listener. The chaos node's
+  `listen` rejects any address it was not handed, so a new listener can't quietly bind.
+- A held socket queues connections to a dead node instead of refusing them, so the test's own
+  gRPC/HTTP calls go through proxies too, and every proxy into a node is `down` (accept and
+  close, like a refused connection) while it isn't running. `down` is separate from `cut`, so
+  `heal` never revives a dead node.
+- `go test ./cmd/workflowd -run Chaos -race -count=20`: all 60 runs pass (327 s, macOS).
+- #41's own CI then hit a second flake, `TestScheduleToCloseStopsRetries` (#35): it wanted
+  exactly 3 attempts inside 300 ms, about 150 ms of slack. Now 200 ms backoff and a 1400 ms
+  deadline (the earliest a 4th attempt could start): 800 ms of slack, still fails if the
+  deadline check in `retryAfter` is removed.
+
+**Gotchas:**
+- `exec` calls `File.Fd()` on `ExtraFiles`, which switches the shared socket to blocking mode.
+  Harmless only because the test never accepts on the held listeners (the child switches it back
+  in `net.FileListener`); don't add a test-side accept loop on them.
+- The in-process cluster and raft tests still close reserved listeners just before binding (a
+  microsecond window, never seen failing); `cluster.Config.Listen` is the hook if they ever do.
+
+---
+
 ## 2026-10-23 — Session 26: the correctness release (SDKs 0.2.0), from running liftoff
 
 liftoff (NestJS) began running webhooks and custom steps on a private workflowd on 2026-10-22;

@@ -43,6 +43,8 @@ type Config struct {
 	Peers map[string]string
 	// RaftAddr is where this node listens for Raft traffic.
 	RaftAddr string
+	// Listen opens the Raft listener; nil means net.Listen.
+	Listen func(network, addr string) (net.Listener, error)
 	// GRPCAddr and HTTPAddr are this node's client addresses, given to clients
 	// that reach a follower.
 	GRPCAddr, HTTPAddr string
@@ -140,7 +142,11 @@ func Start(cfg Config) (*Cluster, error) {
 		storage.Close()
 		return nil, err
 	}
-	lis, err := net.Listen("tcp", cfg.RaftAddr)
+	listen := cfg.Listen
+	if listen == nil {
+		listen = net.Listen
+	}
+	lis, err := listen("tcp", cfg.RaftAddr)
 	if err != nil {
 		c.transport.Close()
 		storage.Close()

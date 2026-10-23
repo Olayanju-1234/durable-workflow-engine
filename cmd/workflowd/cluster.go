@@ -102,7 +102,7 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 
 	selfHost, _, _ := net.SplitHostPort(cc.peers[cc.nodeID])
 	cl, err := cluster.Start(cluster.Config{
-		NodeID: cc.nodeID, Peers: cc.peers, RaftAddr: cc.raftAddr,
+		NodeID: cc.nodeID, Peers: cc.peers, RaftAddr: cc.raftAddr, Listen: listen,
 		GRPCAddr: advertised(cfg.addr, selfHost), HTTPAddr: advertised(cfg.httpAddr, selfHost),
 		DataDir: dataDir, Store: store, Logger: logger, TickInterval: cc.tick, PeerTLS: cfg.sec.peerTLS,
 		NewEngine: func(hl server.HistoryLog) *server.Engine {
@@ -144,7 +144,7 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 		mux.Handle("/metrics", cfg.sec.metricsHandler(cl.MetricsHandler()))
 		httpSrvs = append(httpSrvs, startHTTP(ctx, cfg.metricsAddr, mux, "metrics", cfg.sec.tls, logger))
 	}
-	lis, err := net.Listen("tcp", cfg.addr)
+	lis, err := listen("tcp", cfg.addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.addr, err)
 	}
