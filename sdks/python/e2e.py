@@ -14,7 +14,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from workflowd import DEFAULT_VERSION, ActivityFailure, RetryPolicy, Worker  # noqa: E402
+from workflowd import DEFAULT_VERSION, ActivityFailure, CancelledFailure, RetryPolicy, Worker  # noqa: E402
 
 follower, leader = sys.argv[1], sys.argv[2]
 
@@ -88,6 +88,38 @@ def py_forever(ctx):
     return ctx.wait_for_signal("never", "never-sent")
 
 
+# Cancellation: liftoff's custom-step race with the loser cancelled, so a late
+# callback reaches the next wait; and a cancelled workflow tells its activity.
+@worker.workflow("PyRace")
+def py_race(ctx):
+    callback = ctx.wait_for_signal_async("await-callback", "callback")
+    deadline = ctx.sleep_async("deadline", 0.1)
+    if ctx.wait_any(callback, deadline, cancel_rest=True) == 0:
+        return "called back"
+    try:
+        callback.result()
+    except CancelledFailure:
+        pass
+    return "late: " + ctx.wait_for_signal("late-callback", "callback")
+
+
+@worker.workflow("PyProvision")
+def py_provision(ctx):
+    return ctx.activity("py-provision")
+
+
+provision_started = threading.Event()
+provision_cancelled = threading.Event()
+
+
+@worker.activity("py-provision")
+def py_provision_activity(_payload, info):
+    provision_started.set()
+    if info["cancelled"].wait(5):
+        provision_cancelled.set()
+    raise RuntimeError("stopped")
+
+
 @worker.workflow("PyAfterRestart")
 def py_after_restart(ctx):
     return ctx.activity("py-flaky", {"n": 41}, decode="json")
@@ -154,6 +186,25 @@ if json.loads(par["output"]) != {"parts": [10, 20, 30], "winner": 1}:
 bounded = wait_done(worker.start_workflow("PyTimeouts"))
 if "start-to-close" not in bounded["output"] or not stall_stopped.wait(2):
     fail(f"timeouts: output {bounded['output']}, stopped={stall_stopped.is_set()}")
+race_id = worker.start_workflow("PyRace")
+for _ in range(100):
+    if any(s["step_name"] == "late-callback" for s in worker.describe(race_id)["steps"]):
+        break
+    time.sleep(0.05)
+else:
+    fail("race: never reached the second wait")
+worker.signal(race_id, "callback", "hello")
+race = wait_done(race_id)
+race_steps = " ".join(f"{s['step_name']}={s['status']}" for s in race["steps"])
+if race["output"] != "late: hello" or race_steps != "await-callback=CANCELLED deadline=COMPLETED late-callback=COMPLETED":
+    fail(f"race: output {race['output']}, steps {race_steps}")
+provision_id = worker.start_workflow("PyProvision")
+if not provision_started.wait(5):
+    fail("the provision activity never started")
+worker.cancel(provision_id, "tenant deleted")
+if not provision_cancelled.wait(5) or worker.describe(provision_id)["status"] != "CANCELLED":
+    fail("the cancelled workflow's activity was never told")
+
 forever_id = worker.start_workflow("PyForever", execution_timeout=0.3)
 for _ in range(100):
     wf = worker.describe(forever_id)

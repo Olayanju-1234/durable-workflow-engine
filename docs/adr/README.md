@@ -14,6 +14,7 @@ that supersedes the old one.
 | [0006](0006-keep-file-per-workflow-store.md) | Keep the file-per-workflow history store; no LSM engine | Accepted |
 | [0007](0007-parallel-steps.md) | Parallel steps and batched commands | Accepted |
 | [0008](0008-timeouts.md) | Workflow and activity timeouts | Accepted |
+| [0009](0009-cancellation.md) | Cancelling workflows and steps | Accepted |
 
 ## Template
 

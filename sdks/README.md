@@ -103,6 +103,7 @@ Commands are a flat tagged union:
 {"type": "start_timer",       "step_name": "wait",   "sequence": 3, "delay_ms": 60000}
 {"type": "await_signal",      "step_name": "gate",   "sequence": 4, "signal_name": "approved"}
 {"type": "record_marker",     "step_name": "add-fraud-check", "sequence": 5, "marker": "version", "data": "1"}
+{"type": "cancel_step",       "step_name": "gate",   "sequence": 4, "reason": "lost a race"}
 {"type": "complete_workflow", "output": "..."}
 {"type": "fail_workflow",     "error": "..."}
 {"type": "noop"}
@@ -115,6 +116,12 @@ Commands are a flat tagged union:
   one attempt (from dispatch, heartbeats or not) and the whole step (every attempt and
   backoff). The activity task carries `start_to_close_timeout_ms` so the worker can stop
   the work too. Send them only when set: an engine that predates them refuses the field.
+- **`cancel_step`** closes a step that is still open (a race's loser): it names an
+  existing step and takes no sequence of its own. The step comes back with status
+  `CANCELLED`; waiting on it is an error. A step that already has a result is left alone.
+  Engines before 0.2.0 refuse the command.
+- A worker turned away because its step was cancelled or its workflow finished gets a
+  `409` with `"cancelled": true` from heartbeat and complete; stop the work.
 - **`record_marker`** is how `getVersion` / `sideEffect` work: a step that
   completes as it is recorded. In `steps[]` it comes back with `"kind": "MARKER"`,
   `"marker": "version"` or `"side_effect"`, and the value in `output`. A version

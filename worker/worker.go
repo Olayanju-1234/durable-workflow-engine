@@ -44,6 +44,15 @@ const sdkName = "go/0.1.0"
 // stable key. ctx is cancelled if the worker loses the task's lease.
 type ActivityFunc func(ctx context.Context, input []byte) ([]byte, error)
 
+// Causes an activity's ctx is cancelled with (read them with context.Cause):
+// the work is no longer wanted (its step was cancelled, or its workflow
+// cancelled, timed out or finished without it), or the engine gave the task to
+// another worker because this one missed its lease.
+var (
+	ErrActivityCancelled = errors.New("worker: activity cancelled")
+	ErrLeaseLost         = errors.New("worker: activity lease lost")
+)
+
 // ActivityInfo identifies the step an activity is running for.
 type ActivityInfo struct {
 	WorkflowID string
@@ -341,9 +350,10 @@ func (w *Worker) execute(ctx context.Context, task *server.Task) {
 	w.mu.Unlock()
 
 	// The activity keeps running through worker shutdown so its result can be
-	// reported; only a lost lease or its start-to-close timeout ends it.
-	actx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancel()
+	// reported; only a lost lease, a cancellation or its start-to-close timeout
+	// ends it.
+	actx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer cancel(nil)
 	if d := time.Duration(task.GetStartToCloseTimeoutMs()) * time.Millisecond; d > 0 {
 		var stop context.CancelFunc
 		actx, stop = context.WithTimeout(actx, d)
@@ -371,15 +381,35 @@ func (w *Worker) execute(ctx context.Context, task *server.Task) {
 		_, err := s.CompleteTask(ctx, req, opt)
 		return err
 	})
-	if err != nil {
-		// Usually a lost lease: the task was reassigned or the workflow ended.
+	switch {
+	case err == nil:
+	case cancelled(err):
+		log.Info("activity result not needed: the step was cancelled", "err", err)
+	default:
+		// Usually a lost lease: the task was reassigned.
 		log.Warn("complete activity task rejected", "err", err)
 	}
 }
 
+// cancelled reports whether the engine turned a worker away because the work
+// is no longer wanted, rather than because its lease was lost.
+func cancelled(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.FailedPrecondition {
+		return false
+	}
+	for _, d := range st.Details() {
+		if _, ok := d.(*server.ActivityCancelled); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // heartbeat extends the task's lease every third of its duration until stopped.
-// A rejected heartbeat means the lease is gone, so the activity is cancelled.
-func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, task *server.Task, log *slog.Logger) (stop func()) {
+// A rejected heartbeat means the lease is gone, so the activity is cancelled,
+// with ErrActivityCancelled or ErrLeaseLost as the cause.
+func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelCauseFunc, task *server.Task, log *slog.Logger) (stop func()) {
 	every := time.Duration(task.GetLeaseDurationMs()) * time.Millisecond / 3
 	if every <= 0 {
 		return func() {}
@@ -401,8 +431,13 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, task 
 				return err
 			})
 			if status.Code(err) == codes.FailedPrecondition {
-				log.Warn("lease lost; cancelling activity", "err", err)
-				cancel()
+				if cancelled(err) {
+					log.Info("activity cancelled; stopping it", "err", err)
+					cancel(ErrActivityCancelled)
+				} else {
+					log.Warn("lease lost; cancelling activity", "err", err)
+					cancel(ErrLeaseLost)
+				}
 				return
 			}
 		}

@@ -580,7 +580,11 @@ type StepFailedEvent struct {
 	RetryCount int32                  `protobuf:"varint,4,opt,name=retry_count,json=retryCount,proto3" json:"retry_count,omitempty"`
 	// The engine will retry this step: the failure is not the step's result and
 	// workflow code must not see it. Older binaries ignore it.
-	WillRetry     bool `protobuf:"varint,5,opt,name=will_retry,json=willRetry,proto3" json:"will_retry,omitempty"`
+	WillRetry bool `protobuf:"varint,5,opt,name=will_retry,json=willRetry,proto3" json:"will_retry,omitempty"`
+	// The step was cancelled, not failed: workflow code cancelled it (a lost
+	// race, say), so a worker still running it is told to stop. Any step kind can
+	// be cancelled this way. Older binaries read it as a failure.
+	Cancelled     bool `protobuf:"varint,6,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -650,6 +654,13 @@ func (x *StepFailedEvent) GetWillRetry() bool {
 	return false
 }
 
+func (x *StepFailedEvent) GetCancelled() bool {
+	if x != nil {
+		return x.Cancelled
+	}
+	return false
+}
+
 type WorkflowCompletedEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Output        []byte                 `protobuf:"bytes,1,opt,name=output,proto3" json:"output,omitempty"`
@@ -703,7 +714,10 @@ type WorkflowFailedEvent struct {
 	Terminated bool `protobuf:"varint,2,opt,name=terminated,proto3" json:"terminated,omitempty"`
 	// Set when the engine ended the workflow because its execution timeout
 	// passed. Older binaries read it as a plain failure.
-	TimedOut      bool `protobuf:"varint,3,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
+	TimedOut bool `protobuf:"varint,3,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
+	// Set when a client cancelled the workflow (CancelWorkflow). Older binaries
+	// read it as a plain failure.
+	Cancelled     bool `protobuf:"varint,4,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -755,6 +769,13 @@ func (x *WorkflowFailedEvent) GetTerminated() bool {
 func (x *WorkflowFailedEvent) GetTimedOut() bool {
 	if x != nil {
 		return x.TimedOut
+	}
+	return false
+}
+
+func (x *WorkflowFailedEvent) GetCancelled() bool {
+	if x != nil {
+		return x.Cancelled
 	}
 	return false
 }
@@ -1076,7 +1097,7 @@ const file_event_proto_rawDesc = "" +
 	"\x12StepCompletedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x16\n" +
 	"\x06output\x18\x02 \x01(\fR\x06output\x12\x1a\n" +
-	"\bsequence\x18\x03 \x01(\x03R\bsequence\"\xa0\x01\n" +
+	"\bsequence\x18\x03 \x01(\x03R\bsequence\"\xbe\x01\n" +
 	"\x0fStepFailedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1a\n" +
@@ -1084,15 +1105,17 @@ const file_event_proto_rawDesc = "" +
 	"\vretry_count\x18\x04 \x01(\x05R\n" +
 	"retryCount\x12\x1d\n" +
 	"\n" +
-	"will_retry\x18\x05 \x01(\bR\twillRetry\"0\n" +
+	"will_retry\x18\x05 \x01(\bR\twillRetry\x12\x1c\n" +
+	"\tcancelled\x18\x06 \x01(\bR\tcancelled\"0\n" +
 	"\x16WorkflowCompletedEvent\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\fR\x06output\"h\n" +
+	"\x06output\x18\x01 \x01(\fR\x06output\"\x86\x01\n" +
 	"\x13WorkflowFailedEvent\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1e\n" +
 	"\n" +
 	"terminated\x18\x02 \x01(\bR\n" +
 	"terminated\x12\x1b\n" +
-	"\ttimed_out\x18\x03 \x01(\bR\btimedOut\"{\n" +
+	"\ttimed_out\x18\x03 \x01(\bR\btimedOut\x12\x1c\n" +
+	"\tcancelled\x18\x04 \x01(\bR\tcancelled\"{\n" +
 	"\x11TimerStartedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x17\n" +

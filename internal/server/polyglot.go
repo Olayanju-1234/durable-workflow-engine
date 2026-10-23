@@ -377,8 +377,27 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 			Type: state.DecideRecordMarker, StepName: m.GetStepName(),
 			Sequence: m.GetSequence(), Marker: m.GetMarker(), Output: m.GetData(),
 		}, nil
+	case *WorkflowCommand_CancelStep:
+		s := c.CancelStep
+		return state.Decision{
+			Type: state.DecideCancelStep, StepName: s.GetStepName(), Sequence: s.GetSequence(), Error: s.GetReason(),
+		}, nil
 	default:
 		return state.Decision{}, fmt.Errorf("server: unknown workflow command %T", c)
+	}
+}
+
+// kindOfDecision is the kind of step a decision opens.
+func kindOfDecision(t state.DecisionType) state.StepKind {
+	switch t {
+	case state.DecideStartTimer:
+		return state.KindTimer
+	case state.DecideAwaitSignal:
+		return state.KindSignal
+	case state.DecideRecordMarker:
+		return state.KindMarker
+	default:
+		return state.KindActivity
 	}
 }
 
@@ -421,6 +440,10 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 		return &WorkflowCommand{Command: &WorkflowCommand_RecordMarker{RecordMarker: &RecordMarkerCommand{
 			StepName: d.StepName, Sequence: d.Sequence, Marker: d.Marker, Data: d.Output,
 		}}}
+	case state.DecideCancelStep:
+		return &WorkflowCommand{Command: &WorkflowCommand_CancelStep{CancelStep: &CancelStepCommand{
+			StepName: d.StepName, Sequence: d.Sequence, Reason: d.Error,
+		}}}
 	default:
 		return nil
 	}
@@ -430,11 +453,27 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 // engine must never trust an SDK to number its own steps correctly: a bad
 // sequence would produce a history that Reconstruct later refuses to read,
 // turning a client bug into an unreadable workflow. Steps the batch opens take
-// consecutive sequences after the history's; a terminal command comes last.
+// consecutive sequences after the history's; a terminal command comes last; a
+// cancel names a step that exists by then, recorded or opened earlier in the batch.
 func validateDecisions(st *state.State, ds []state.Decision) error {
 	want := int64(len(st.Steps) + 1)
+	opened := map[int64]state.Decision{} // steps this batch opens, by sequence
 	for i, d := range ds {
 		switch d.Type {
+		case state.DecideCancelStep:
+			name, kind := "", state.StepKind(-1)
+			if s := st.Step(d.Sequence); s != nil {
+				name, kind = s.Name, s.Kind
+			} else if o, ok := opened[d.Sequence]; ok {
+				name, kind = o.StepName, kindOfDecision(o.Type)
+			} else {
+				return fmt.Errorf("%w: command %d cancels step %d, which does not exist", ErrInvalidCommand, i+1, d.Sequence)
+			}
+			if name != d.StepName || kind == state.KindMarker {
+				return fmt.Errorf("%w: command %d cancels %q at step %d, but that step is %s %q — the SDK's replay is out of step with history",
+					ErrInvalidCommand, i+1, d.StepName, d.Sequence, kind, name)
+			}
+			continue
 		case state.DecideNoop:
 			if len(ds) > 1 {
 				return fmt.Errorf("%w: a noop cannot be part of a batch of commands", ErrInvalidCommand)
@@ -450,6 +489,7 @@ func validateDecisions(st *state.State, ds []state.Decision) error {
 			return fmt.Errorf("%w: command %d has sequence %d, expected %d — the SDK's replay is out of step with history",
 				ErrInvalidCommand, i+1, d.Sequence, want)
 		}
+		opened[want] = d
 		want++
 		if d.StepName == "" {
 			return fmt.Errorf("%w: command has an empty step name", ErrInvalidCommand)

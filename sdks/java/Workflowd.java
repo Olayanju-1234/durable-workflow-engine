@@ -80,6 +80,15 @@ public final class Workflowd {
         }
     }
 
+    /** Thrown for a step that was cancelled. Catch it to carry on without the step. */
+    public static class CancelledFailure extends RuntimeException {
+        public final String stepName;
+        public CancelledFailure(String stepName, String message) {
+            super(message);
+            this.stepName = stepName;
+        }
+    }
+
     /**
      * Internal control-flow signal: replay reached a step with no recorded result.
      *
@@ -343,6 +352,10 @@ public final class Workflowd {
                     String err = str(recorded.get("error"));
                     throw new ActivityFailure(name, err.isEmpty() ? "activity failed" : err);
                 }
+                if ("CANCELLED".equals(status)) {
+                    String err = str(recorded.get("error"));
+                    throw new CancelledFailure(name, err.isEmpty() ? "cancelled" : err);
+                }
                 throw new Suspend(null); // SCHEDULED: still in flight
             }
 
@@ -573,6 +586,16 @@ public final class Workflowd {
                 if (!(generated && e.status == 409)) throw e;
             }
             return id;
+        }
+
+        /**
+         * End a running workflow as CANCELLED, recording the reason. Workers running its
+         * activities are turned away at their next heartbeat or completion.
+         */
+        public void cancel(String workflowId, String reason) throws IOException, InterruptedException {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("reason", reason == null ? "" : reason);
+            request("POST", "/api/workflows/" + enc(workflowId) + "/cancel", body);
         }
 
         /**

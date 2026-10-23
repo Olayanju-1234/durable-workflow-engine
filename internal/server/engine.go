@@ -94,6 +94,8 @@ type Engine struct {
 	policies         map[string]RetryPolicy   // activity step name -> retry policy
 	leases           map[leaseKey]*lease      // in-flight step -> its task lease
 	leaseTokens      map[string]*lease        // lease token -> lease, for heartbeats
+	tombstones       map[string]string        // lease token -> why it was taken away (cancellation)
+	tombstoneOrder   []string                 // oldest first, to bound tombstones
 	pendingDecisions map[string]*decisionTask // workflow id -> outstanding SDK decision
 }
 
@@ -143,6 +145,7 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 		policies:         make(map[string]RetryPolicy),
 		leases:           make(map[leaseKey]*lease),
 		leaseTokens:      make(map[string]*lease),
+		tombstones:       make(map[string]string),
 		pendingDecisions: make(map[string]*decisionTask),
 	}
 	for _, opt := range opts {
@@ -435,8 +438,15 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 	if err == nil {
 		claimedAt = le.claimedAt
 	}
+	reason, tombstoned := e.tombstones[leaseToken]
 	e.mu.Unlock()
+	if tombstoned {
+		return fmt.Errorf("%w: %s", ErrActivityCancelled, reason)
+	}
 	if err != nil {
+		if _, st, herr := e.historyLocked(w); herr == nil && st.Status.IsTerminal() {
+			return fmt.Errorf("%w: workflow %s (%w)", ErrActivityCancelled, st.Status, err)
+		}
 		return err
 	}
 
@@ -853,6 +863,11 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 			e.log.Warn("workflow failed", "workflow_id", workflowID, "error", decision.Error)
 			return nil
 
+		case state.DecideCancelStep:
+			if !e.cancelStepLocked(w, decision.Sequence, decision.Error) {
+				continue // it already has a result: nothing to cancel
+			}
+
 		case state.DecideNoop:
 			// Every step the code waits on is in flight.
 			continue
@@ -907,13 +922,30 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 		if err := e.store.Release(workflowID); err != nil {
 			e.log.Warn("release history handle", "workflow_id", workflowID, "err", err)
 		}
-		// Steps still in flight are abandoned: their workers are turned away.
-		e.dropLeases(workflowID)
+		// Steps still in flight are abandoned: their workers are told to stop.
+		e.dropLeases(workflowID, "workflow "+terminalStatus(ev))
 		e.queue.dropWhere(func(t *Task) bool { return t.GetWorkflowId() == workflowID })
 		e.dropDecision(workflowID)
 		dropWorkflow(e.workflowQueue, workflowID)
 	}
 	return nil
+}
+
+// terminalStatus names how a terminal event ends its workflow.
+func terminalStatus(ev *history.HistoryEvent) string {
+	f := ev.GetWorkflowFailed()
+	switch {
+	case ev.GetWorkflowCompleted() != nil:
+		return "completed"
+	case f.GetCancelled():
+		return "cancelled"
+	case f.GetTimedOut():
+		return "timed out"
+	case f.GetTerminated():
+		return "terminated"
+	default:
+		return "failed"
+	}
 }
 
 func isTerminalEvent(ev *history.HistoryEvent) bool {

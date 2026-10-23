@@ -51,6 +51,7 @@
     <a href="#retries">Retries &amp; Saga</a>
     <a href="#timeouts">Timeouts</a>
     <a href="#parallel">Parallel steps</a>
+    <a href="#cancellation">Cancellation</a>
     <a href="#schedules">Schedules</a>
     <a href="#testing">Testing workflows</a>
     <a href="#versioning">Changing running code</a>
@@ -479,7 +480,9 @@ if ctx.WaitAny(reply, deadline) == 1 {
       your argument list, so every replay makes the same choice. There is deliberately no
       non-blocking "is it done yet?": its answer would depend on when a replay runs. A step the
       engine is retrying has no result yet, so your code keeps waiting on it. A workflow may
-      return while steps are still running; they are abandoned.
+      return while steps are still running; they are abandoned, and the dashboard shows them as
+      <code>CANCELLED</code>. The losers of a race keep running unless you cancel them
+      (<a href="#cancellation">below</a>): a loop that re-races the same step needs that.
     </p>
     <p>
       TypeScript: start calls without awaiting them and use <code>Promise.all</code>, and
@@ -487,6 +490,43 @@ if ctx.WaitAny(reply, deadline) == 1 {
       order). Python: <code>ctx.activity_async</code>, <code>ctx.sleep_async</code>,
       <code>ctx.wait_for_signal_async</code>, then <code>ctx.wait_all</code> /
       <code>ctx.wait_any</code>.
+    </p>
+
+    <h2 id="cancellation">Cancellation</h2>
+    <p>
+      <strong>Cancel a step</strong> the workflow no longer wants, typically a race's loser. A
+      cancelled timer stops mattering, a cancelled signal wait stops taking signals (a later wait
+      for the same signal gets the next one, instead of the abandoned wait swallowing it), and a
+      cancelled activity is dropped from the queue, never retried, and its worker is told to stop.
+      Waiting on a cancelled step returns an error matching <code>workflow.ErrCancelled</code>.
+    </p>
+    <pre data-lang="go"><code>reply := ctx.WaitForSignalAsync("reply", "approved")
+deadline := ctx.NewTimer("deadline", 48*time.Hour)
+race := []workflow.Future{reply, deadline}
+i := ctx.WaitAny(race...)
+ctx.CancelStep(race[1-i]) // a no-op if the loser already has a result</code></pre>
+    <p>
+      TypeScript: <code>ctx.waitAny([reply, deadline], { cancelRest: true })</code> or
+      <code>ctx.cancel(promise)</code>; awaiting it rejects with <code>CancelledFailure</code>.
+      Python: <code>ctx.wait_any(reply, deadline, cancel_rest=True)</code> or
+      <code>future.cancel()</code>; <code>result()</code> raises <code>CancelledFailure</code>.
+    </p>
+    <p>
+      <strong>Cancel a workflow</strong> when its work is no longer wanted: it ends as
+      <code>CANCELLED</code> (terminate is the operator's emergency stop and ends it as
+      <code>TERMINATED</code>). Go: <code>client.CancelWorkflow(ctx, id, reason)</code>; TypeScript
+      <code>worker.cancel(id, reason)</code>; Python <code>worker.cancel(id, reason)</code>; Java
+      <code>worker.cancel(id, reason)</code>; HTTP <code>POST /api/workflows/{id}/cancel</code>; the
+      dashboard's <em>Cancel</em> button.
+    </p>
+    <p>
+      <strong>Workers are told.</strong> When an activity's step is cancelled or its workflow
+      finishes, the worker's next heartbeat or completion is refused with a cancellation (HTTP
+      <code>409</code> with <code>"cancelled": true</code>; gRPC <code>FAILED_PRECONDITION</code>
+      with an <code>ActivityCancelled</code> detail). Go: the activity's ctx ends with cause
+      <code>worker.ErrActivityCancelled</code>. TypeScript: <code>task.signal</code> aborts with a
+      <code>CancelledFailure</code>. Python: the <code>cancelled</code> and <code>lease_lost</code>
+      events are set. A long activity should heartbeat (the SDKs do it for you) and stop when told.
     </p>
 
     <h2 id="schedules">Schedules</h2>
@@ -826,6 +866,7 @@ new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORK
         <tr><td><code>ListWorkflows</code></td><td>Summaries of all workflows, with an optional status filter.</td></tr>
         <tr><td><code>GetWorkflow</code></td><td>One workflow in full, including every step.</td></tr>
         <tr><td><code>TerminateWorkflow</code></td><td>Operator kill switch. Durably fails the workflow and fences any worker still holding its task.</td></tr>
+        <tr><td><code>CancelWorkflow</code></td><td>Ends a workflow as <code>CANCELLED</code>. Workers running its activities are refused with an <code>ActivityCancelled</code> detail at their next heartbeat or completion.</td></tr>
       </tbody>
     </table>
 
@@ -923,6 +964,12 @@ DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
 {"reason":"stuck on a bad payload"}
 → 200 {"status":"terminated"}</code></pre>
 
+    <h3>Cancel a workflow</h3>
+    <pre data-lang="sh"><code>POST /api/workflows/{id}/cancel
+{"reason":"customer cancelled the order"}
+→ 200 {"status":"cancelled"}</code></pre>
+    <p>A finished workflow returns <code>409</code>. See <a href="#cancellation">Cancellation</a>.</p>
+
     <h3>Health</h3>
     <pre data-lang="sh"><code>GET /api/health → 200 {"status":"ok","version":"...","uptime_seconds":1234,
                         "workflows_active":2,"task_queue_depth":0,
@@ -951,12 +998,13 @@ DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
       <thead><tr><th>Metric</th><th>Type</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>workflowd_workflows_started_total</code></td><td>counter</td><td>Executions started</td></tr>
-        <tr><td><code>workflowd_workflows_finished_total{status}</code></td><td>counter</td><td>Terminal outcomes: <code>completed</code>, <code>failed</code>, <code>terminated</code>, <code>timed_out</code></td></tr>
+        <tr><td><code>workflowd_workflows_finished_total{status}</code></td><td>counter</td><td>Terminal outcomes: <code>completed</code>, <code>failed</code>, <code>terminated</code>, <code>timed_out</code>, <code>cancelled</code></td></tr>
         <tr><td><code>workflowd_workflows_active</code></td><td>gauge</td><td>Running or waiting right now</td></tr>
         <tr><td><code>workflowd_tasks_dispatched_total</code></td><td>counter</td><td>Tasks handed to workers (including retries)</td></tr>
         <tr><td><code>workflowd_task_results_total{result}</code></td><td>counter</td><td>Worker-reported results: <code>completed</code> / <code>failed</code></td></tr>
         <tr><td><code>workflowd_leases_expired_total</code></td><td>counter</td><td>Tasks reclaimed from dead workers</td></tr>
         <tr><td><code>workflowd_retries_scheduled_total</code></td><td>counter</td><td>Retries armed after a failed attempt</td></tr>
+        <tr><td><code>workflowd_steps_cancelled_total</code></td><td>counter</td><td>Open steps workflow code cancelled</td></tr>
         <tr><td><code>workflowd_activity_timeouts_total{timeout}</code></td><td>counter</td><td>Attempts past their <code>start_to_close</code>, steps past their <code>schedule_to_close</code></td></tr>
         <tr><td><code>workflowd_signals_received_total</code></td><td>counter</td><td>Signals durably recorded</td></tr>
         <tr><td><code>workflowd_timers_fired_total</code></td><td>counter</td><td>Durable timers that reached their deadline</td></tr>

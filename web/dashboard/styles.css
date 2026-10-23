@@ -322,6 +322,7 @@ tr[data-s="WAITING"]    { --rail: var(--ochre); }
 tr[data-s="COMPLETED"]  { --rail: var(--leaf); }
 tr[data-s="FAILED"]     { --rail: var(--madder); }
 tr[data-s="TERMINATED"] { --rail: var(--walnut); }
+tr[data-s="CANCELLED"]  { --rail: var(--slate); }
 tr[data-s="TIMED_OUT"], tr[data-s="UNKNOWN"] { --rail: var(--slate); }
 
 .empty td { text-align: center; color: var(--ink-soft); padding: 42px 16px !important; cursor: default; font-style: italic; font-family: var(--serif); font-size: 14px; }
@@ -339,7 +340,7 @@ tr[data-s="TIMED_OUT"], tr[data-s="UNKNOWN"] { --rail: var(--slate); }
 .badge[data-s="COMPLETED"]  { background: var(--leaf-wash);    color: var(--leaf); }
 .badge[data-s="FAILED"]     { background: var(--madder-wash);  color: var(--madder); }
 .badge[data-s="TERMINATED"] { background: var(--walnut-wash);  color: var(--walnut); }
-.badge[data-s="TIMED_OUT"], .badge[data-s="UNKNOWN"] { background: var(--slate-wash); color: var(--slate); }
+.badge[data-s="TIMED_OUT"], .badge[data-s="UNKNOWN"], .badge[data-s="CANCELLED"] { background: var(--slate-wash); color: var(--slate); }
 
 /* ---------- drawer: the inspection bench ---------- */
 
@@ -449,6 +450,10 @@ pre.err { background: var(--madder-wash); border-color: transparent; color: var(
   background: none;
   border: 2px dashed var(--ochre);
   opacity: .85;
+}
+.pick[data-s="CANCELLED"] .pick-thread {
+  background: repeating-linear-gradient(90deg, var(--slate) 0 3px, transparent 3px 8px);
+  opacity: .55;
 }
 .pick[data-s="FAILED"] .pick-thread {
   background: repeating-linear-gradient(-55deg, var(--madder) 0 6px, transparent 6px 9px);

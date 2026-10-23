@@ -196,3 +196,64 @@ func TestHTTPTimeouts(t *testing.T) {
 		t.Fatalf("heartbeat after the workflow timed out: HTTP %d, want 409", code)
 	}
 }
+
+// TestHTTPCancellation: POST /cancel ends a workflow as CANCELLED once; a
+// cancel_step command closes a step; a worker turned away for a cancelled
+// step gets a 409 that says "cancelled".
+func TestHTTPCancellation(t *testing.T) {
+	h := newAPIHarness(t)
+	if code, body := h.do(t, "POST", "/api/workflow-types", `{"workflow_types":["RemoteC"],"worker_id":"w"}`); code != http.StatusOK {
+		t.Fatalf("register: HTTP %d %v", code, body)
+	}
+	start := func() string {
+		code, body := h.do(t, "POST", "/api/workflows", `{"type":"RemoteC"}`)
+		if code != http.StatusCreated {
+			t.Fatalf("start: HTTP %d %v", code, body)
+		}
+		return body["workflow_id"].(string)
+	}
+	complete := func(id string, cmds string) {
+		t.Helper()
+		_, task := h.do(t, "GET", "/api/workflow-tasks?types=RemoteC", "")
+		if code, body := h.do(t, "POST", "/api/workflow-tasks/complete",
+			fmt.Sprintf(`{"workflow_id":%q,"task_token":%q,"commands":%s}`, id, task["task_token"], cmds)); code != http.StatusOK {
+			t.Fatalf("complete %s: HTTP %d %v", cmds, code, body)
+		}
+	}
+
+	id := start()
+	complete(id, `[{"type":"schedule_activity","step_name":"work","sequence":1},{"type":"await_signal","step_name":"gate","sequence":2,"signal_name":"go"}]`)
+	_, act := h.do(t, "GET", "/api/activity-tasks?activities=work", "")
+	if code, body := h.do(t, "POST", "/api/workflows/"+id+"/signal", `{"name":"go"}`); code != http.StatusOK {
+		t.Fatalf("signal: HTTP %d %v", code, body)
+	}
+	complete(id, `[{"type":"cancel_step","step_name":"work","sequence":1,"reason":"lost the race"},{"type":"start_timer","step_name":"t","sequence":3,"delay_ms":60000}]`)
+	beat := fmt.Sprintf(`{"workflow_id":%q,"lease_token":%q,"worker_id":"w"}`, id, act["lease_token"])
+	if code, body := h.do(t, "POST", "/api/activity-tasks/heartbeat", beat); code != http.StatusConflict || body["cancelled"] != true {
+		t.Fatalf("heartbeat for a cancelled step: HTTP %d %v, want 409 cancelled", code, body)
+	}
+	if code, body := h.do(t, "POST", "/api/workflows/"+id+"/cancel", `{"reason":"not needed"}`); code != http.StatusOK || body["status"] != "cancelled" {
+		t.Fatalf("cancel: HTTP %d %v", code, body)
+	}
+	_, wf := h.do(t, "GET", "/api/workflows/"+id, "")
+	steps := wf["steps"].([]any)
+	if wf["status"] != "CANCELLED" || wf["error"] != "cancelled: not needed" ||
+		steps[0].(map[string]any)["status"] != "CANCELLED" || steps[0].(map[string]any)["error"] != "cancelled: lost the race" ||
+		steps[2].(map[string]any)["status"] != "CANCELLED" {
+		t.Fatalf("workflow %v", wf)
+	}
+	if code, _ := h.do(t, "POST", "/api/workflows/"+id+"/cancel", ""); code != http.StatusConflict {
+		t.Fatalf("second cancel: HTTP %d, want 409", code)
+	}
+	if code, body := h.do(t, "GET", "/api/workflows?status=CANCELLED", ""); code != http.StatusOK || body["total"] != float64(1) {
+		t.Fatalf("list CANCELLED: HTTP %d %v", code, body)
+	}
+
+	// A worker whose lease merely expired is told so, without "cancelled".
+	other := start()
+	complete(other, `[{"type":"schedule_activity","step_name":"work","sequence":1}]`)
+	lost := fmt.Sprintf(`{"workflow_id":%q,"lease_token":"not-a-token","worker_id":"w"}`, other)
+	if code, body := h.do(t, "POST", "/api/activity-tasks/heartbeat", lost); code != http.StatusConflict || body["cancelled"] != false {
+		t.Fatalf("heartbeat with an unknown token: HTTP %d %v, want 409 not cancelled", code, body)
+	}
+}

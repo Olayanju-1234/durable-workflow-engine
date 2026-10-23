@@ -32,7 +32,7 @@ More of the API:
 ```python
 # Run activities in parallel; race a signal against a deadline.
 stock, price = ctx.wait_all(ctx.activity_async("stock", sku), ctx.activity_async("price", sku))
-late = ctx.wait_any(ctx.wait_for_signal_async("reply", "approved"), ctx.sleep_async("sla", 3600)) == 1
+late = ctx.wait_any(ctx.wait_for_signal_async("reply", "approved"), ctx.sleep_async("sla", 3600), cancel_rest=True) == 1
 
 # Retry a failed attempt before the workflow sees the error; JSON and bytes payloads.
 receipt = ctx.activity("charge", {"amount": 42}, retry=RetryPolicy(max_attempts=3, initial_backoff=0.5), decode="json")

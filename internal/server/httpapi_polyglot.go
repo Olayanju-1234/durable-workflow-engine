@@ -188,6 +188,8 @@ type commandDTO struct {
 	// schedule_activity: zero or absent means no limit.
 	StartToCloseTimeoutMs    int64 `json:"start_to_close_timeout_ms,omitempty"`
 	ScheduleToCloseTimeoutMs int64 `json:"schedule_to_close_timeout_ms,omitempty"`
+	// cancel_step: why the code no longer wants the step (optional).
+	Reason string `json:"reason,omitempty"`
 	// record_marker: "version" or "side_effect", and the recorded value.
 	Marker     string  `json:"marker,omitempty"`
 	Data       string  `json:"data,omitempty"`
@@ -311,6 +313,10 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 		return &WorkflowCommand{Command: &WorkflowCommand_FailWorkflow{
 			FailWorkflow: &FailWorkflowCommand{Error: c.Error},
 		}}, nil
+	case "cancel_step":
+		return &WorkflowCommand{Command: &WorkflowCommand_CancelStep{
+			CancelStep: &CancelStepCommand{StepName: c.StepName, Sequence: c.Sequence, Reason: c.Reason},
+		}}, nil
 	default:
 		return nil, fmt.Errorf("unknown command type %q", c.Type)
 	}
@@ -383,15 +389,16 @@ func (a *HTTPAPI) completeActivityTask(w http.ResponseWriter, r *http.Request) {
 			a.writeNotLeader(w, err)
 			return
 		}
-		// Lost lease, or a result that doesn't match the in-flight step.
-		writeError(w, http.StatusConflict, err)
+		// Lost lease, a cancelled step, or a result that doesn't match the in-flight step.
+		writeLeaseConflict(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
 }
 
 // heartbeatActivityTask extends an activity's lease. 409 means the lease is
-// gone (the task was reassigned or the workflow ended): stop the work.
+// gone: stop the work. "cancelled": true says the work is no longer wanted at
+// all (the step was cancelled or the workflow ended), not just reassigned.
 func (a *HTTPAPI) heartbeatActivityTask(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		WorkflowID string `json:"workflow_id"`
@@ -411,10 +418,19 @@ func (a *HTTPAPI) heartbeatActivityTask(w http.ResponseWriter, r *http.Request) 
 			a.writeNotLeader(w, err)
 			return
 		}
-		writeError(w, http.StatusConflict, err)
+		writeLeaseConflict(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "extended"})
+}
+
+// writeLeaseConflict answers 409 for a worker that must stop, saying whether
+// the work was cancelled. SDKs that predate "cancelled" still stop on the 409.
+func writeLeaseConflict(w http.ResponseWriter, err error) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":     err.Error(),
+		"cancelled": errors.Is(err, ErrActivityCancelled),
+	})
 }
 
 // base64Twin is a payload's base64 form when its bytes are not valid UTF-8,

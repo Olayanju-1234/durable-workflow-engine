@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -91,6 +92,10 @@ type replayContext struct {
 	latestResolved int64 // the newest step result in history (event id)
 	observed       int64 // the newest step result the code has seen
 
+	// Steps this replay cancelled that history does not show closed yet, in
+	// cancel order: they count as resolved, after every recorded result.
+	cancelled map[int64]int64
+
 	suspended bool
 	decisions []state.Decision
 	err       error
@@ -103,6 +108,7 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 		resolvedAt: make(map[int64]int64),
 		now:        events[0].GetTimestamp(),
 		versions:   make(map[string]workflow.Version),
+		cancelled:  make(map[int64]int64),
 	}
 	for _, ev := range events {
 		var seq int64
@@ -110,6 +116,9 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 		case *history.HistoryEvent_StepCompleted:
 			seq = a.StepCompleted.GetSequence()
 		case *history.HistoryEvent_StepFailed:
+			if a.StepFailed.GetCancelled() {
+				continue // the code cancelled it; it brings no news
+			}
 			seq = a.StepFailed.GetSequence()
 		case *history.HistoryEvent_TimerFired:
 			seq = a.TimerFired.GetSequence()
@@ -121,7 +130,9 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 		c.resolvedAt[seq] = ev.GetTimestamp() // a retried step keeps its last result's time
 	}
 	for i := range st.Steps {
-		c.latestResolved = max(c.latestResolved, st.Steps[i].ResolvedEventID)
+		if st.Steps[i].Status != state.StepCancelled {
+			c.latestResolved = max(c.latestResolved, st.Steps[i].ResolvedEventID)
+		}
 	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -253,12 +264,10 @@ func (c *replayContext) WaitAny(fs ...workflow.Future) int {
 	c.live()
 	best, bestID := -1, int64(0)
 	for i, f := range fs {
-		ff, ok := f.(*future)
-		if !ok || ff.c != c {
-			panic("workflow: WaitAny takes futures from this workflow's Context")
-		}
-		if rec := c.st.Step(ff.seq); rec != nil && !rec.Open() && (best < 0 || rec.ResolvedEventID < bestID) {
-			best, bestID = i, rec.ResolvedEventID
+		ff := c.own(f, "WaitAny")
+		id, ok := c.resolvedID(ff.seq)
+		if ok && (best < 0 || id < bestID) {
+			best, bestID = i, id
 		}
 	}
 	if best < 0 {
@@ -266,6 +275,47 @@ func (c *replayContext) WaitAny(fs ...workflow.Future) int {
 	}
 	c.observe(fs[best].(*future).seq)
 	return best
+}
+
+// resolvedID orders a step's result for WaitAny: its event id, or, for a step
+// this replay cancelled, a place after every recorded result (the cancel will
+// be recorded next, ahead of anything that happens later).
+func (c *replayContext) resolvedID(seq int64) (int64, bool) {
+	if rec := c.st.Step(seq); rec != nil && !rec.Open() {
+		return rec.ResolvedEventID, true
+	}
+	if n, ok := c.cancelled[seq]; ok {
+		return math.MaxInt64/2 + n, true
+	}
+	return 0, false
+}
+
+func (c *replayContext) own(f workflow.Future, op string) *future {
+	ff, ok := f.(*future)
+	if !ok || ff.c != c {
+		panic("workflow: " + op + " takes futures from this workflow's Context")
+	}
+	return ff
+}
+
+func (c *replayContext) CancelStep(f workflow.Future) {
+	c.live()
+	ff := c.own(f, "CancelStep")
+	if _, done := c.resolvedID(ff.seq); done {
+		return // it has a result (or is already cancelled): nothing to do
+	}
+	name := ""
+	if rec := c.st.Step(ff.seq); rec != nil {
+		name = rec.Name
+	} else {
+		for _, d := range c.pending {
+			if d.Sequence == ff.seq {
+				name = d.StepName
+			}
+		}
+	}
+	c.cancelled[ff.seq] = int64(len(c.cancelled) + 1)
+	c.pending = append(c.pending, state.Decision{Type: state.DecideCancelStep, StepName: name, Sequence: ff.seq})
 }
 
 func (c *replayContext) GetVersion(changeID string, minSupported, maxSupported workflow.Version) workflow.Version {
@@ -361,7 +411,7 @@ func kindOf(t state.DecisionType) state.StepKind {
 // observe moves the workflow clock to a step's result as the code sees it.
 func (c *replayContext) observe(seq int64) {
 	c.now = max(c.now, c.resolvedAt[seq])
-	if rec := c.st.Step(seq); rec != nil {
+	if rec := c.st.Step(seq); rec != nil && rec.Status != state.StepCancelled {
 		c.observed = max(c.observed, rec.ResolvedEventID)
 	}
 }
@@ -378,8 +428,14 @@ func (f *future) Get() ([]byte, error) {
 	c := f.c
 	c.live()
 	rec := c.st.Step(f.seq)
+	if _, ok := c.cancelled[f.seq]; ok && (rec == nil || rec.Open()) {
+		return nil, workflow.ErrCancelled
+	}
 	if rec == nil || rec.Open() {
 		c.block()
+	}
+	if rec.Status == state.StepCancelled {
+		return nil, fmt.Errorf("%w: %s", workflow.ErrCancelled, rec.Error)
 	}
 	c.observe(f.seq)
 	if rec.Status == state.StepFailed {

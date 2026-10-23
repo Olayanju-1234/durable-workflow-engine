@@ -63,6 +63,25 @@ worker.activity('ts-stall', (_input, task) => new Promise((_resolve, reject) => 
   });
 }));
 worker.workflow('TsForever', async (ctx) => ctx.waitForSignal('never', 'never-sent'));
+// Cancellation: liftoff's custom-step race with the loser cancelled, so a late
+// callback reaches the next wait; and a cancelled workflow tells its activity.
+worker.workflow('TsRace', async (ctx) => {
+  const callback = ctx.waitForSignal('await-callback', 'callback');
+  const deadline = ctx.sleep('deadline', 100);
+  if ((await ctx.waitAny([callback, deadline], { cancelRest: true })) === 0) return 'called back';
+  return `late: ${await ctx.waitForSignal('late-callback', 'callback')}`;
+});
+let cancelReason = null;
+let provisionStarted;
+const provisioning = new Promise((r) => { provisionStarted = r; });
+worker.workflow('TsProvision', async (ctx) => ctx.activity('ts-provision'));
+worker.activity('ts-provision', (_input, task) => new Promise((_resolve, reject) => {
+  provisionStarted();
+  task.signal.addEventListener('abort', () => {
+    cancelReason = task.signal.reason;
+    reject(task.signal.reason);
+  });
+}));
 worker.workflow('TsAfterRestart', async (ctx) => ctx.activity('ts-flaky', { n: 41 }, { as: 'json' }));
 
 worker.activity('ts-flaky', async (order) => {
@@ -113,6 +132,30 @@ if (par.output !== '{"parts":[10,20,30],"winner":1}') fail(`parallel: output ${p
 const bounded = await waitDone(await worker.startWorkflow('TsTimeouts'));
 if (!/^failed: .*start-to-close/.test(bounded.output) || !stallAborted) {
   fail(`timeouts: output ${bounded.output}, aborted=${stallAborted}; want the attempt to time out and abort`);
+}
+const raceId = await worker.startWorkflow('TsRace');
+for (let i = 0; ; i++) {
+  const wf = await worker.describe(raceId);
+  if (wf.steps.some((s) => s.step_name === 'late-callback')) break;
+  if (i > 100) fail('race: never reached the second wait');
+  await new Promise((r) => setTimeout(r, 50));
+}
+await worker.signal(raceId, 'callback', 'hello');
+const race = await waitDone(raceId);
+const raceSteps = race.steps.map((s) => `${s.step_name}=${s.status}`).join(' ');
+if (race.output !== 'late: hello' || raceSteps !== 'await-callback=CANCELLED deadline=COMPLETED late-callback=COMPLETED') {
+  fail(`race: output ${race.output}, steps ${raceSteps}`);
+}
+const provisionId = await worker.startWorkflow('TsProvision');
+await provisioning;
+await worker.cancel(provisionId, 'tenant deleted');
+for (let i = 0; cancelReason === null; i++) {
+  if (i > 100) fail('the cancelled activity was never told');
+  await new Promise((r) => setTimeout(r, 50));
+}
+const provisioned = await worker.describe(provisionId);
+if (provisioned.status !== 'CANCELLED' || cancelReason.name !== 'CancelledFailure') {
+  fail(`cancel: status ${provisioned.status}, abort reason ${cancelReason?.name}: ${cancelReason?.message}`);
 }
 const foreverId = await worker.startWorkflow('TsForever', '', '', { executionTimeoutMs: 300 });
 for (let i = 0; ; i++) {

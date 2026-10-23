@@ -42,6 +42,11 @@ service WorkflowService {
   rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
   rpc GetWorkflow(GetWorkflowRequest) returns (GetWorkflowResponse);
   rpc TerminateWorkflow(TerminateWorkflowRequest) returns (TerminateWorkflowResponse);
+  // CancelWorkflow ends a running workflow as CANCELLED: the expected outcome
+  // when its work is no longer wanted (terminate is the operator's emergency
+  // stop). Workers still running its activities learn it from their next
+  // heartbeat or completion, which fail with an ActivityCancelled detail.
+  rpc CancelWorkflow(CancelWorkflowRequest) returns (CancelWorkflowResponse);
 
   // ---- Polyglot workflow execution -------------------------------------
   //
@@ -204,6 +209,17 @@ message RecordMarkerCommand {
   bytes data = 4;
 }
 
+// CancelStepCommand: workflow code no longer wants a step that is still open
+// (the loser of a race, say). The engine records it as cancelled: a timer stops
+// mattering, a signal wait stops consuming signals, and an activity's worker
+// is told to stop. A step that already has a result is left alone. It refers
+// to an existing step by sequence and takes no sequence of its own.
+message CancelStepCommand {
+  string step_name = 1;
+  int64 sequence = 2;
+  string reason = 3;
+}
+
 message CompleteWorkflowCommand {
   bytes output = 1;
 }
@@ -220,6 +236,7 @@ message WorkflowCommand {
     CompleteWorkflowCommand complete_workflow = 4;
     FailWorkflowCommand fail_workflow = 5;
     RecordMarkerCommand record_marker = 6;
+    CancelStepCommand cancel_step = 7;
   }
 }
 
@@ -252,6 +269,8 @@ enum WorkflowStatus {
   WORKFLOW_STATUS_FAILED = 4;
   WORKFLOW_STATUS_TIMED_OUT = 5;
   WORKFLOW_STATUS_TERMINATED = 6;
+  // Cancelled by a client; on disk a WorkflowFailed event with cancelled set.
+  WORKFLOW_STATUS_CANCELLED = 7;
 }
 
 message StartWorkflowRequest {
@@ -327,6 +346,14 @@ message HeartbeatRequest {
 
 message HeartbeatResponse {}
 
+// ActivityCancelled is attached as a status detail when Heartbeat or
+// CompleteTask turns a worker away because its step was cancelled or its
+// workflow finished, rather than because its lease was lost. Either way the
+// worker should stop; this says the work is no longer wanted at all.
+message ActivityCancelled {
+  string reason = 1;
+}
+
 message SignalWorkflowRequest {
   string workflow_id = 1;
   string signal_name = 2;
@@ -375,7 +402,8 @@ message StepInfo {
   int64 sequence = 2;
   // "ACTIVITY", "TIMER", "SIGNAL", or "MARKER".
   string kind = 3;
-  // "SCHEDULED", "COMPLETED", or "FAILED".
+  // "SCHEDULED", "COMPLETED", "FAILED" or "CANCELLED". A step still open when
+  // its workflow finished is presented as CANCELLED: nothing will use it.
   string status = 4;
   // How many times this step has been scheduled (>1 means it was retried).
   int32 attempts = 5;
@@ -403,3 +431,11 @@ message TerminateWorkflowRequest {
 }
 
 message TerminateWorkflowResponse {}
+
+message CancelWorkflowRequest {
+  string workflow_id = 1;
+  // Recorded in the workflow's terminal event.
+  string reason = 2;
+}
+
+message CancelWorkflowResponse {}

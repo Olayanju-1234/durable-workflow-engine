@@ -69,6 +69,7 @@ __all__ = [
     "RetryPolicy",
     "WorkflowFailure",
     "ActivityFailure",
+    "CancelledFailure",
     "DEFAULT_VERSION",
     "decide",
 ]
@@ -87,6 +88,14 @@ class ActivityFailure(Exception):
     """Raised when an activity recorded a failure. Catch it to compensate."""
 
     def __init__(self, step_name: str, message: str):
+        super().__init__(message)
+        self.step_name = step_name
+
+
+class CancelledFailure(Exception):
+    """Raised by a cancelled step's ``result()``. Catch it to carry on without it."""
+
+    def __init__(self, step_name: str, message: str = "cancelled"):
         super().__init__(message)
         self.step_name = step_name
 
@@ -182,14 +191,40 @@ class Future:
 
     def _recorded(self) -> Optional[dict]:
         rec = self._ctx._steps[self._seq - 1] if self._seq <= len(self._ctx._steps) else None
-        if rec is not None and rec.get("status") in ("COMPLETED", "FAILED"):
+        if rec is not None and rec.get("status") in ("COMPLETED", "FAILED", "CANCELLED"):
             return rec
         return None  # not started yet, in flight, or being retried
+
+    def _resolved_id(self) -> Optional[float]:
+        """Orders this step's result for wait_any: its event id, or for a step
+        this replay cancelled, a place after every recorded result."""
+        rec = self._recorded()
+        if rec is not None:
+            return rec.get("resolved_event_id", 0)
+        n = self._ctx._cancelled.get(self._seq)
+        return None if n is None else 2**62 + n
+
+    def cancel(self, reason: str = "") -> None:
+        """Cancel the step if it has no result yet: a timer stops mattering, a
+        signal wait stops taking signals (a later wait for the same signal gets
+        the next one), and an activity's worker is told to stop. ``result()``
+        then raises CancelledFailure."""
+        if self._resolved_id() is not None:
+            return
+        self._ctx._cancelled[self._seq] = len(self._ctx._cancelled) + 1
+        command = {"type": "cancel_step", "step_name": self._name, "sequence": self._seq}
+        if reason:
+            command["reason"] = reason
+        self._ctx._pending.append(command)
 
     def result(self) -> Any:
         rec = self._recorded()
         if rec is None:
+            if self._seq in self._ctx._cancelled:
+                raise CancelledFailure(self._name)
             raise _Yield()
+        if rec.get("status") == "CANCELLED":
+            raise CancelledFailure(self._name, rec.get("error") or "cancelled")
         if rec.get("status") == "FAILED":
             raise ActivityFailure(self._name, rec.get("error") or "activity failed")
         return read_payload(rec, "output", self._decode)
@@ -207,6 +242,7 @@ class Context:
         self._next = 0
         self._versions: Dict[str, int] = {}
         self._pending: List[dict] = []  # new commands, in sequence order
+        self._cancelled: Dict[int, int] = {}  # seq -> cancel order, for steps cancelled in this replay
 
     def input_as(self, decode: str = "text") -> Any:
         """The start input decoded as "text" (same as ctx.input), "json" or "bytes"."""
@@ -287,23 +323,30 @@ class Context:
         """Wait for every future and return their results, in order."""
         return [f.result() for f in futures]
 
-    def wait_any(self, *futures: Future) -> int:
+    def wait_any(self, *futures: Future, cancel_rest: bool = False) -> int:
         """Wait until one of the futures has a result and return its index. When
         several have one, the step history recorded first wins, so every replay
         agrees::
 
             reply = ctx.wait_for_signal_async("reply", "approved")
             deadline = ctx.sleep_async("deadline", 48 * 3600)
-            if ctx.wait_any(reply, deadline) == 1:
+            if ctx.wait_any(reply, deadline, cancel_rest=True) == 1:
                 ...  # timed out
+
+        ``cancel_rest`` cancels the others once one wins (Future.cancel): use it
+        when nothing will wait on the losers again.
         """
-        best, best_id = -1, 0
+        best, best_id = -1, 0.0
         for i, f in enumerate(futures):
-            rec = f._recorded()
-            if rec is not None and (best < 0 or rec.get("resolved_event_id", 0) < best_id):
-                best, best_id = i, rec.get("resolved_event_id", 0)
+            rid = f._resolved_id()
+            if rid is not None and (best < 0 or rid < best_id):
+                best, best_id = i, rid
         if best < 0:
             raise _Yield()
+        if cancel_rest:
+            for i, f in enumerate(futures):
+                if i != best:
+                    f.cancel("lost a wait_any race")
         return best
 
     def get_version(self, change_id: str, min_supported: int, max_supported: int) -> int:
@@ -540,8 +583,9 @@ class Worker:
     def activity(self, step_name: str, *, decode: str = "text"):
         """Register an activity. fn(input) gets the input decoded per
         ``decode``; fn(input, info) also gets the task, whose ``lease_lost``
-        event is set if the engine reassigns the work or the attempt's
-        start-to-close timeout passes."""
+        event is set when the work should stop: the engine reassigned it, the
+        attempt's start-to-close timeout passed, or it was cancelled (then
+        ``cancelled`` is set too)."""
 
         def wrap(fn):
             self.activities[step_name] = fn
@@ -595,6 +639,14 @@ class Worker:
             "POST",
             f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}/signal",
             _put_payload(body, "payload", payload),
+        )
+
+    def cancel(self, workflow_id: str, reason: str = "") -> None:
+        """End a running workflow as CANCELLED. Workers running its activities
+        are told to stop (the activity's ``lease_lost`` and ``cancelled`` events
+        are set)."""
+        self.conn.request(
+            "POST", f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}/cancel", {"reason": reason}
         )
 
     def describe(self, workflow_id: str) -> dict:
@@ -658,7 +710,8 @@ class Worker:
         step = task["step_name"]
         fn = self.activities.get(step)
         lease_lost = threading.Event()
-        stop_beats = self._heartbeat(task, lease_lost)
+        cancelled = threading.Event()
+        stop_beats = self._heartbeat(task, lease_lost, cancelled)
         # The engine fails the attempt at its start-to-close timeout: tell the activity too.
         limit = (task.get("start_to_close_timeout_ms") or 0) / 1000.0
         timer = threading.Timer(limit, lease_lost.set) if limit > 0 else None
@@ -676,7 +729,7 @@ class Worker:
                 raise RuntimeError(f'no activity registered for step "{step}"')
             arg = read_payload(task, "input", self._activity_decode.get(step, "text"))
             if self._activity_takes_info.get(step, False):
-                out = fn(arg, dict(task, lease_lost=lease_lost))
+                out = fn(arg, dict(task, lease_lost=lease_lost, cancelled=cancelled))
             else:
                 out = fn(arg)
             _put_payload(result, "output", out)
@@ -692,9 +745,10 @@ class Worker:
             if getattr(err, "status", None) != 409:  # lost lease: task was reassigned
                 print(f"[workflowd] activity complete failed: {err}")
 
-    def _heartbeat(self, task: dict, lease_lost: threading.Event) -> Callable[[], None]:
+    def _heartbeat(self, task: dict, lease_lost: threading.Event, cancelled: threading.Event) -> Callable[[], None]:
         """Extend the lease every third of its duration until stopped; a 409
-        means the lease is gone, so lease_lost is set."""
+        means the lease is gone, so lease_lost is set, and cancelled too when
+        the engine says the work is no longer wanted."""
         every = (task.get("lease_duration_ms") or 0) / 3000.0
         if every <= 0:
             return lambda: None
@@ -707,6 +761,8 @@ class Worker:
                     self.conn.request("POST", "/api/activity-tasks/heartbeat", body, attempts=2)
                 except Exception as err:
                     if getattr(err, "status", None) == 409:
+                        if getattr(err, "body", {}).get("cancelled"):
+                            cancelled.set()
                         lease_lost.set()
                         return
 

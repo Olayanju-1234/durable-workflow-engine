@@ -440,3 +440,46 @@ func TestTimeoutsReplay(t *testing.T) {
 		t.Fatalf("state %+v step %+v", st, s)
 	}
 }
+
+// TestCancelledSteps: a cancel closes an open step of any kind as CANCELLED,
+// a cancelled signal wait takes no signal, and a cancelled workflow is
+// CANCELLED (an older binary reads both as failures).
+func TestCancelledSteps(t *testing.T) {
+	cancel := func(name string, seq int64) *history.HistoryEvent {
+		ev := failed(name, seq, "cancelled: lost the race")
+		ev.GetStepFailed().Cancelled = true
+		return ev
+	}
+	wait := func(name string, seq int64) *history.HistoryEvent {
+		ev := scheduled(name, seq, "")
+		ev.GetStepScheduled().AwaitsSignal, ev.GetStepScheduled().SignalName = true, "callback"
+		return ev
+	}
+	st, err := Reconstruct(withIDs(
+		started("T", ""),
+		wait("reply", 1),
+		timerStarted("deadline", 2, 1, ""),
+		timerFired("deadline", 2),
+		cancel("reply", 1),
+		wait("late", 3),
+		signalReceived("callback", "hello"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := st.Step(1); s.Status != StepCancelled || s.Open() || s.ResolvedEventID != 5 || s.Error != "cancelled: lost the race" {
+		t.Fatalf("reply %+v, want CANCELLED", s)
+	}
+	if w, payload, ok := st.NextSignalDelivery(); !ok || w.Name != "late" || string(payload) != "hello" {
+		t.Fatalf("delivery to %v %q %v, want the signal to go to the wait still open", w, payload, ok)
+	}
+	if _, err := Reconstruct(withIDs(started("T", ""), timerStarted("t", 1, 1, ""), timerFired("t", 1), cancel("t", 1))); err == nil {
+		t.Fatal("a cancel for a step with a result was accepted")
+	}
+	end := wfFailed("cancelled: no longer needed")
+	end.GetWorkflowFailed().Cancelled = true
+	st, err = Reconstruct(withIDs(started("T", ""), end))
+	if err != nil || st.Status != StatusCancelled || !st.Status.IsTerminal() || st.Status.String() != "CANCELLED" {
+		t.Fatalf("status %v (%v), want CANCELLED", st.Status, err)
+	}
+}

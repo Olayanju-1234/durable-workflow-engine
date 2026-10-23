@@ -16,12 +16,13 @@ const (
 	StatusFailed     Status = "FAILED"     // workflow code returned an error
 	StatusTerminated Status = "TERMINATED" // ended by TerminateWorkflow
 	StatusTimedOut   Status = "TIMED_OUT"  // its execution timeout passed (WithExecutionTimeout)
+	StatusCancelled  Status = "CANCELLED"  // ended by CancelWorkflow
 	StatusUnknown    Status = "UNKNOWN"    // the history could not be read
 )
 
 // Done reports whether the workflow has finished, successfully or not.
 func (s Status) Done() bool {
-	return s == StatusCompleted || s == StatusFailed || s == StatusTerminated || s == StatusTimedOut
+	return s == StatusCompleted || s == StatusFailed || s == StatusTerminated || s == StatusTimedOut || s == StatusCancelled
 }
 
 // WorkflowDescription is a workflow as replayed from its history.
@@ -42,9 +43,11 @@ type WorkflowDescription struct {
 type Step struct {
 	Name     string
 	Sequence int64
-	Kind     string // "ACTIVITY", "TIMER" or "SIGNAL"
-	Status   string // "SCHEDULED", "COMPLETED" or "FAILED"
-	Attempts int    // more than 1 means the engine retried it
+	Kind     string // "ACTIVITY", "TIMER", "SIGNAL" or "MARKER"
+	// "SCHEDULED", "COMPLETED", "FAILED" or "CANCELLED" (cancelled by the
+	// workflow code, or still open when the workflow finished).
+	Status   string
+	Attempts int // more than 1 means the engine retried it
 	Output   []byte
 	Error    string
 	FireAt   time.Time // timers only
@@ -58,6 +61,7 @@ var statuses = map[server.WorkflowStatus]Status{
 	server.WorkflowStatus_WORKFLOW_STATUS_FAILED:     StatusFailed,
 	server.WorkflowStatus_WORKFLOW_STATUS_TERMINATED: StatusTerminated,
 	server.WorkflowStatus_WORKFLOW_STATUS_TIMED_OUT:  StatusTimedOut,
+	server.WorkflowStatus_WORKFLOW_STATUS_CANCELLED:  StatusCancelled,
 }
 
 func describe(r *server.GetWorkflowResponse) *WorkflowDescription {
