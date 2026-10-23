@@ -210,7 +210,7 @@ public final class Workflowd {
 
         /** Run a named activity on a worker and return its output. */
         public String activity(String name, String input) {
-            return activity(name, input, null);
+            return activity(name, input, (ActivityOptions) null);
         }
 
         /** Run a named activity, retrying a failed attempt per {@code retry} first. */
