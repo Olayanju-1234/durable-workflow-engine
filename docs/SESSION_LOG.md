@@ -23,6 +23,10 @@ n3 exited on `bind: address already in use`, and killing the leader left one liv
   close, like a refused connection) while it isn't running. `down` is separate from `cut`, so
   `heal` never revives a dead node.
 - `go test ./cmd/workflowd -run Chaos -race -count=20`: all 60 runs pass (327 s, macOS).
+- #41's own CI then hit a second flake, `TestScheduleToCloseStopsRetries` (#35): it wanted
+  exactly 3 attempts inside 300 ms, about 150 ms of slack. Now 200 ms backoff and a 1400 ms
+  deadline (the earliest a 4th attempt could start): 800 ms of slack, still fails if the
+  deadline check in `retryAfter` is removed.
 
 **Gotchas:**
 - `exec` calls `File.Fd()` on `ExtraFiles`, which switches the shared socket to blocking mode.

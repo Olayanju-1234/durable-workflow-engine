@@ -172,8 +172,8 @@ func TestScheduleToCloseStopsRetries(t *testing.T) {
 	e := timeoutEngine(t, newStore(t, t.TempDir()), map[string]workflow.Func{
 		"Flaky": func(ctx workflow.Context, in []byte) ([]byte, error) {
 			return ctx.ExecuteActivity("flaky", in,
-				workflow.WithScheduleToCloseTimeout(300*time.Millisecond),
-				workflow.WithRetryPolicy(workflow.RetryPolicy{MaxAttempts: 10, InitialBackoff: 50 * time.Millisecond}))
+				workflow.WithScheduleToCloseTimeout(1400*time.Millisecond),
+				workflow.WithRetryPolicy(workflow.RetryPolicy{MaxAttempts: 10, InitialBackoff: 200 * time.Millisecond}))
 		},
 	})
 	var calls atomic.Int32
@@ -188,9 +188,10 @@ func TestScheduleToCloseStopsRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := waitCompleted(t, e, id, 3*time.Second)
-	// Attempts at ~0, ~50 and ~150 ms; the next would start at ~350 ms.
+	// Attempts at ~0, ~200 and ~600 ms. A 4th could start at 1400 ms at the
+	// earliest, the deadline itself; the 3rd has 800 ms to spare on a slow runner.
 	if st.Status != state.StatusFailed || st.Steps[0].Attempts != 3 || calls.Load() != 3 {
-		t.Fatalf("status %s, %d attempts, %d calls; want FAILED after 3 (backoffs 50, 100, then 200 would pass 300ms)",
+		t.Fatalf("status %s, %d attempts, %d calls; want FAILED after 3 (backoffs 200, 400, then 800 reaches 1400ms)",
 			st.Status, st.Steps[0].Attempts, calls.Load())
 	}
 	if !strings.Contains(st.Error, "upstream 503") {
