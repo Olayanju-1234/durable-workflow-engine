@@ -87,6 +87,12 @@ source of truth because they travel with `git clone`; the global memory is the l
 
 ## Current status
 
+**Session 26 (correctness release, SDKs 0.2.0):** from running liftoff in production:
+timeouts (ADR-0008), cancellation of workflows and steps with workers told (ADR-0009),
+non-retryable failures and error types (ADR-0010), a TypeScript CommonJS build plus
+`ctx.now()`/`random()`/`sleepUntil()` and signal-wait timeouts (#35–#39). Demo and the private
+liftoff engine run `81c98f8`; npm + PyPI `workflowd` 0.2.0.
+
 **Session 25 (release):** the SDKs are on npm and PyPI as `workflowd` (0.1.1 latest),
 published from `release-sdks.yml` by trusted publishing on both registries; no registry
 tokens exist. Maven Central (Java) is still the owner's to set up.
@@ -162,6 +168,13 @@ then `Engine.mu`, never two workflow locks; `Engine.mu` is never held across I/O
 failed append drops the cached history (the write may have landed). The engine is the
 only writer of its histories; a closed engine refuses writes. Never wait on the index
 build while holding a workflow lock (Recover builds it).
+
+**Timeout/cancel invariants worth not breaking:** every deadline is a duration recorded next to
+the event it starts from, and recovery re-arms it; heartbeats extend the lease, never
+start-to-close; a retry is planned only if it starts before schedule-to-close; terminal reasons and
+cancelled steps are flags on existing events (older binaries keep reading them); a cancelled step
+never moves `ctx.Now()`; the retry decision lives only in `retryAfter`; the TS SDK is one module
+(`workflowd.cjs`) behind both entry points.
 
 **Parallel-step invariants worth not breaking:** a failure that will be retried is
 recorded with `will_retry` and must stay invisible to workflow code; the engine decides
