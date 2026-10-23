@@ -170,6 +170,11 @@ type Decision struct {
 	// workflow code chose, recorded on the step. Nil means the engine's.
 	Retry *RetryPolicy
 
+	// Optionally set when Type == DecideScheduleStep: the activity's timeouts
+	// (zero = none), recorded on the step.
+	StartToClose    time.Duration
+	ScheduleToClose time.Duration
+
 	// Set when Type == DecideRecordMarker: the marker kind ("version" or
 	// "side_effect"); its data rides in Output.
 	Marker string

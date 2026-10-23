@@ -14,7 +14,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from workflowd import DEFAULT_VERSION, RetryPolicy, Worker  # noqa: E402
+from workflowd import DEFAULT_VERSION, ActivityFailure, RetryPolicy, Worker  # noqa: E402
 
 follower, leader = sys.argv[1], sys.argv[2]
 
@@ -59,6 +59,33 @@ parts_barrier = threading.Barrier(3, timeout=10)
 def py_part(n):
     parts_barrier.wait()
     return n * 10
+
+
+# Timeouts: an attempt that outlives its start-to-close fails (and the
+# activity's lease_lost event is set), and a workflow past its execution timeout ends.
+@worker.workflow("PyTimeouts")
+def py_timeouts(ctx):
+    try:
+        ctx.activity("py-stall", "", start_to_close_timeout=0.3, schedule_to_close_timeout=5)
+        return "finished"
+    except ActivityFailure as err:
+        return f"failed: {err}"
+
+
+stall_stopped = threading.Event()
+
+
+@worker.activity("py-stall")
+def py_stall(_payload, info):
+    if not info["lease_lost"].wait(5):
+        return "never told to stop"
+    stall_stopped.set()
+    raise RuntimeError("stopped at the start-to-close timeout")
+
+
+@worker.workflow("PyForever")
+def py_forever(ctx):
+    return ctx.wait_for_signal("never", "never-sent")
 
 
 @worker.workflow("PyAfterRestart")
@@ -123,6 +150,20 @@ if steps["py-slow"]["attempts"] != 1:
 par = wait_done(worker.start_workflow("PyParallel"))
 if json.loads(par["output"]) != {"parts": [10, 20, 30], "winner": 1}:
     fail(f"parallel: output {par['output']}")
+
+bounded = wait_done(worker.start_workflow("PyTimeouts"))
+if "start-to-close" not in bounded["output"] or not stall_stopped.wait(2):
+    fail(f"timeouts: output {bounded['output']}, stopped={stall_stopped.is_set()}")
+forever_id = worker.start_workflow("PyForever", execution_timeout=0.3)
+for _ in range(100):
+    wf = worker.describe(forever_id)
+    if wf["status"] == "TIMED_OUT":
+        break
+    if wf["status"] not in ("RUNNING", "WAITING"):
+        fail(f"execution timeout: {wf['status']}")
+    time.sleep(0.05)
+else:
+    fail("the workflow never timed out")
 
 # A restarted engine has forgotten every registration: the worker must notice
 # and register again before this workflow can be dispatched.

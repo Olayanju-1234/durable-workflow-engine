@@ -15,9 +15,11 @@
 // path on replay fails here the way it would in production.
 //
 // A retry policy set with workflow.WithRetryPolicy is honoured in virtual
-// time. Engine-side policies (configured on the server by step name) are not
-// simulated: without a policy on the call, a failed activity returns its error
-// to the workflow at once.
+// time, and so is a schedule-to-close timeout: no retry is planned that would
+// start after it. Activities take no virtual time, so a start-to-close timeout
+// never fires here. Engine-side policies (configured on the server by step
+// name) are not simulated: without a policy on the call, a failed activity
+// returns its error to the workflow at once.
 package testsuite
 
 import (
@@ -249,7 +251,10 @@ func (e *Env) pop() (happening, bool) {
 // scheduleAttempt records an attempt of an activity and plans to run it now.
 func (e *Env) scheduleAttempt(d state.Decision) {
 	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
-		StepScheduled: &history.StepScheduledEvent{StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, RetryPolicy: d.Retry.ToProto()},
+		StepScheduled: &history.StepScheduledEvent{
+			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, RetryPolicy: d.Retry.ToProto(),
+			StartToCloseTimeoutMs: d.StartToClose.Milliseconds(), ScheduleToCloseTimeoutMs: d.ScheduleToClose.Milliseconds(),
+		},
 	}})
 	e.push(happening{at: e.now, attempt: &d})
 }
@@ -261,7 +266,8 @@ func (e *Env) runAttempt(d state.Decision) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	attempt := st.Step(d.Sequence).Attempts
+	step := st.Step(d.Sequence)
+	attempt := step.Attempts
 	ctx := context.WithValue(context.Background(), sdkctx.ActivityInfoKey{}, worker.ActivityInfo{
 		WorkflowID: WorkflowID, StepName: d.StepName, Sequence: d.Sequence,
 	})
@@ -277,6 +283,10 @@ func (e *Env) runAttempt(d state.Decision) (bool, error) {
 		policy = *d.Retry
 	}
 	willRetry := attempt < policy.MaxAttempts
+	if willRetry && step.ScheduleToClose > 0 {
+		deadline := time.Unix(0, step.ScheduledAt).Add(step.ScheduleToClose)
+		willRetry = e.now.Add(policy.Delay(attempt)).Before(deadline)
+	}
 	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 		StepFailed: &history.StepFailedEvent{StepName: d.StepName, Sequence: d.Sequence, Error: err.Error(), RetryCount: int32(attempt), WillRetry: willRetry},
 	}})

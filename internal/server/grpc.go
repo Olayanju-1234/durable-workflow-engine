@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -63,7 +64,8 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 	if err != nil {
 		return nil, err
 	}
-	id, err := e.StartWorkflow(req.GetWorkflowType(), req.GetInput(), req.GetWorkflowId())
+	id, err := e.StartWorkflow(req.GetWorkflowType(), req.GetInput(), req.GetWorkflowId(),
+		WithExecutionTimeout(time.Duration(req.GetExecutionTimeoutMs())*time.Millisecond))
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):

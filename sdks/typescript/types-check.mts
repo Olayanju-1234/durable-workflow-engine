@@ -26,6 +26,8 @@ cluster.workflow('Typed', async (ctx) => {
   const id: string = await ctx.sideEffect('id', () => `${order.id}-${v}`);
   const receipt = await ctx.activity<{ ok: boolean }>('charge', order, {
     retry: { maxAttempts: 3, initialBackoffMs: 100 },
+    startToCloseTimeoutMs: 10_000,
+    scheduleToCloseTimeoutMs: 60_000,
     as: 'json',
   });
   const blob: Uint8Array = await ctx.activity('render', new Uint8Array([1, 2]), { as: 'bytes' });
@@ -39,6 +41,7 @@ cluster.activity('render', (bytes: Uint8Array, task) => (task.signal.aborted ? b
 
 async function client(): Promise<void> {
   const id: string = await worker.startWorkflow('Order', 'order-1');
+  await worker.startWorkflow('Order', 'order-2', 'order-2', { executionTimeoutMs: 3_600_000 });
   await worker.signal(id, 'approved', 'yes');
   const wf = await worker.describe(id);
   const decision = await decide(async (ctx) => ctx.input, { workflow_id: id, input: 'x', steps: [] });

@@ -13,6 +13,7 @@ that supersedes the old one.
 | [0005](0005-public-go-sdk.md) | The public Go SDK: workflow, client, worker, embedded | Accepted |
 | [0006](0006-keep-file-per-workflow-store.md) | Keep the file-per-workflow history store; no LSM engine | Accepted |
 | [0007](0007-parallel-steps.md) | Parallel steps and batched commands | Accepted |
+| [0008](0008-timeouts.md) | Workflow and activity timeouts | Accepted |
 
 ## Template
 

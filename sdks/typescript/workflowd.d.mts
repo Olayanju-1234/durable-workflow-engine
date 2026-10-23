@@ -35,6 +35,15 @@ export interface RetryPolicy {
 
 export interface ActivityOptions {
   retry?: RetryPolicy;
+  /** Fail an attempt this long after a worker picks it up; heartbeats do not extend it. */
+  startToCloseTimeoutMs?: number;
+  /** Fail the step this long after it is first scheduled, every attempt and backoff included. */
+  scheduleToCloseTimeoutMs?: number;
+}
+
+export interface StartWorkflowOptions {
+  /** End the workflow as TIMED_OUT if it has not finished this long after it starts. */
+  executionTimeoutMs?: number;
 }
 
 /** What a workflow function receives. Every method is durable. */
@@ -81,8 +90,10 @@ export interface ActivityTask {
   workflow_id: string;
   step_name: string;
   sequence: number;
-  /** Aborts if the worker loses the task's lease (the work was reassigned). */
+  /** Aborts if the worker loses the task's lease (the work was reassigned) or the attempt times out. */
   signal: AbortSignal;
+  /** The attempt's start-to-close timeout, if the workflow set one. */
+  start_to_close_timeout_ms?: number;
   [field: string]: unknown;
 }
 
@@ -162,7 +173,7 @@ export class Worker {
   /** Tell the engine which workflow types this worker can replay. */
   register(): Promise<void>;
   /** Start a workflow; resolves to its id. */
-  startWorkflow(type: string, input?: Payload, workflowId?: string): Promise<string>;
+  startWorkflow(type: string, input?: Payload, workflowId?: string, opts?: StartWorkflowOptions): Promise<string>;
   /** Send an external signal to a running workflow; recorded once, even when retried. */
   signal(workflowId: string, name: string, payload?: Payload, opts?: { requestId?: string }): Promise<void>;
   /** The engine's view of a workflow: status, steps, output, error. */

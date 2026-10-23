@@ -172,6 +172,10 @@ message ScheduleActivityCommand {
   // Optional: overrides the engine's retry policy for this step name. It is
   // recorded on the step, so the retries survive restarts and failovers.
   history.v1.RetryPolicy retry_policy = 4;
+  // Optional, zero = no limit: one attempt's time from dispatch to result, and
+  // the whole step's time across every attempt (see StepScheduledEvent).
+  int64 start_to_close_timeout_ms = 5;
+  int64 schedule_to_close_timeout_ms = 6;
 }
 
 // StartTimerCommand: sleep durably. delay_ms is relative; the engine converts
@@ -257,6 +261,9 @@ message StartWorkflowRequest {
   bytes input = 2;
   // Optional caller-chosen id; the server generates one when empty.
   string workflow_id = 3;
+  // Optional: the workflow times out (status TIMED_OUT) this long after it
+  // starts. Zero means no limit.
+  int64 execution_timeout_ms = 4;
 }
 
 message StartWorkflowResponse {
@@ -284,6 +291,9 @@ message Task {
   // How long the lease lives without a heartbeat. Workers running longer than
   // this must Heartbeat periodically (a third of this is a sane interval).
   int64 lease_duration_ms = 6;
+  // The attempt's start-to-close timeout, zero if none: the engine fails the
+  // attempt this long after dispatch, so a worker may stop the work then too.
+  int64 start_to_close_timeout_ms = 7;
 }
 
 message PollTaskResponse {

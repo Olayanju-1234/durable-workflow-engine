@@ -27,7 +27,7 @@ import (
 //
 //	GET  /api/health
 //	GET  /api/workflows[?status=RUNNING&q=&limit=&offset=]
-//	POST /api/workflows                      {"type","input","workflow_id"}
+//	POST /api/workflows                      {"type","input","workflow_id","execution_timeout_ms"}
 //	GET  /api/workflows/{id}
 //	POST /api/workflows/{id}/terminate       {"reason"}
 //	POST /api/workflows/{id}/signal          {"name","payload"}
@@ -364,6 +364,8 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		Input       string  `json:"input"`
 		InputBase64 *string `json:"input_base64"`
 		WorkflowID  string  `json:"workflow_id"`
+		// Optional: the workflow times out this long after it starts.
+		ExecutionTimeoutMs int64 `json:"execution_timeout_ms"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -378,7 +380,8 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
-	id, err := e.StartWorkflow(body.Type, input, body.WorkflowID)
+	id, err := e.StartWorkflow(body.Type, input, body.WorkflowID,
+		WithExecutionTimeout(time.Duration(body.ExecutionTimeoutMs)*time.Millisecond))
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):

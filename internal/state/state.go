@@ -14,7 +14,7 @@ import (
 //	Waiting    → a step is scheduled and awaiting a worker result.
 //	Completed  → terminal: WorkflowCompleted was recorded.
 //	Failed     → terminal: WorkflowFailed was recorded.
-//	TimedOut   → terminal; reserved for Phase 2 timers (no event produces it yet).
+//	TimedOut   → terminal: the engine ended it when its execution timeout passed.
 type Status int
 
 const (
@@ -88,6 +88,11 @@ type Step struct {
 	Marker   string       // marker steps only: "version" or "side_effect"
 	Attempts int          // activity steps: how many times scheduled (>1 means it was retried)
 	Retry    *RetryPolicy // activity steps: the policy recorded with the step, if any
+	// Activity steps: the timeouts recorded with the step (zero = none) and
+	// when it was first scheduled (unix nanos), the start of schedule-to-close.
+	StartToClose    time.Duration
+	ScheduleToClose time.Duration
+	ScheduledAt     int64
 	// Retrying: the latest attempt failed and the engine will run another, so
 	// the failure is not the step's result; workflow code still waits on it.
 	Retrying bool
@@ -120,7 +125,11 @@ type State struct {
 	Output       []byte           // workflow output, set when Status == StatusCompleted
 	Error        string           // workflow error, set when Status == StatusFailed
 	Terminated   bool             // the failure was an operator termination, not workflow code
-	LastEventID  int64            // EventId of the final event consumed
+	StartedAt    int64            // unix nanos of WorkflowStarted
+	// ExecutionTimeout is how long after StartedAt the workflow times out
+	// (zero = never).
+	ExecutionTimeout time.Duration
+	LastEventID      int64 // EventId of the final event consumed
 	// LastEventResolves: the latest event gave a step its result (or started
 	// the workflow), so the workflow code may have more to do.
 	LastEventResolves bool
@@ -226,6 +235,8 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		st.Status = StatusRunning
 		st.WorkflowType = ws.GetWorkflowType()
 		st.Input = ws.GetInput()
+		st.StartedAt = ev.GetTimestamp()
+		st.ExecutionTimeout = time.Duration(ws.GetExecutionTimeoutMs()) * time.Millisecond
 		resolves = true
 
 	case *history.HistoryEvent_StepScheduled:
@@ -248,6 +259,12 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			if p := RetryPolicyFromProto(ss.GetRetryPolicy()); p != nil {
 				s.Retry = p
 			}
+			if d := msDuration(ss.GetStartToCloseTimeoutMs()); d > 0 {
+				s.StartToClose = d
+			}
+			if d := msDuration(ss.GetScheduleToCloseTimeoutMs()); d > 0 {
+				s.ScheduleToClose = d
+			}
 			f.open++
 			break
 		}
@@ -269,6 +286,10 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			Signal:   ss.GetSignalName(),
 			Attempts: 1,
 			Retry:    RetryPolicyFromProto(ss.GetRetryPolicy()),
+
+			StartToClose:    msDuration(ss.GetStartToCloseTimeoutMs()),
+			ScheduleToClose: msDuration(ss.GetScheduleToCloseTimeoutMs()),
+			ScheduledAt:     ev.GetTimestamp(),
 		})
 		f.open++
 		f.lastSeq = seq
@@ -338,6 +359,14 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 
 	case *history.HistoryEvent_StepFailed:
 		sf := attr.StepFailed
+		if s := st.Step(sf.GetSequence()); s != nil && s.Retrying && !sf.GetWillRetry() && s.Name == sf.GetStepName() {
+			// A final failure closes a step between attempts (its deadline
+			// passed, or it was cancelled): the retry will not happen.
+			s.Error, s.Retrying, s.ResolvedEventID = sf.GetError(), false, ev.GetEventId()
+			f.retrying--
+			resolves = true
+			break
+		}
 		s, err := f.openStep(i, sf.GetStepName(), sf.GetSequence())
 		if err != nil {
 			return err
@@ -360,6 +389,9 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 
 	case *history.HistoryEvent_WorkflowFailed:
 		st.Status = StatusFailed
+		if attr.WorkflowFailed.GetTimedOut() {
+			st.Status = StatusTimedOut
+		}
 		st.Error = attr.WorkflowFailed.GetError()
 		st.Terminated = attr.WorkflowFailed.GetTerminated()
 
@@ -444,6 +476,8 @@ func (s *State) DeliverableSignal() ([]byte, bool) {
 	_, payload, ok := s.NextSignalDelivery()
 	return payload, ok
 }
+
+func msDuration(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }
 
 // RetryPolicyFromProto converts a recorded policy; nil or unset gives nil.
 func RetryPolicyFromProto(p *history.RetryPolicy) *RetryPolicy {

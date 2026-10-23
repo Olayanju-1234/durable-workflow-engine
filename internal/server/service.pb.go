@@ -765,9 +765,13 @@ type ScheduleActivityCommand struct {
 	Input    []byte                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
 	// Optional: overrides the engine's retry policy for this step name. It is
 	// recorded on the step, so the retries survive restarts and failovers.
-	RetryPolicy   *history.RetryPolicy `protobuf:"bytes,4,opt,name=retry_policy,json=retryPolicy,proto3" json:"retry_policy,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RetryPolicy *history.RetryPolicy `protobuf:"bytes,4,opt,name=retry_policy,json=retryPolicy,proto3" json:"retry_policy,omitempty"`
+	// Optional, zero = no limit: one attempt's time from dispatch to result, and
+	// the whole step's time across every attempt (see StepScheduledEvent).
+	StartToCloseTimeoutMs    int64 `protobuf:"varint,5,opt,name=start_to_close_timeout_ms,json=startToCloseTimeoutMs,proto3" json:"start_to_close_timeout_ms,omitempty"`
+	ScheduleToCloseTimeoutMs int64 `protobuf:"varint,6,opt,name=schedule_to_close_timeout_ms,json=scheduleToCloseTimeoutMs,proto3" json:"schedule_to_close_timeout_ms,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *ScheduleActivityCommand) Reset() {
@@ -826,6 +830,20 @@ func (x *ScheduleActivityCommand) GetRetryPolicy() *history.RetryPolicy {
 		return x.RetryPolicy
 	}
 	return nil
+}
+
+func (x *ScheduleActivityCommand) GetStartToCloseTimeoutMs() int64 {
+	if x != nil {
+		return x.StartToCloseTimeoutMs
+	}
+	return 0
+}
+
+func (x *ScheduleActivityCommand) GetScheduleToCloseTimeoutMs() int64 {
+	if x != nil {
+		return x.ScheduleToCloseTimeoutMs
+	}
+	return 0
 }
 
 // StartTimerCommand: sleep durably. delay_ms is relative; the engine converts
@@ -1398,9 +1416,12 @@ type StartWorkflowRequest struct {
 	// Opaque input handed to the first step.
 	Input []byte `protobuf:"bytes,2,opt,name=input,proto3" json:"input,omitempty"`
 	// Optional caller-chosen id; the server generates one when empty.
-	WorkflowId    string `protobuf:"bytes,3,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	WorkflowId string `protobuf:"bytes,3,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	// Optional: the workflow times out (status TIMED_OUT) this long after it
+	// starts. Zero means no limit.
+	ExecutionTimeoutMs int64 `protobuf:"varint,4,opt,name=execution_timeout_ms,json=executionTimeoutMs,proto3" json:"execution_timeout_ms,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *StartWorkflowRequest) Reset() {
@@ -1452,6 +1473,13 @@ func (x *StartWorkflowRequest) GetWorkflowId() string {
 		return x.WorkflowId
 	}
 	return ""
+}
+
+func (x *StartWorkflowRequest) GetExecutionTimeoutMs() int64 {
+	if x != nil {
+		return x.ExecutionTimeoutMs
+	}
+	return 0
 }
 
 type StartWorkflowResponse struct {
@@ -1567,8 +1595,11 @@ type Task struct {
 	// How long the lease lives without a heartbeat. Workers running longer than
 	// this must Heartbeat periodically (a third of this is a sane interval).
 	LeaseDurationMs int64 `protobuf:"varint,6,opt,name=lease_duration_ms,json=leaseDurationMs,proto3" json:"lease_duration_ms,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The attempt's start-to-close timeout, zero if none: the engine fails the
+	// attempt this long after dispatch, so a worker may stop the work then too.
+	StartToCloseTimeoutMs int64 `protobuf:"varint,7,opt,name=start_to_close_timeout_ms,json=startToCloseTimeoutMs,proto3" json:"start_to_close_timeout_ms,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *Task) Reset() {
@@ -1639,6 +1670,13 @@ func (x *Task) GetLeaseToken() string {
 func (x *Task) GetLeaseDurationMs() int64 {
 	if x != nil {
 		return x.LeaseDurationMs
+	}
+	return 0
+}
+
+func (x *Task) GetStartToCloseTimeoutMs() int64 {
+	if x != nil {
+		return x.StartToCloseTimeoutMs
 	}
 	return 0
 }
@@ -2605,12 +2643,14 @@ const file_service_proto_rawDesc = "" +
 	"task_token\x18\x04 \x01(\tR\ttaskToken\x12%\n" +
 	"\x0ehistory_length\x18\x05 \x01(\x03R\rhistoryLength\"I\n" +
 	"\x18PollWorkflowTaskResponse\x12-\n" +
-	"\x04task\x18\x01 \x01(\v2\x19.workflow.v1.WorkflowTaskR\x04task\"\xa4\x01\n" +
+	"\x04task\x18\x01 \x01(\v2\x19.workflow.v1.WorkflowTaskR\x04task\"\x9e\x02\n" +
 	"\x17ScheduleActivityCommand\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x14\n" +
 	"\x05input\x18\x03 \x01(\fR\x05input\x12:\n" +
-	"\fretry_policy\x18\x04 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\"}\n" +
+	"\fretry_policy\x18\x04 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\x128\n" +
+	"\x19start_to_close_timeout_ms\x18\x05 \x01(\x03R\x15startToCloseTimeoutMs\x12>\n" +
+	"\x1cschedule_to_close_timeout_ms\x18\x06 \x01(\x03R\x18scheduleToCloseTimeoutMs\"}\n" +
 	"\x11StartTimerCommand\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x19\n" +
@@ -2648,19 +2688,20 @@ const file_service_proto_rawDesc = "" +
 	"\acommand\x18\x03 \x01(\v2\x1c.workflow.v1.WorkflowCommandR\acommand\x12!\n" +
 	"\freplay_error\x18\x04 \x01(\tR\vreplayError\x128\n" +
 	"\bcommands\x18\x05 \x03(\v2\x1c.workflow.v1.WorkflowCommandR\bcommands\"\x1e\n" +
-	"\x1cCompleteWorkflowTaskResponse\"r\n" +
+	"\x1cCompleteWorkflowTaskResponse\"\xa4\x01\n" +
 	"\x14StartWorkflowRequest\x12#\n" +
 	"\rworkflow_type\x18\x01 \x01(\tR\fworkflowType\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1f\n" +
 	"\vworkflow_id\x18\x03 \x01(\tR\n" +
-	"workflowId\"8\n" +
+	"workflowId\x120\n" +
+	"\x14execution_timeout_ms\x18\x04 \x01(\x03R\x12executionTimeoutMs\"8\n" +
 	"\x15StartWorkflowResponse\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\"M\n" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1d\n" +
 	"\n" +
-	"step_names\x18\x02 \x03(\tR\tstepNames\"\xc3\x01\n" +
+	"step_names\x18\x02 \x03(\tR\tstepNames\"\xfd\x01\n" +
 	"\x04Task\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1b\n" +
@@ -2669,7 +2710,8 @@ const file_service_proto_rawDesc = "" +
 	"\x05input\x18\x04 \x01(\fR\x05input\x12\x1f\n" +
 	"\vlease_token\x18\x05 \x01(\tR\n" +
 	"leaseToken\x12*\n" +
-	"\x11lease_duration_ms\x18\x06 \x01(\x03R\x0fleaseDurationMs\"9\n" +
+	"\x11lease_duration_ms\x18\x06 \x01(\x03R\x0fleaseDurationMs\x128\n" +
+	"\x19start_to_close_timeout_ms\x18\a \x01(\x03R\x15startToCloseTimeoutMs\"9\n" +
 	"\x10PollTaskResponse\x12%\n" +
 	"\x04task\x18\x01 \x01(\v2\x11.workflow.v1.TaskR\x04task\"\xcc\x01\n" +
 	"\x13CompleteTaskRequest\x12\x1f\n" +

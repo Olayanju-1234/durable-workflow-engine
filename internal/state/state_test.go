@@ -391,3 +391,52 @@ func TestParallelSignalWaitsServedInOrder(t *testing.T) {
 		t.Fatalf("second delivery = %v %q %v", w, payload, ok)
 	}
 }
+
+// TestFinalFailureClosesRetryingStep: a step between attempts can be closed by
+// a final failure (a deadline passed, or a cancel), but a result for a step
+// that already has one is still a corrupt history.
+func TestFinalFailureClosesRetryingStep(t *testing.T) {
+	st, err := Reconstruct(withIDs(
+		started("T", "in"),
+		scheduled("charge", 1, "x"),
+		failedRetrying("charge", 1, "503"),
+		failed("charge", 1, "activity timed out: schedule-to-close timeout of 1s exceeded"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st.Step(1)
+	if st.Status != StatusRunning || s.Status != StepFailed || s.Retrying || s.Open() || s.ResolvedEventID != 4 ||
+		!strings.Contains(s.Error, "schedule-to-close") || !st.LastEventResolves {
+		t.Fatalf("state %s, step %+v: want RUNNING with the step closed by the final failure", st.Status, s)
+	}
+	if _, err := Reconstruct(withIDs(started("T", ""), scheduled("a", 1, ""), failed("a", 1, "x"), failed("a", 1, "again"))); err == nil {
+		t.Fatal("a second failure for a step with a final result was accepted")
+	}
+	if _, err := Reconstruct(withIDs(started("T", ""), scheduled("a", 1, ""), failedRetrying("a", 1, "x"), failedRetrying("a", 1, "y"))); err == nil {
+		t.Fatal("a retryable failure for a step that is not running was accepted")
+	}
+}
+
+// TestTimeoutsReplay: recorded limits come back from history, and a timed-out
+// workflow is TIMED_OUT (an older binary reads the same event as FAILED).
+func TestTimeoutsReplay(t *testing.T) {
+	start := started("T", "")
+	start.GetWorkflowStarted().ExecutionTimeoutMs = 60000
+	sched := scheduled("a", 1, "")
+	sched.GetStepScheduled().StartToCloseTimeoutMs = 1500
+	sched.GetStepScheduled().ScheduleToCloseTimeoutMs = 9000
+	timedOut := wfFailed("workflow timed out")
+	timedOut.GetWorkflowFailed().TimedOut = true
+	evs := withIDs(start, sched, timedOut)
+	evs[0].Timestamp, evs[1].Timestamp = 100, 200
+	st, err := Reconstruct(evs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st.Step(1)
+	if st.Status != StatusTimedOut || !st.Status.IsTerminal() || st.ExecutionTimeout != time.Minute || st.StartedAt != 100 ||
+		s.StartToClose != 1500*time.Millisecond || s.ScheduleToClose != 9*time.Second || s.ScheduledAt != 200 {
+		t.Fatalf("state %+v step %+v", st, s)
+	}
+}

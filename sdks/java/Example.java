@@ -35,7 +35,10 @@ public final class Example {
             }
 
             try {
-                ctx.activity("charge", reserved);
+                // A charge attempt gets 30 seconds, and the whole step (retries included) two minutes.
+                ctx.activity("charge", reserved, new Workflowd.ActivityOptions()
+                        .withStartToCloseTimeout(Duration.ofSeconds(30))
+                        .withScheduleToCloseTimeout(Duration.ofMinutes(2)));
             } catch (Workflowd.ActivityFailure e) {
                 ctx.activity("release", reserved); // Saga compensation
                 throw new Workflowd.WorkflowFailure("charge failed, reservation released: " + e.getMessage());

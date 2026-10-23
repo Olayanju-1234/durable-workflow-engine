@@ -35,6 +35,10 @@ const late = (await ctx.waitAny([ctx.waitForSignal('reply', 'approved'), ctx.sle
 // Retry a failed attempt before the workflow sees the error; JSON and bytes payloads.
 const receipt = await ctx.activity('charge', { amount: 42 }, { retry: { maxAttempts: 3, initialBackoffMs: 500 }, as: 'json' });
 
+// Bound one attempt and the whole step; bound a whole run when you start it.
+await ctx.activity('render', doc, { startToCloseTimeoutMs: 30_000, scheduleToCloseTimeoutMs: 300_000 });
+await worker.startWorkflow('Order', order, `order-${order.id}`, { executionTimeoutMs: 86_400_000 });
+
 // Change code safely while executions are in flight; record a non-deterministic value once.
 if ((await ctx.getVersion('fraud-check', DEFAULT_VERSION, 1)) === 1) await ctx.activity('fraud-check', receipt);
 const id = await ctx.sideEffect('id', () => crypto.randomUUID());
