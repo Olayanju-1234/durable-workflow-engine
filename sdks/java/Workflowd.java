@@ -146,6 +146,48 @@ public final class Workflowd {
         }
     }
 
+    /**
+     * Options for one activity call: a retry policy and timeouts (zero or null means none).
+     * {@code startToClose} fails an attempt that runs longer, heartbeats or not;
+     * {@code scheduleToClose} bounds every attempt and backoff together. Immutable: each
+     * {@code with} method returns a copy.
+     */
+    public static final class ActivityOptions {
+        final RetryPolicy retry;
+        final Duration startToClose;
+        final Duration scheduleToClose;
+
+        public ActivityOptions() { this(null, null, null); }
+
+        private ActivityOptions(RetryPolicy retry, Duration startToClose, Duration scheduleToClose) {
+            this.retry = retry;
+            this.startToClose = startToClose;
+            this.scheduleToClose = scheduleToClose;
+        }
+
+        public ActivityOptions withRetry(RetryPolicy retry) {
+            return new ActivityOptions(retry, startToClose, scheduleToClose);
+        }
+
+        public ActivityOptions withStartToCloseTimeout(Duration d) {
+            return new ActivityOptions(retry, d, scheduleToClose);
+        }
+
+        public ActivityOptions withScheduleToCloseTimeout(Duration d) {
+            return new ActivityOptions(retry, startToClose, d);
+        }
+
+        void putOn(Map<String, Object> cmd) {
+            if (retry != null) cmd.put("retry_policy", retry.toWire());
+            putMillis(cmd, "start_to_close_timeout_ms", startToClose);
+            putMillis(cmd, "schedule_to_close_timeout_ms", scheduleToClose);
+        }
+    }
+
+    static void putMillis(Map<String, Object> obj, String field, Duration d) {
+        if (d != null && !d.isZero() && !d.isNegative()) obj.put(field, Math.max(1L, d.toMillis()));
+    }
+
     /** What a workflow function receives. Every method is durable. */
     public static final class Context {
         private final Map<String, Object> task;
@@ -168,28 +210,38 @@ public final class Workflowd {
 
         /** Run a named activity on a worker and return its output. */
         public String activity(String name, String input) {
-            return activity(name, input, null);
+            return activity(name, input, (ActivityOptions) null);
         }
 
         /** Run a named activity, retrying a failed attempt per {@code retry} first. */
         public String activity(String name, String input, RetryPolicy retry) {
-            Map<String, Object> cmd = scheduleActivity(name, retry);
+            return activity(name, input, new ActivityOptions().withRetry(retry));
+        }
+
+        /** Run a named activity with a retry policy and timeouts. */
+        public String activity(String name, String input, ActivityOptions opts) {
+            Map<String, Object> cmd = scheduleActivity(name, opts);
             cmd.put("input", input == null ? "" : input);
             return text(command("ACTIVITY", name, cmd), "output");
         }
 
         /** Run a named activity over raw bytes. */
         public byte[] activityBytes(String name, byte[] input, RetryPolicy retry) {
-            Map<String, Object> cmd = scheduleActivity(name, retry);
+            return activityBytes(name, input, new ActivityOptions().withRetry(retry));
+        }
+
+        /** Run a named activity over raw bytes, with a retry policy and timeouts. */
+        public byte[] activityBytes(String name, byte[] input, ActivityOptions opts) {
+            Map<String, Object> cmd = scheduleActivity(name, opts);
             putBytes(cmd, "input", input);
             return bytes(command("ACTIVITY", name, cmd), "output");
         }
 
-        private static Map<String, Object> scheduleActivity(String name, RetryPolicy retry) {
+        private static Map<String, Object> scheduleActivity(String name, ActivityOptions opts) {
             Map<String, Object> cmd = new LinkedHashMap<>();
             cmd.put("type", "schedule_activity");
             cmd.put("step_name", name);
-            if (retry != null) cmd.put("retry_policy", retry.toWire());
+            if (opts != null) opts.putOn(cmd);
             return cmd;
         }
 
@@ -498,6 +550,15 @@ public final class Workflowd {
 
         /** Start a workflow; returns its id. */
         public String startWorkflow(String type, String input, String workflowId) throws IOException, InterruptedException {
+            return startWorkflow(type, input, workflowId, null);
+        }
+
+        /**
+         * Start a workflow that ends as TIMED_OUT if it has not finished {@code executionTimeout}
+         * after it starts (null: no limit); returns its id.
+         */
+        public String startWorkflow(String type, String input, String workflowId, Duration executionTimeout)
+                throws IOException, InterruptedException {
             boolean generated = workflowId == null || workflowId.isEmpty();
             // Chosen here so a retry after a lost reply cannot start a second execution.
             String id = generated ? type + "-" + Long.toHexString(System.nanoTime()) + Long.toHexString(Double.doubleToLongBits(Math.random())) : workflowId;
@@ -505,6 +566,7 @@ public final class Workflowd {
             body.put("type", type);
             body.put("input", input == null ? "" : input);
             body.put("workflow_id", id);
+            putMillis(body, "execution_timeout_ms", executionTimeout);
             try {
                 request("POST", "/api/workflows", body);
             } catch (HttpError e) {

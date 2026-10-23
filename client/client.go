@@ -106,12 +106,21 @@ func (c *Client) Close() error { return c.conn.Close() }
 // StartOption customises StartWorkflow.
 type StartOption func(*startOptions)
 
-type startOptions struct{ id string }
+type startOptions struct {
+	id               string
+	executionTimeout time.Duration
+}
 
 // WithWorkflowID starts the workflow under a caller-chosen id, for example an
 // order number, so a second start for the same id fails with ErrAlreadyExists.
 func WithWorkflowID(id string) StartOption {
 	return func(o *startOptions) { o.id = id }
+}
+
+// WithExecutionTimeout ends the workflow with StatusTimedOut if it has not
+// finished d after it starts. Whatever it has in flight is abandoned.
+func WithExecutionTimeout(d time.Duration) StartOption {
+	return func(o *startOptions) { o.executionTimeout = d }
 }
 
 // StartWorkflow starts a workflow of a registered type and returns its id.
@@ -120,7 +129,10 @@ func (c *Client) StartWorkflow(ctx context.Context, workflowType string, input [
 	for _, o := range opts {
 		o(&so)
 	}
-	req := &server.StartWorkflowRequest{WorkflowType: workflowType, Input: input, WorkflowId: so.id}
+	req := &server.StartWorkflowRequest{
+		WorkflowType: workflowType, Input: input, WorkflowId: so.id,
+		ExecutionTimeoutMs: so.executionTimeout.Milliseconds(),
+	}
 	generated := req.WorkflowId == ""
 	if generated {
 		// Chosen here, not on the server, so a retry after a lost reply reuses it.

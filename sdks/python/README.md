@@ -37,6 +37,10 @@ late = ctx.wait_any(ctx.wait_for_signal_async("reply", "approved"), ctx.sleep_as
 # Retry a failed attempt before the workflow sees the error; JSON and bytes payloads.
 receipt = ctx.activity("charge", {"amount": 42}, retry=RetryPolicy(max_attempts=3, initial_backoff=0.5), decode="json")
 
+# Bound one attempt and the whole step (seconds); bound a whole run when you start it.
+ctx.activity("render", doc, start_to_close_timeout=30, schedule_to_close_timeout=300)
+worker.start_workflow("Order", order, f"order-{order['id']}", execution_timeout=86400)
+
 # Change code safely while executions are in flight; record a non-deterministic value once.
 if ctx.get_version("fraud-check", DEFAULT_VERSION, 1) == 1:
     ctx.activity("fraud-check", receipt)

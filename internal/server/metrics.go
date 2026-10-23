@@ -8,7 +8,7 @@ import "github.com/olayanju-1234/durable-workflow-engine/internal/metrics"
 // on /metrics agree with what a replay of the histories would say.
 type engineMetrics struct {
 	workflowsStarted    *metrics.Counter
-	workflowsFinished   *metrics.CounterVec // status: completed | failed | terminated
+	workflowsFinished   *metrics.CounterVec // status: completed | failed | terminated | timed_out
 	workflowsActive     *metrics.Gauge      // started or recovered, not yet terminal
 	tasksDispatched     *metrics.Counter
 	taskResults         *metrics.CounterVec // result: completed | failed (worker-reported)
@@ -16,11 +16,12 @@ type engineMetrics struct {
 	retriesScheduled    *metrics.Counter
 	signalsReceived     *metrics.Counter
 	timersFired         *metrics.Counter
-	stepDuration        *metrics.Histogram // dispatch (lease grant) → worker result
-	workflowsPurged     *metrics.Counter   // finished histories deleted by retention
-	schedulesFired      *metrics.Counter   // workflows started by a schedule
-	signalsDeduplicated *metrics.Counter   // retried signals recognised by their request id
-	schedulesSkipped    *metrics.Counter   // fires skipped because a run was still going
+	stepDuration        *metrics.Histogram  // dispatch (lease grant) → worker result
+	workflowsPurged     *metrics.Counter    // finished histories deleted by retention
+	schedulesFired      *metrics.Counter    // workflows started by a schedule
+	signalsDeduplicated *metrics.Counter    // retried signals recognised by their request id
+	schedulesSkipped    *metrics.Counter    // fires skipped because a run was still going
+	activityTimeouts    *metrics.CounterVec // timeout: start_to_close | schedule_to_close
 
 	// Polyglot: workflow decisions made by external SDK workers.
 	workflowTasksDispatched  *metrics.Counter
@@ -63,6 +64,8 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func
 			"Workflows started by a cron schedule."),
 		schedulesSkipped: reg.Counter("workflowd_schedule_runs_skipped_total",
 			"Schedule fires skipped because an earlier run was still running."),
+		activityTimeouts: reg.CounterVec("workflowd_activity_timeouts_total",
+			"Activity attempts (start_to_close) and steps (schedule_to_close) that ran out of time.", "timeout"),
 		workflowTasksDispatched: reg.Counter("workflowd_workflow_tasks_dispatched_total",
 			"Workflow decisions handed to external SDK workers."),
 		workflowTasksCompleted: reg.Counter("workflowd_workflow_tasks_completed_total",

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 )
@@ -150,5 +151,48 @@ func TestHTTPSignalRequestID(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("%d signals recorded for one request id, want 1", n)
+	}
+}
+
+// TestHTTPTimeouts: execution_timeout_ms on start, activity timeouts on
+// schedule_activity, and the attempt's limit on the activity task.
+func TestHTTPTimeouts(t *testing.T) {
+	h := newAPIHarness(t)
+	if code, body := h.do(t, "POST", "/api/workflow-types", `{"workflow_types":["RemoteT"],"worker_id":"w"}`); code != http.StatusOK {
+		t.Fatalf("register: HTTP %d %v", code, body)
+	}
+	if code, _ := h.do(t, "POST", "/api/workflows", `{"type":"RemoteT","execution_timeout_ms":-5}`); code != http.StatusBadRequest {
+		t.Fatalf("negative execution timeout: HTTP %d, want 400", code)
+	}
+	code, start := h.do(t, "POST", "/api/workflows", `{"type":"RemoteT","execution_timeout_ms":400}`)
+	if code != http.StatusCreated {
+		t.Fatalf("start: HTTP %d %v", code, start)
+	}
+	id := start["workflow_id"].(string)
+	_, task := h.do(t, "GET", "/api/workflow-tasks?types=RemoteT", "")
+	code, body := h.do(t, "POST", "/api/workflow-tasks/complete", fmt.Sprintf(
+		`{"workflow_id":%q,"task_token":%q,"command":{"type":"schedule_activity","step_name":"slow","sequence":1,"start_to_close_timeout_ms":5000,"schedule_to_close_timeout_ms":60000}}`,
+		id, task["task_token"]))
+	if code != http.StatusOK {
+		t.Fatalf("complete: HTTP %d %v", code, body)
+	}
+	_, act := h.do(t, "GET", "/api/activity-tasks?activities=slow", "")
+	if act["start_to_close_timeout_ms"] != float64(5000) {
+		t.Fatalf("activity task %v, want start_to_close_timeout_ms 5000", act)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		_, wf := h.do(t, "GET", "/api/workflows/"+id, "")
+		if wf["status"] == "TIMED_OUT" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("workflow %v, want TIMED_OUT after 400ms", wf)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	beat := fmt.Sprintf(`{"workflow_id":%q,"lease_token":%q,"worker_id":"w"}`, id, act["lease_token"])
+	if code, _ := h.do(t, "POST", "/api/activity-tasks/heartbeat", beat); code != http.StatusConflict {
+		t.Fatalf("heartbeat after the workflow timed out: HTTP %d, want 409", code)
 	}
 }

@@ -56,7 +56,8 @@ flowchart TD
   D --> G
 ```
 
-States: `RUNNING`, `WAITING`, `COMPLETED`, `FAILED`, `TIMED_OUT`.
+States: `RUNNING`, `WAITING`, `COMPLETED`, `FAILED`, `TIMED_OUT` (the execution timeout
+passed: a `WorkflowFailed` with `timed_out` set, ADR-0008).
 
 ## On-disk record format (history store)
 

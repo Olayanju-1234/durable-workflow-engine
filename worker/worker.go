@@ -341,9 +341,14 @@ func (w *Worker) execute(ctx context.Context, task *server.Task) {
 	w.mu.Unlock()
 
 	// The activity keeps running through worker shutdown so its result can be
-	// reported; only a lost lease cancels it.
+	// reported; only a lost lease or its start-to-close timeout ends it.
 	actx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
+	if d := time.Duration(task.GetStartToCloseTimeoutMs()) * time.Millisecond; d > 0 {
+		var stop context.CancelFunc
+		actx, stop = context.WithTimeout(actx, d)
+		defer stop()
+	}
 	actx = context.WithValue(actx, sdkctx.ActivityInfoKey{}, ActivityInfo{
 		WorkflowID: task.GetWorkflowId(), StepName: task.GetStepName(), Sequence: task.GetSequence(),
 	})

@@ -15,7 +15,7 @@ const (
 	StatusCompleted  Status = "COMPLETED"  // finished with an output
 	StatusFailed     Status = "FAILED"     // workflow code returned an error
 	StatusTerminated Status = "TERMINATED" // ended by TerminateWorkflow
-	StatusTimedOut   Status = "TIMED_OUT"  // reserved; nothing produces it yet
+	StatusTimedOut   Status = "TIMED_OUT"  // its execution timeout passed (WithExecutionTimeout)
 	StatusUnknown    Status = "UNKNOWN"    // the history could not be read
 )
 

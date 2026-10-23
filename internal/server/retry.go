@@ -39,6 +39,21 @@ func (e *Engine) retryPolicy(step *state.Step) RetryPolicy {
 	return noRetry
 }
 
+// retryAfter decides whether a failed attempt of step runs again, and after
+// how long. A retry must start before the step's schedule-to-close deadline:
+// one that could not is pointless, so the failure is final at once.
+func (e *Engine) retryAfter(step *state.Step, now time.Time) (time.Duration, bool) {
+	p := e.retryPolicy(step)
+	if step.Attempts >= p.MaxAttempts {
+		return 0, false
+	}
+	d := p.Delay(step.Attempts)
+	if deadline, ok := scheduleToCloseDeadline(step); ok && !now.Add(d).Before(deadline) {
+		return 0, false
+	}
+	return d, true
+}
+
 // scheduleRetryLocked arms a backoff timer to re-run a failed activity. The failure
 // is already recorded; when the timer fires, onRetryDue re-schedules the same step
 // sequence (another attempt). A zero delay fires promptly
@@ -76,10 +91,17 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 		return
 	}
 	step := *target
+	if deadline, ok := scheduleToCloseDeadline(&step); ok && !time.Now().Before(deadline) {
+		// The engine was down past the step's deadline: no attempt is left to run.
+		e.timeOutStepLocked(w, &step)
+		return
+	}
 	retry := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
 		StepScheduled: &history.StepScheduledEvent{
 			StepName: step.Name, Sequence: step.Sequence, Input: step.Input,
-			RetryPolicy: step.Retry.ToProto(),
+			RetryPolicy:              step.Retry.ToProto(),
+			StartToCloseTimeoutMs:    step.StartToClose.Milliseconds(),
+			ScheduleToCloseTimeoutMs: step.ScheduleToClose.Milliseconds(),
 		},
 	}}
 	if err := e.appendLocked(w, retry, int64(len(events)+1)); err != nil {
@@ -87,10 +109,8 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 		e.rearmCallback(e.retryTimers, tm)
 		return
 	}
-	e.queue.enqueue(&Task{
-		WorkflowId: tm.WorkflowID, StepName: step.Name,
-		Sequence: step.Sequence, Input: step.Input,
-	})
+	step.Attempts++
+	e.queue.enqueue(activityTask(tm.WorkflowID, &step))
 	e.log.Info("retry dispatched", "workflow_id", tm.WorkflowID, "step", step.Name,
 		"sequence", step.Sequence, "attempt", step.Attempts+1)
 }

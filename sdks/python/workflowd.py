@@ -113,6 +113,14 @@ class RetryPolicy:
         }
 
 
+def _put_timeouts(obj: dict, **seconds: Optional[float]) -> dict:
+    """Set each positive timeout (in seconds) on obj as <name>_ms."""
+    for field, s in seconds.items():
+        if s is not None and s > 0:
+            obj[field + "_ms"] = max(1, int(round(s * 1000)))
+    return obj
+
+
 class _Yield(BaseException):
     """Internal control-flow signal: the code waits on a step with no result yet.
 
@@ -211,9 +219,23 @@ class Context:
         *,
         retry: Optional[RetryPolicy] = None,
         decode: str = "text",
+        start_to_close_timeout: Optional[float] = None,
+        schedule_to_close_timeout: Optional[float] = None,
     ) -> Any:
-        """Run a named activity on a worker and return its output."""
-        return self.activity_async(name, payload, retry=retry, decode=decode).result()
+        """Run a named activity on a worker and return its output.
+
+        ``start_to_close_timeout`` (seconds) fails an attempt that runs longer,
+        heartbeats or not; ``schedule_to_close_timeout`` bounds every attempt
+        and backoff together, from when the step is first scheduled.
+        """
+        return self.activity_async(
+            name,
+            payload,
+            retry=retry,
+            decode=decode,
+            start_to_close_timeout=start_to_close_timeout,
+            schedule_to_close_timeout=schedule_to_close_timeout,
+        ).result()
 
     def activity_async(
         self,
@@ -222,6 +244,8 @@ class Context:
         *,
         retry: Optional[RetryPolicy] = None,
         decode: str = "text",
+        start_to_close_timeout: Optional[float] = None,
+        schedule_to_close_timeout: Optional[float] = None,
     ) -> Future:
         """Start an activity and return at once, so several run in parallel::
 
@@ -232,6 +256,11 @@ class Context:
         command = _put_payload({"type": "schedule_activity", "step_name": name}, "input", payload)
         if retry is not None:
             command["retry_policy"] = retry.to_wire()
+        _put_timeouts(
+            command,
+            start_to_close_timeout=start_to_close_timeout,
+            schedule_to_close_timeout=schedule_to_close_timeout,
+        )
         return self._issue("ACTIVITY", name, command, decode)
 
     def sleep(self, name: str, seconds: float) -> str:
@@ -511,7 +540,8 @@ class Worker:
     def activity(self, step_name: str, *, decode: str = "text"):
         """Register an activity. fn(input) gets the input decoded per
         ``decode``; fn(input, info) also gets the task, whose ``lease_lost``
-        event is set if the engine reassigns the work."""
+        event is set if the engine reassigns the work or the attempt's
+        start-to-close timeout passes."""
 
         def wrap(fn):
             self.activities[step_name] = fn
@@ -540,13 +570,17 @@ class Worker:
         # poll registers again, which is harmless.
         self._registered_epoch = epoch
 
-    def start_workflow(self, workflow_type: str, payload: Any = "", workflow_id: str = "") -> str:
+    def start_workflow(
+        self, workflow_type: str, payload: Any = "", workflow_id: str = "", *, execution_timeout: Optional[float] = None
+    ) -> str:
+        """Start a workflow and return its id. ``execution_timeout`` (seconds)
+        ends it as TIMED_OUT if it has not finished by then."""
         # Chosen here so a retry after a lost reply cannot start a second execution.
         wid = workflow_id or f"{workflow_type}-{random.randrange(16**16):016x}"
+        body = _put_payload({"type": workflow_type, "workflow_id": wid}, "input", payload)
+        _put_timeouts(body, execution_timeout=execution_timeout)
         try:
-            self.conn.request(
-                "POST", "/api/workflows", _put_payload({"type": workflow_type, "workflow_id": wid}, "input", payload)
-            )
+            self.conn.request("POST", "/api/workflows", body)
         except _HTTPError as err:
             if not (err.status == 409 and not workflow_id):
                 raise
@@ -625,6 +659,12 @@ class Worker:
         fn = self.activities.get(step)
         lease_lost = threading.Event()
         stop_beats = self._heartbeat(task, lease_lost)
+        # The engine fails the attempt at its start-to-close timeout: tell the activity too.
+        limit = (task.get("start_to_close_timeout_ms") or 0) / 1000.0
+        timer = threading.Timer(limit, lease_lost.set) if limit > 0 else None
+        if timer is not None:
+            timer.daemon = True
+            timer.start()
         result = {
             "workflow_id": task["workflow_id"],
             "step_name": step,
@@ -644,6 +684,8 @@ class Worker:
             result["error"] = str(err) or repr(err)
         finally:
             stop_beats()
+            if timer is not None:
+                timer.cancel()
         try:
             self.conn.request("POST", "/api/activity-tasks/complete", result, attempts=3)
         except Exception as err:

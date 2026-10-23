@@ -49,6 +49,7 @@
     <a href="#registering">Workers &amp; clients</a>
     <a href="#workers">Activities</a>
     <a href="#retries">Retries &amp; Saga</a>
+    <a href="#timeouts">Timeouts</a>
     <a href="#parallel">Parallel steps</a>
     <a href="#schedules">Schedules</a>
     <a href="#testing">Testing workflows</a>
@@ -422,6 +423,39 @@ out, err := c.WaitForResult(ctx, id)     // blocks until it finishes</code></pre
       <strong>Saga compensation needs no special machinery.</strong> Once retries are exhausted,
       the activity error is returned to your Go code, so "undo" is just an ordinary error branch
       that calls more activities, as in the <code>release-stock</code> calls in the example above.
+    </p>
+
+    <h2 id="timeouts">Timeouts</h2>
+    <p>
+      Nothing times out unless you say so. Three limits are available, each recorded in history,
+      so they hold across restarts and leader changes:
+    </p>
+    <table>
+      <thead><tr><th>Limit</th><th>Set on</th><th>When it passes</th></tr></thead>
+      <tbody>
+        <tr><td>Execution timeout</td><td>the start</td><td>The workflow ends as <code>TIMED_OUT</code>; whatever is in flight is abandoned and its workers are turned away.</td></tr>
+        <tr><td>Start-to-close</td><td>an activity call</td><td>One attempt ran too long (from dispatch, heartbeats or not). It fails like a dead worker's, and the retry policy decides whether another attempt runs.</td></tr>
+        <tr><td>Schedule-to-close</td><td>an activity call</td><td>The step, every attempt and backoff included, is out of time. It fails for good. No retry is planned that could not start before it.</td></tr>
+      </tbody>
+    </table>
+    <pre data-lang="go"><code>id, err := c.StartWorkflow(ctx, "Order", input, client.WithExecutionTimeout(24*time.Hour))
+
+receipt, err := ctx.ExecuteActivity("charge", order,
+	workflow.WithStartToCloseTimeout(10*time.Second),  // one attempt; the activity's ctx ends then too
+	workflow.WithScheduleToCloseTimeout(2*time.Minute), // the whole step
+	workflow.WithRetryPolicy(workflow.RetryPolicy{MaxAttempts: 5, InitialBackoff: time.Second}))</code></pre>
+    <p>
+      TypeScript: <code>ctx.activity('charge', order, { startToCloseTimeoutMs: 10_000, scheduleToCloseTimeoutMs: 120_000 })</code>
+      and <code>worker.startWorkflow('Order', input, id, { executionTimeoutMs: 86_400_000 })</code>; the activity's
+      <code>task.signal</code> aborts at its start-to-close. Python: <code>start_to_close_timeout=10</code>,
+      <code>schedule_to_close_timeout=120</code> and <code>start_workflow(..., execution_timeout=86400)</code> (seconds);
+      the activity's <code>lease_lost</code> event is set. Java: <code>new Workflowd.ActivityOptions().withStartToCloseTimeout(...)</code>.
+      Over HTTP the fields are <code>execution_timeout_ms</code> on start and <code>start_to_close_timeout_ms</code> /
+      <code>schedule_to_close_timeout_ms</code> on <code>schedule_activity</code>.
+    </p>
+    <p>
+      Leases still decide whether a worker is alive: a worker that stops heartbeating loses the
+      task after the lease duration, whatever its timeouts say.
     </p>
 
     <h2 id="parallel">Parallel steps</h2>
@@ -863,11 +897,12 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
 
     <h3>Start a workflow</h3>
     <pre data-lang="sh"><code>POST /api/workflows
-{"type":"OrderSaga","input":"order-42","workflow_id":"optional"}
+{"type":"OrderSaga","input":"order-42","workflow_id":"optional","execution_timeout_ms":86400000}
 → 201 {"workflow_id":"order-42"}</code></pre>
     <p>
       A duplicate <code>workflow_id</code> returns <code>409</code>; an unregistered type
-      returns <code>400</code>.
+      returns <code>400</code>. <code>execution_timeout_ms</code> is optional
+      (<a href="#timeouts">Timeouts</a>).
     </p>
 
     <h3>Signal a workflow</h3>
@@ -916,12 +951,13 @@ DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
       <thead><tr><th>Metric</th><th>Type</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>workflowd_workflows_started_total</code></td><td>counter</td><td>Executions started</td></tr>
-        <tr><td><code>workflowd_workflows_finished_total{status}</code></td><td>counter</td><td>Terminal outcomes: <code>completed</code>, <code>failed</code>, <code>terminated</code></td></tr>
+        <tr><td><code>workflowd_workflows_finished_total{status}</code></td><td>counter</td><td>Terminal outcomes: <code>completed</code>, <code>failed</code>, <code>terminated</code>, <code>timed_out</code></td></tr>
         <tr><td><code>workflowd_workflows_active</code></td><td>gauge</td><td>Running or waiting right now</td></tr>
         <tr><td><code>workflowd_tasks_dispatched_total</code></td><td>counter</td><td>Tasks handed to workers (including retries)</td></tr>
         <tr><td><code>workflowd_task_results_total{result}</code></td><td>counter</td><td>Worker-reported results: <code>completed</code> / <code>failed</code></td></tr>
         <tr><td><code>workflowd_leases_expired_total</code></td><td>counter</td><td>Tasks reclaimed from dead workers</td></tr>
         <tr><td><code>workflowd_retries_scheduled_total</code></td><td>counter</td><td>Retries armed after a failed attempt</td></tr>
+        <tr><td><code>workflowd_activity_timeouts_total{timeout}</code></td><td>counter</td><td>Attempts past their <code>start_to_close</code>, steps past their <code>schedule_to_close</code></td></tr>
         <tr><td><code>workflowd_signals_received_total</code></td><td>counter</td><td>Signals durably recorded</td></tr>
         <tr><td><code>workflowd_timers_fired_total</code></td><td>counter</td><td>Durable timers that reached their deadline</td></tr>
         <tr><td><code>workflowd_task_queue_depth</code></td><td>gauge</td><td>Tasks buffered awaiting a worker</td></tr>

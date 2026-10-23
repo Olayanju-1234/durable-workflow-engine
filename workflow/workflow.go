@@ -50,7 +50,8 @@ type Context interface {
 	// ExecuteActivity runs a named activity on a worker and returns its output.
 	// It returns an error if the activity failed (after any retries); the
 	// workflow can handle it, for example by compensating, or return it.
-	// WithRetryPolicy makes the engine retry a failed attempt first.
+	// WithRetryPolicy makes the engine retry a failed attempt first;
+	// WithStartToCloseTimeout and WithScheduleToCloseTimeout bound its time.
 	ExecuteActivity(name string, input []byte, opts ...ActivityOption) ([]byte, error)
 
 	// Sleep pauses the workflow durably for d. The deadline is recorded, so the
@@ -152,13 +153,29 @@ type ActivityOption func(*ActivityOptions)
 
 // ActivityOptions is what the ActivityOption values of a call add up to.
 type ActivityOptions struct {
-	RetryPolicy *RetryPolicy
+	RetryPolicy            *RetryPolicy
+	StartToCloseTimeout    time.Duration
+	ScheduleToCloseTimeout time.Duration
 }
 
 // WithRetryPolicy retries the activity per p, overriding any policy the
 // engine has for the step name.
 func WithRetryPolicy(p RetryPolicy) ActivityOption {
 	return func(o *ActivityOptions) { o.RetryPolicy = &p }
+}
+
+// WithStartToCloseTimeout limits one attempt: the engine fails it d after a
+// worker picks it up, even if the worker is still heartbeating, and the retry
+// policy decides whether another attempt runs. The worker's ctx ends then too.
+func WithStartToCloseTimeout(d time.Duration) ActivityOption {
+	return func(o *ActivityOptions) { o.StartToCloseTimeout = d }
+}
+
+// WithScheduleToCloseTimeout limits the whole step, every attempt and backoff
+// included, from when it is first scheduled. When it passes the step fails
+// for good, and no retry is planned that could not start before it.
+func WithScheduleToCloseTimeout(d time.Duration) ActivityOption {
+	return func(o *ActivityOptions) { o.ScheduleToCloseTimeout = d }
 }
 
 // Version identifies one variant of changed workflow code; see GetVersion.

@@ -207,22 +207,25 @@ func (c *replayContext) ExecuteActivity(name string, input []byte, opts ...workf
 }
 
 func (c *replayContext) ExecuteActivityAsync(name string, input []byte, opts ...workflow.ActivityOption) workflow.Future {
-	return c.issue(state.Decision{Type: state.DecideScheduleStep, StepName: name, Input: input, Retry: retryPolicy(opts)})
-}
-
-// retryPolicy is the engine form of the call's options, nil when unset.
-func retryPolicy(opts []workflow.ActivityOption) *state.RetryPolicy {
 	var o workflow.ActivityOptions
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if o.RetryPolicy == nil {
+	return c.issue(state.Decision{
+		Type: state.DecideScheduleStep, StepName: name, Input: input, Retry: retryPolicy(o.RetryPolicy),
+		StartToClose: max(o.StartToCloseTimeout, 0), ScheduleToClose: max(o.ScheduleToCloseTimeout, 0),
+	})
+}
+
+// retryPolicy is the engine form of the call's policy, nil when unset.
+func retryPolicy(p *workflow.RetryPolicy) *state.RetryPolicy {
+	if p == nil {
 		return nil
 	}
 	return &state.RetryPolicy{
-		MaxAttempts: o.RetryPolicy.MaxAttempts,
-		Backoff:     o.RetryPolicy.InitialBackoff,
-		MaxBackoff:  o.RetryPolicy.MaxBackoff,
+		MaxAttempts: p.MaxAttempts,
+		Backoff:     p.InitialBackoff,
+		MaxBackoff:  p.MaxBackoff,
 	}
 }
 

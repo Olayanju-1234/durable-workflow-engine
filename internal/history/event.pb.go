@@ -267,12 +267,16 @@ func (*HistoryEvent_SignalReceived) isHistoryEvent_Attributes() {}
 func (*HistoryEvent_MarkerRecorded) isHistoryEvent_Attributes() {}
 
 type WorkflowStartedEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkflowId    string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
-	WorkflowType  string                 `protobuf:"bytes,2,opt,name=workflow_type,json=workflowType,proto3" json:"workflow_type,omitempty"`
-	Input         []byte                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowId   string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	WorkflowType string                 `protobuf:"bytes,2,opt,name=workflow_type,json=workflowType,proto3" json:"workflow_type,omitempty"`
+	Input        []byte                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
+	// Optional: the workflow times out this long after this event's timestamp
+	// (recorded as a duration; the deadline is derived, so recovery re-arms it).
+	// Zero means no limit. Older binaries ignore it and never time out.
+	ExecutionTimeoutMs int64 `protobuf:"varint,4,opt,name=execution_timeout_ms,json=executionTimeoutMs,proto3" json:"execution_timeout_ms,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *WorkflowStartedEvent) Reset() {
@@ -326,6 +330,13 @@ func (x *WorkflowStartedEvent) GetInput() []byte {
 	return nil
 }
 
+func (x *WorkflowStartedEvent) GetExecutionTimeoutMs() int64 {
+	if x != nil {
+		return x.ExecutionTimeoutMs
+	}
+	return 0
+}
+
 type StepScheduledEvent struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	StepName string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
@@ -339,9 +350,16 @@ type StepScheduledEvent struct {
 	// Set when the workflow code chose this activity's retry policy (Phase 5
 	// polish). Recorded so retries follow it across restarts; absent means the
 	// engine's policy for the step name applies. Older binaries ignore it.
-	RetryPolicy   *RetryPolicy `protobuf:"bytes,6,opt,name=retry_policy,json=retryPolicy,proto3" json:"retry_policy,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RetryPolicy *RetryPolicy `protobuf:"bytes,6,opt,name=retry_policy,json=retryPolicy,proto3" json:"retry_policy,omitempty"`
+	// Optional activity timeouts, set by the workflow code and copied onto every
+	// retry. start_to_close bounds one attempt from dispatch to result (a
+	// heartbeat does not extend it); schedule_to_close bounds the whole step,
+	// every attempt and backoff included, from its first StepScheduled. Zero
+	// means no limit. Older binaries ignore them.
+	StartToCloseTimeoutMs    int64 `protobuf:"varint,7,opt,name=start_to_close_timeout_ms,json=startToCloseTimeoutMs,proto3" json:"start_to_close_timeout_ms,omitempty"`
+	ScheduleToCloseTimeoutMs int64 `protobuf:"varint,8,opt,name=schedule_to_close_timeout_ms,json=scheduleToCloseTimeoutMs,proto3" json:"schedule_to_close_timeout_ms,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *StepScheduledEvent) Reset() {
@@ -414,6 +432,20 @@ func (x *StepScheduledEvent) GetRetryPolicy() *RetryPolicy {
 		return x.RetryPolicy
 	}
 	return nil
+}
+
+func (x *StepScheduledEvent) GetStartToCloseTimeoutMs() int64 {
+	if x != nil {
+		return x.StartToCloseTimeoutMs
+	}
+	return 0
+}
+
+func (x *StepScheduledEvent) GetScheduleToCloseTimeoutMs() int64 {
+	if x != nil {
+		return x.ScheduleToCloseTimeoutMs
+	}
+	return 0
 }
 
 // RetryPolicy re-runs a failed activity before the workflow sees the error.
@@ -668,7 +700,10 @@ type WorkflowFailedEvent struct {
 	// Set when the failure was an operator termination (the visibility API's
 	// TerminateWorkflow), not workflow code failing. Same terminal state machine
 	// path either way; this flag keeps the two distinguishable after the fact.
-	Terminated    bool `protobuf:"varint,2,opt,name=terminated,proto3" json:"terminated,omitempty"`
+	Terminated bool `protobuf:"varint,2,opt,name=terminated,proto3" json:"terminated,omitempty"`
+	// Set when the engine ended the workflow because its execution timeout
+	// passed. Older binaries read it as a plain failure.
+	TimedOut      bool `protobuf:"varint,3,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -713,6 +748,13 @@ func (x *WorkflowFailedEvent) GetError() string {
 func (x *WorkflowFailedEvent) GetTerminated() bool {
 	if x != nil {
 		return x.Terminated
+	}
+	return false
+}
+
+func (x *WorkflowFailedEvent) GetTimedOut() bool {
+	if x != nil {
+		return x.TimedOut
 	}
 	return false
 }
@@ -1010,12 +1052,13 @@ const file_event_proto_rawDesc = "" +
 	"\x0fsignal_received\x18\x12 \x01(\v2\x1f.history.v1.SignalReceivedEventH\x00R\x0esignalReceived\x12J\n" +
 	"\x0fmarker_recorded\x18\x13 \x01(\v2\x1f.history.v1.MarkerRecordedEventH\x00R\x0emarkerRecordedB\f\n" +
 	"\n" +
-	"attributes\"r\n" +
+	"attributes\"\xa4\x01\n" +
 	"\x14WorkflowStartedEvent\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12#\n" +
 	"\rworkflow_type\x18\x02 \x01(\tR\fworkflowType\x12\x14\n" +
-	"\x05input\x18\x03 \x01(\fR\x05input\"\xe5\x01\n" +
+	"\x05input\x18\x03 \x01(\fR\x05input\x120\n" +
+	"\x14execution_timeout_ms\x18\x04 \x01(\x03R\x12executionTimeoutMs\"\xdf\x02\n" +
 	"\x12StepScheduledEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1a\n" +
@@ -1023,7 +1066,9 @@ const file_event_proto_rawDesc = "" +
 	"\rawaits_signal\x18\x04 \x01(\bR\fawaitsSignal\x12\x1f\n" +
 	"\vsignal_name\x18\x05 \x01(\tR\n" +
 	"signalName\x12:\n" +
-	"\fretry_policy\x18\x06 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\"\x84\x01\n" +
+	"\fretry_policy\x18\x06 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\x128\n" +
+	"\x19start_to_close_timeout_ms\x18\a \x01(\x03R\x15startToCloseTimeoutMs\x12>\n" +
+	"\x1cschedule_to_close_timeout_ms\x18\b \x01(\x03R\x18scheduleToCloseTimeoutMs\"\x84\x01\n" +
 	"\vRetryPolicy\x12!\n" +
 	"\fmax_attempts\x18\x01 \x01(\x05R\vmaxAttempts\x12,\n" +
 	"\x12initial_backoff_ms\x18\x02 \x01(\x03R\x10initialBackoffMs\x12$\n" +
@@ -1041,12 +1086,13 @@ const file_event_proto_rawDesc = "" +
 	"\n" +
 	"will_retry\x18\x05 \x01(\bR\twillRetry\"0\n" +
 	"\x16WorkflowCompletedEvent\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\fR\x06output\"K\n" +
+	"\x06output\x18\x01 \x01(\fR\x06output\"h\n" +
 	"\x13WorkflowFailedEvent\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1e\n" +
 	"\n" +
 	"terminated\x18\x02 \x01(\bR\n" +
-	"terminated\"{\n" +
+	"terminated\x12\x1b\n" +
+	"\ttimed_out\x18\x03 \x01(\bR\btimedOut\"{\n" +
 	"\x11TimerStartedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x17\n" +

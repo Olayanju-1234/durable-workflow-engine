@@ -45,6 +45,24 @@ worker.activity('ts-part', async (n) => {
   while (partsRunning < 3) await new Promise((r) => setTimeout(r, 5));
   return n * 10;
 }, { as: 'json' });
+// Timeouts: an attempt that outlives its start-to-close fails (and the
+// activity's signal aborts), and a workflow past its execution timeout ends.
+worker.workflow('TsTimeouts', async (ctx) => {
+  try {
+    await ctx.activity('ts-stall', '', { startToCloseTimeoutMs: 300, scheduleToCloseTimeoutMs: 5000 });
+    return 'finished';
+  } catch (err) {
+    return `failed: ${err.message}`;
+  }
+});
+let stallAborted = false;
+worker.activity('ts-stall', (_input, task) => new Promise((_resolve, reject) => {
+  task.signal.addEventListener('abort', () => {
+    stallAborted = true;
+    reject(task.signal.reason);
+  });
+}));
+worker.workflow('TsForever', async (ctx) => ctx.waitForSignal('never', 'never-sent'));
 worker.workflow('TsAfterRestart', async (ctx) => ctx.activity('ts-flaky', { n: 41 }, { as: 'json' }));
 
 worker.activity('ts-flaky', async (order) => {
@@ -91,6 +109,18 @@ if (slowStep.attempts !== 1) fail(`ts-slow attempts ${slowStep.attempts}, want 1
 
 const par = await waitDone(await worker.startWorkflow('TsParallel'));
 if (par.output !== '{"parts":[10,20,30],"winner":1}') fail(`parallel: output ${par.output}`);
+
+const bounded = await waitDone(await worker.startWorkflow('TsTimeouts'));
+if (!/^failed: .*start-to-close/.test(bounded.output) || !stallAborted) {
+  fail(`timeouts: output ${bounded.output}, aborted=${stallAborted}; want the attempt to time out and abort`);
+}
+const foreverId = await worker.startWorkflow('TsForever', '', '', { executionTimeoutMs: 300 });
+for (let i = 0; ; i++) {
+  const wf = await worker.describe(foreverId);
+  if (wf.status === 'TIMED_OUT') break;
+  if (i > 100 || (wf.status !== 'RUNNING' && wf.status !== 'WAITING')) fail(`execution timeout: ${wf.status}`);
+  await new Promise((r) => setTimeout(r, 50));
+}
 
 // A restarted engine has forgotten every registration: the worker must notice
 // and register again before this workflow can be dispatched.

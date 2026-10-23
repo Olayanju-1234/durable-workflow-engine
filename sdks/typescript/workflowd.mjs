@@ -104,6 +104,14 @@ export function readPayload(obj, field, as = 'text') {
   }
 }
 
+/** Copy positive millisecond timeouts onto a wire object. */
+function putTimeouts(obj, fields) {
+  for (const [field, ms] of Object.entries(fields)) {
+    if (ms !== undefined && ms !== null && ms > 0) obj[field] = Math.ceil(ms);
+  }
+  return obj;
+}
+
 function retryPolicyDTO(retry) {
   if (!retry) return undefined;
   return {
@@ -172,7 +180,9 @@ class Context {
    * Run a named activity on a worker and return its output.
    * opts.retry = { maxAttempts, initialBackoffMs, maxBackoffMs } retries a
    * failed attempt first (backoff doubles each time); opts.as decodes the result.
-   * Not awaiting it at once runs activities in parallel:
+   * opts.startToCloseTimeoutMs fails an attempt that runs longer (heartbeats do
+   * not extend it); opts.scheduleToCloseTimeoutMs bounds every attempt and
+   * backoff together. Not awaiting it at once runs activities in parallel:
    *
    *   const [a, b] = await Promise.all([ctx.activity('a'), ctx.activity('b')]);
    */
@@ -180,6 +190,10 @@ class Context {
     const command = putPayload({ type: 'schedule_activity', step_name: name }, 'input', input);
     const retry = retryPolicyDTO(opts.retry);
     if (retry) command.retry_policy = retry;
+    putTimeouts(command, {
+      start_to_close_timeout_ms: opts.startToCloseTimeoutMs,
+      schedule_to_close_timeout_ms: opts.scheduleToCloseTimeoutMs,
+    });
     return this._command('ACTIVITY', name, command, opts.as);
   }
 
@@ -530,15 +544,17 @@ export class Worker {
     this._registeredEpoch = epoch;
   }
 
-  /** Start a workflow. Returns its id. */
-  async startWorkflow(type, input = '', workflowId = '') {
+  /**
+   * Start a workflow. Returns its id. opts.executionTimeoutMs ends it as
+   * TIMED_OUT if it has not finished by then.
+   */
+  async startWorkflow(type, input = '', workflowId = '', opts = {}) {
     // Chosen here so a retry after a lost reply cannot start a second execution.
     const id = workflowId || `${type}-${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+    const body = putPayload({ type, workflow_id: id }, 'input', input);
+    putTimeouts(body, { execution_timeout_ms: opts.executionTimeoutMs });
     try {
-      await this.conn.request('/api/workflows', {
-        method: 'POST',
-        body: putPayload({ type, workflow_id: id }, 'input', input),
-      });
+      await this.conn.request('/api/workflows', { method: 'POST', body });
     } catch (err) {
       // Only an earlier attempt of this call can hold a fresh generated id.
       if (!(err.status === 409 && !workflowId)) throw err;
@@ -622,6 +638,10 @@ export class Worker {
     const entry = this.activities.get(task.step_name);
     const abort = new AbortController();
     const stopBeats = this._heartbeat(task, abort);
+    // The engine fails the attempt at its start-to-close timeout; stop the work then too.
+    const limit = task.start_to_close_timeout_ms > 0
+      ? setTimeout(() => abort.abort(new Error('start-to-close timeout')), task.start_to_close_timeout_ms)
+      : null;
     const result = { workflow_id: task.workflow_id, step_name: task.step_name, sequence: task.sequence, lease_token: task.lease_token };
     try {
       if (!entry) throw new Error(`no activity registered for step "${task.step_name}"`);
@@ -631,6 +651,7 @@ export class Worker {
       result.error = err?.message || String(err) || 'activity failed';
     } finally {
       stopBeats();
+      clearTimeout(limit);
     }
     try {
       await this.conn.request('/api/activity-tasks/complete', { method: 'POST', body: result, attempts: 3 });

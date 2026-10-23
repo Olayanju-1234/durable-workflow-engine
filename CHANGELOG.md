@@ -7,6 +7,21 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+### Added
+- Timeouts (ADR-0008), all optional and recorded in history: a workflow **execution timeout**
+  (ends it as `TIMED_OUT`), and per-activity **start-to-close** (one attempt, heartbeats
+  can't extend it) and **schedule-to-close** (the whole step, retries included) timeouts.
+  Go: `client.WithExecutionTimeout`, `workflow.WithStartToCloseTimeout`,
+  `workflow.WithScheduleToCloseTimeout` (the activity's ctx gets the deadline). TypeScript:
+  `startToCloseTimeoutMs` / `scheduleToCloseTimeoutMs` on `ctx.activity`,
+  `startWorkflow(type, input, id, { executionTimeoutMs })`, `task.signal` aborts at the
+  limit. Python: `start_to_close_timeout` / `schedule_to_close_timeout` (seconds),
+  `start_workflow(..., execution_timeout=)`, `lease_lost` is set at the limit. Java:
+  `Workflowd.ActivityOptions`, `startWorkflow(type, input, id, Duration)`. HTTP:
+  `execution_timeout_ms`, `start_to_close_timeout_ms`, `schedule_to_close_timeout_ms`.
+- Engine metric `workflowd_activity_timeouts_total{timeout}`;
+  `workflowd_workflows_finished_total{status="timed_out"}`.
+
 ## [0.1.1] - 2026-10-22
 
 No SDK behaviour changes (only the reported version string); the first release published

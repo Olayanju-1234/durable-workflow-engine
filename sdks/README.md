@@ -98,7 +98,8 @@ Commands are a flat tagged union:
 
 ```json
 {"type": "schedule_activity", "step_name": "charge", "sequence": 2, "input": "...",
- "retry_policy": {"max_attempts": 3, "initial_backoff_ms": 500, "max_backoff_ms": 10000}}
+ "retry_policy": {"max_attempts": 3, "initial_backoff_ms": 500, "max_backoff_ms": 10000},
+ "start_to_close_timeout_ms": 10000, "schedule_to_close_timeout_ms": 120000}
 {"type": "start_timer",       "step_name": "wait",   "sequence": 3, "delay_ms": 60000}
 {"type": "await_signal",      "step_name": "gate",   "sequence": 4, "signal_name": "approved"}
 {"type": "record_marker",     "step_name": "add-fraud-check", "sequence": 5, "marker": "version", "data": "1"}
@@ -110,6 +111,10 @@ Commands are a flat tagged union:
 - **`retry_policy`** (optional) retries a failed attempt before the workflow sees
   the error. It is recorded with the step, so retries continue across restarts,
   and it overrides any policy the engine has for that step name.
+- **`start_to_close_timeout_ms`** / **`schedule_to_close_timeout_ms`** (optional) bound
+  one attempt (from dispatch, heartbeats or not) and the whole step (every attempt and
+  backoff). The activity task carries `start_to_close_timeout_ms` so the worker can stop
+  the work too. Send them only when set: an engine that predates them refuses the field.
 - **`record_marker`** is how `getVersion` / `sideEffect` work: a step that
   completes as it is recorded. In `steps[]` it comes back with `"kind": "MARKER"`,
   `"marker": "version"` or `"side_effect"`, and the value in `output`. A version

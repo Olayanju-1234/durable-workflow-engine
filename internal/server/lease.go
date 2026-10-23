@@ -27,7 +27,18 @@ type lease struct {
 	workerID   string
 	token      string
 	claimedAt  time.Time // when the task was dispatched; basis for step latency
-	deadline   time.Time
+	deadline   time.Time // extended by each heartbeat
+	// stopBy is the attempt's start-to-close deadline (zero: none). Heartbeats
+	// do not move it: it bounds the work, not the worker's liveness.
+	stopBy time.Time
+}
+
+// due is when the lease timer must next look at the lease.
+func (le *lease) due() time.Time {
+	if !le.stopBy.IsZero() && le.stopBy.Before(le.deadline) {
+		return le.stopBy
+	}
+	return le.deadline
 }
 
 // defaultLeaseDuration is how long a worker may hold a task without a
@@ -62,6 +73,9 @@ func (e *Engine) claim(t *Task, workerID string) *lease {
 		claimedAt:  now,
 		deadline:   now.Add(e.leaseDuration),
 	}
+	if d := time.Duration(t.GetStartToCloseTimeoutMs()) * time.Millisecond; d > 0 {
+		le.stopBy = now.Add(d)
+	}
 	e.mu.Lock()
 	key := leaseKey{le.workflowID, le.sequence}
 	if old, ok := e.leases[key]; ok {
@@ -75,7 +89,7 @@ func (e *Engine) claim(t *Task, workerID string) *lease {
 	t.LeaseDurationMs = e.leaseDuration.Milliseconds()
 	e.leaseTimers.Add(timer.Timer{
 		WorkflowID: le.workflowID, StepName: le.stepName,
-		Sequence: le.sequence, FireAt: le.deadline,
+		Sequence: le.sequence, FireAt: le.due(),
 	})
 	return le
 }
@@ -135,13 +149,15 @@ func (e *Engine) Heartbeat(workflowID, token string) error {
 }
 
 // onLeaseExpired is the lease timer's callback: decide whether the lease it was
-// armed for is actually dead, and if so reclaim the task. It acts on the
-// *current* lease state under e.mu, not on the timer's snapshot, so stale fires
-// self-correct:
+// armed for is actually dead (or its attempt out of time), and if so reclaim
+// the task. It acts on the *current* lease state under e.mu, not on the
+// timer's snapshot, so stale fires self-correct:
 //
 //   - lease gone (completed, or already reclaimed): no-op.
 //   - deadline moved (a heartbeat, or a newer lease on a retry of the same
 //     step): re-arm at the new deadline and check again then.
+//   - start-to-close passed: the attempt ran too long, heartbeats or not. It
+//     fails like a dead worker's, with a timeout error.
 //   - deadline passed: the worker is dead. Record StepFailed("lease expired")
 //     and hand the failure to the same retry machinery a worker-reported error
 //     uses — attempts remaining ⇒ backoff + reassign; exhausted ⇒ the workflow
@@ -165,10 +181,10 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 	if !ok || le.stepName != tm.StepName {
 		return // resolved or superseded; stale fire
 	}
-	if now := time.Now(); now.Before(le.deadline) {
+	if now := time.Now(); now.Before(le.due()) {
 		e.leaseTimers.Add(timer.Timer{
 			WorkflowID: le.workflowID, StepName: le.stepName,
-			Sequence: le.sequence, FireAt: le.deadline,
+			Sequence: le.sequence, FireAt: le.due(),
 		})
 		return
 	}
@@ -185,13 +201,15 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 	}
 	e.mu.Lock()
 	// A heartbeat may have landed since the copy above; it rescues the lease.
-	if cur := e.leases[key]; cur == nil || cur.token != le.token || time.Now().Before(cur.deadline) {
+	cur = e.leases[key]
+	if cur == nil || cur.token != le.token || time.Now().Before(cur.due()) {
 		e.mu.Unlock()
 		if cur != nil && cur.token == le.token {
-			e.leaseTimers.Add(timer.Timer{WorkflowID: le.workflowID, StepName: le.stepName, Sequence: le.sequence, FireAt: cur.deadline})
+			e.leaseTimers.Add(timer.Timer{WorkflowID: le.workflowID, StepName: le.stepName, Sequence: le.sequence, FireAt: cur.due()})
 		}
 		return
 	}
+	timedOut := !cur.stopBy.IsZero() && !time.Now().Before(cur.stopBy)
 	delete(e.leaseTokens, le.token)
 	delete(e.leases, key)
 	e.mu.Unlock()
@@ -206,12 +224,15 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 	}
 	attempt := *step
 	workflowType := st.WorkflowType
-	policy := e.retryPolicy(&attempt)
-	willRetry := attempt.Attempts < policy.MaxAttempts
+	delay, willRetry := e.retryAfter(&attempt, time.Now())
+	reason := fmt.Sprintf("lease expired: worker %q missed its deadline", le.workerID)
+	if timedOut {
+		reason = fmt.Sprintf("activity timed out: start-to-close timeout of %s exceeded on worker %q",
+			attempt.StartToClose, le.workerID)
+	}
 	failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 		StepFailed: &history.StepFailedEvent{
-			StepName: le.stepName, Sequence: le.sequence,
-			Error:      fmt.Sprintf("lease expired: worker %q missed its deadline", le.workerID),
+			StepName: le.stepName, Sequence: le.sequence, Error: reason,
 			RetryCount: int32(attempt.Attempts), WillRetry: willRetry,
 		},
 	}}
@@ -220,17 +241,20 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		// as scheduled with no lease and no queue entry. Re-enqueue it: a worker
 		// gets a fresh lease and the attempt proceeds as if nothing happened.
 		e.log.Error("lease expired: append failed; re-enqueueing task", "workflow_id", tm.WorkflowID, "err", err)
-		e.queue.enqueue(&Task{
-			WorkflowId: le.workflowID, StepName: le.stepName,
-			Sequence: le.sequence, Input: attempt.Input,
-		})
+		e.queue.enqueue(activityTask(le.workflowID, &attempt))
 		return
 	}
-	e.metrics.leasesExpired.Inc()
-	e.log.Warn("lease expired; reclaiming task", "workflow_id", tm.WorkflowID,
-		"worker_id", le.workerID, "step", le.stepName, "sequence", le.sequence, "attempt", attempt.Attempts)
+	if timedOut {
+		e.metrics.activityTimeouts.With("start_to_close").Inc()
+		e.log.Warn("activity timed out; reclaiming task", "workflow_id", tm.WorkflowID, "worker_id", le.workerID,
+			"step", le.stepName, "sequence", le.sequence, "attempt", attempt.Attempts, "timeout", "start_to_close")
+	} else {
+		e.metrics.leasesExpired.Inc()
+		e.log.Warn("lease expired; reclaiming task", "workflow_id", tm.WorkflowID,
+			"worker_id", le.workerID, "step", le.stepName, "sequence", le.sequence, "attempt", attempt.Attempts)
+	}
 	if willRetry {
-		e.scheduleRetryLocked(tm.WorkflowID, &attempt, policy.Delay(attempt.Attempts))
+		e.scheduleRetryLocked(tm.WorkflowID, &attempt, delay)
 		return
 	}
 	e.advanceOrRetry(w, workflowType)

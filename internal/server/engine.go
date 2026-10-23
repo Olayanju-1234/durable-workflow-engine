@@ -70,6 +70,7 @@ type Engine struct {
 	leaseTimers    *timer.Service // lease expiry checks (dead-worker detection)
 	decisionTimers *timer.Service // polyglot: SDK worker died holding a workflow task
 	advanceRetries *timer.Service // decision loops that failed mid-advance (transient I/O)
+	deadlines      *timer.Service // workflow execution and activity schedule-to-close timeouts
 	log            *slog.Logger
 	registry       *metrics.Registry
 	metrics        *engineMetrics
@@ -161,6 +162,8 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 	e.decisionTimers.Start()
 	e.advanceRetries = timer.New(e.onAdvanceRetry)
 	e.advanceRetries.Start()
+	e.deadlines = timer.New(e.onDeadline)
+	e.deadlines.Start()
 	e.sched.retry = defaultScheduleRetry
 	e.sched.timers = timer.New(e.onScheduleDue)
 	e.sched.timers.Start()
@@ -178,6 +181,7 @@ func (e *Engine) Close() {
 		e.leaseTimers.Stop()
 		e.decisionTimers.Stop()
 		e.advanceRetries.Stop()
+		e.deadlines.Stop()
 		e.sched.timers.Stop()
 	})
 }
@@ -201,10 +205,31 @@ func (e *Engine) RegisterWorkflow(workflowType string, planner Planner) {
 	e.planners[workflowType] = planner
 }
 
+// StartOption customises StartWorkflow.
+type StartOption func(*startOptions)
+
+type startOptions struct {
+	executionTimeout time.Duration
+}
+
+// WithExecutionTimeout ends the workflow as TIMED_OUT if it has not finished d
+// after it starts. The limit is recorded with the start, so it holds across
+// restarts and failovers.
+func WithExecutionTimeout(d time.Duration) StartOption {
+	return func(o *startOptions) { o.executionTimeout = d }
+}
+
 // StartWorkflow records WorkflowStarted for a new execution and schedules its
 // first step, returning the workflow id. A blank workflowID is auto-generated;
 // a supplied one must not already exist.
-func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID string) (string, error) {
+func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID string, opts ...StartOption) (string, error) {
+	var so startOptions
+	for _, o := range opts {
+		o(&so)
+	}
+	if so.executionTimeout < 0 {
+		return "", fmt.Errorf("%w: execution timeout must not be negative", ErrInvalidArgument)
+	}
 	planner, ok := e.planner(workflowType)
 	if !ok {
 		return "", fmt.Errorf("%w: %q is not registered on this node", ErrUnknownType, workflowType)
@@ -231,10 +256,14 @@ func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID str
 	started := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
 		WorkflowStarted: &history.WorkflowStartedEvent{
 			WorkflowId: workflowID, WorkflowType: workflowType, Input: input,
+			ExecutionTimeoutMs: so.executionTimeout.Milliseconds(),
 		},
 	}}
 	if err := e.appendLocked(w, started, 1); err != nil {
 		return "", err
+	}
+	if so.executionTimeout > 0 {
+		e.armExecutionDeadline(workflowID, time.Unix(0, started.GetTimestamp()).Add(so.executionTimeout))
 	}
 	e.metrics.workflowsStarted.Inc()
 	e.metrics.workflowsActive.Inc()
@@ -312,6 +341,10 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	// Recovered live workflows re-enter the active gauge (it is in-memory and
 	// died with the old process); advancing below may immediately retire one.
 	e.metrics.workflowsActive.Inc()
+	if st.ExecutionTimeout > 0 {
+		// A deadline that passed while we were down fires at once.
+		e.armExecutionDeadline(id, time.Unix(0, st.StartedAt).Add(st.ExecutionTimeout))
+	}
 
 	// Resuming in-flight steps needs no planner, only deciding what comes next
 	// does. SDK workers register after recovery, so a remote workflow's
@@ -320,6 +353,9 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	steps := append([]state.Step(nil), st.Steps...)
 	for i := range steps {
 		step := &steps[i]
+		if step.Kind == state.KindActivity && step.Open() {
+			e.armStepDeadline(id, step)
+		}
 		switch {
 		case step.Retrying:
 			// The backoff timer was in memory: retry promptly, since the
@@ -338,10 +374,7 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 			e.log.Info("recovery: re-armed timer", "workflow_id", id,
 				"step", step.Name, "sequence", step.Sequence, "fire_at", time.Unix(0, step.FireAt))
 		case step.Kind == state.KindActivity:
-			e.queue.enqueue(&Task{
-				WorkflowId: id, StepName: step.Name,
-				Sequence: step.Sequence, Input: step.Input,
-			})
+			e.queue.enqueue(activityTask(id, step))
 			c.requeued++
 			e.log.Info("recovery: re-enqueued in-flight step", "workflow_id", id,
 				"step", step.Name, "sequence", step.Sequence)
@@ -352,7 +385,7 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	// policy allows one, rather than let the workflow see it.
 	if tail := st.Tail(); st.Status == state.StatusRunning && tail != nil && tail.Status == state.StepFailed &&
 		!tail.Retrying && tail.Kind == state.KindActivity {
-		if p := e.retryPolicy(tail); tail.Attempts < p.MaxAttempts {
+		if _, retry := e.retryAfter(tail, time.Now()); retry {
 			e.scheduleRetryLocked(id, tail, 0)
 			c.rearmed++
 			return nil
@@ -422,8 +455,7 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 	if failed {
 		// Retry transparently if attempts remain: the workflow sees the error
 		// only once the policy is exhausted, so the failure says which it is.
-		policy := e.retryPolicy(&attempt)
-		willRetry := attempt.Attempts < policy.MaxAttempts
+		delay, willRetry := e.retryAfter(&attempt, time.Now())
 		failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 			StepFailed: &history.StepFailedEvent{
 				StepName: stepName, Sequence: sequence, Error: stepErr,
@@ -440,7 +472,7 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 		e.log.Warn("step failed", "workflow_id", workflowID, "step", stepName,
 			"sequence", sequence, "error", stepErr, "attempt", attempt.Attempts, "will_retry", willRetry)
 		if willRetry {
-			e.scheduleRetryLocked(workflowID, &attempt, policy.Delay(attempt.Attempts))
+			e.scheduleRetryLocked(workflowID, &attempt, delay)
 			return nil
 		}
 		return e.advanceIfRegisteredLocked(w, workflowType)
@@ -728,18 +760,23 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 			scheduled := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
 				StepScheduled: &history.StepScheduledEvent{
 					StepName: decision.StepName, Sequence: decision.Sequence, Input: decision.Input,
-					RetryPolicy: decision.Retry.ToProto(),
+					RetryPolicy:              decision.Retry.ToProto(),
+					StartToCloseTimeoutMs:    decision.StartToClose.Milliseconds(),
+					ScheduleToCloseTimeoutMs: decision.ScheduleToClose.Milliseconds(),
 				},
 			}}
 			if err := e.appendLocked(w, scheduled, nextID); err != nil {
 				return err
 			}
+			step := &state.Step{
+				Name: decision.StepName, Sequence: decision.Sequence, Input: decision.Input, Attempts: 1,
+				StartToClose: decision.StartToClose, ScheduleToClose: decision.ScheduleToClose,
+				ScheduledAt: scheduled.GetTimestamp(),
+			}
+			e.armStepDeadline(workflowID, step)
 			// Record-then-enqueue: the step is durable before any worker can see it,
 			// so a crash can never dispatch a task the history doesn't know about.
-			e.queue.enqueue(&Task{
-				WorkflowId: workflowID, StepName: decision.StepName,
-				Sequence: decision.Sequence, Input: decision.Input,
-			})
+			e.queue.enqueue(activityTask(workflowID, step))
 			e.log.Info("step scheduled", "workflow_id", workflowID, "step", decision.StepName, "sequence", decision.Sequence)
 
 		case state.DecideStartTimer:

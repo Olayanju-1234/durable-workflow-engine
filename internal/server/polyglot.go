@@ -345,9 +345,14 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 		if err != nil {
 			return state.Decision{}, err
 		}
+		if a.GetStartToCloseTimeoutMs() < 0 || a.GetScheduleToCloseTimeoutMs() < 0 {
+			return state.Decision{}, fmt.Errorf("%w: activity %q has a negative timeout", ErrInvalidCommand, a.GetStepName())
+		}
 		return state.Decision{
 			Type: state.DecideScheduleStep, StepName: a.GetStepName(),
 			Sequence: a.GetSequence(), Input: a.GetInput(), Retry: retry,
+			StartToClose:    time.Duration(a.GetStartToCloseTimeoutMs()) * time.Millisecond,
+			ScheduleToClose: time.Duration(a.GetScheduleToCloseTimeoutMs()) * time.Millisecond,
 		}, nil
 	case *WorkflowCommand_StartTimer:
 		t := c.StartTimer
@@ -397,6 +402,8 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 	case state.DecideScheduleStep:
 		return &WorkflowCommand{Command: &WorkflowCommand_ScheduleActivity{ScheduleActivity: &ScheduleActivityCommand{
 			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, RetryPolicy: d.Retry.ToProto(),
+			StartToCloseTimeoutMs:    d.StartToClose.Milliseconds(),
+			ScheduleToCloseTimeoutMs: d.ScheduleToClose.Milliseconds(),
 		}}}
 	case state.DecideStartTimer:
 		return &WorkflowCommand{Command: &WorkflowCommand_StartTimer{StartTimer: &StartTimerCommand{

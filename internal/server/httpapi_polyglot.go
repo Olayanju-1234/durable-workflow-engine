@@ -80,6 +80,8 @@ type activityTaskDTO struct {
 	InputBase64     string `json:"input_base64,omitempty"`
 	LeaseToken      string `json:"lease_token"`
 	LeaseDurationMs int64  `json:"lease_duration_ms"`
+	// The engine fails the attempt this long after dispatch (absent: no limit).
+	StartToCloseTimeoutMs int64 `json:"start_to_close_timeout_ms,omitempty"`
 }
 
 func (a *HTTPAPI) registerWorkflowTypes(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +185,9 @@ type commandDTO struct {
 	OutputBase64 *string         `json:"output_base64,omitempty"`
 	Error        string          `json:"error,omitempty"`
 	RetryPolicy  *retryPolicyDTO `json:"retry_policy,omitempty"`
+	// schedule_activity: zero or absent means no limit.
+	StartToCloseTimeoutMs    int64 `json:"start_to_close_timeout_ms,omitempty"`
+	ScheduleToCloseTimeoutMs int64 `json:"schedule_to_close_timeout_ms,omitempty"`
 	// record_marker: "version" or "side_effect", and the recorded value.
 	Marker     string  `json:"marker,omitempty"`
 	Data       string  `json:"data,omitempty"`
@@ -270,6 +275,8 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 		return &WorkflowCommand{Command: &WorkflowCommand_ScheduleActivity{
 			ScheduleActivity: &ScheduleActivityCommand{
 				StepName: c.StepName, Sequence: c.Sequence, Input: input, RetryPolicy: retry,
+				StartToCloseTimeoutMs:    c.StartToCloseTimeoutMs,
+				ScheduleToCloseTimeoutMs: c.ScheduleToCloseTimeoutMs,
 			}}}, nil
 	case "start_timer":
 		return &WorkflowCommand{Command: &WorkflowCommand_StartTimer{
@@ -335,6 +342,8 @@ func (a *HTTPAPI) pollActivityTask(w http.ResponseWriter, r *http.Request) {
 		InputBase64:     base64Twin(task.GetInput()),
 		LeaseToken:      task.GetLeaseToken(),
 		LeaseDurationMs: task.GetLeaseDurationMs(),
+
+		StartToCloseTimeoutMs: task.GetStartToCloseTimeoutMs(),
 	})
 }
 
