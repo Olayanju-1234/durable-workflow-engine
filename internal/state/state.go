@@ -88,13 +88,16 @@ type Step struct {
 	Kind     StepKind // reconstructed from the opening event, so runtime needs no definition
 	Status   StepStatus
 	Input    []byte
-	Output   []byte       // set once Status == StepCompleted
-	Error    string       // set once Status == StepFailed (the reason, once StepCancelled)
-	FireAt   int64        // timer steps only: unix-nanos deadline (from TimerStarted), for recovery re-arm
-	Signal   string       // signal steps only: the awaited signal name
-	Marker   string       // marker steps only: "version" or "side_effect"
-	Attempts int          // activity steps: how many times scheduled (>1 means it was retried)
-	Retry    *RetryPolicy // activity steps: the policy recorded with the step, if any
+	Output   []byte // set once Status == StepCompleted
+	Error    string // set once Status == StepFailed (the reason, once StepCancelled)
+	// The latest failure's kind and whether the worker said not to retry it.
+	ErrorType    string
+	NonRetryable bool
+	FireAt       int64        // timer steps only: unix-nanos deadline (from TimerStarted), for recovery re-arm
+	Signal       string       // signal steps only: the awaited signal name
+	Marker       string       // marker steps only: "version" or "side_effect"
+	Attempts     int          // activity steps: how many times scheduled (>1 means it was retried)
+	Retry        *RetryPolicy // activity steps: the policy recorded with the step, if any
 	// Activity steps: the timeouts recorded with the step (zero = none) and
 	// when it was first scheduled (unix nanos), the start of schedule-to-close.
 	StartToClose    time.Duration
@@ -261,6 +264,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 				f.retrying--
 			}
 			s.Status, s.Error, s.Retrying, s.ResolvedEventID = StepScheduled, "", false, 0
+			s.ErrorType, s.NonRetryable = "", false
 			s.Input = ss.GetInput()
 			s.Attempts++
 			if p := RetryPolicyFromProto(ss.GetRetryPolicy()); p != nil {
@@ -370,6 +374,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			// A final failure closes a step between attempts (its deadline
 			// passed, or it was cancelled): the retry will not happen.
 			s.Error, s.Retrying, s.ResolvedEventID = sf.GetError(), false, ev.GetEventId()
+			s.ErrorType, s.NonRetryable = sf.GetErrorType(), sf.GetNonRetryable()
 			if sf.GetCancelled() {
 				s.Status = StepCancelled
 			}
@@ -382,6 +387,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			return err
 		}
 		s.Status, s.Error = StepFailed, sf.GetError()
+		s.ErrorType, s.NonRetryable = sf.GetErrorType(), sf.GetNonRetryable()
 		f.open--
 		if sf.GetCancelled() {
 			s.Status, s.ResolvedEventID = StepCancelled, ev.GetEventId()
@@ -503,9 +509,10 @@ func RetryPolicyFromProto(p *history.RetryPolicy) *RetryPolicy {
 		return nil
 	}
 	return &RetryPolicy{
-		MaxAttempts: int(p.GetMaxAttempts()),
-		Backoff:     time.Duration(p.GetInitialBackoffMs()) * time.Millisecond,
-		MaxBackoff:  time.Duration(p.GetMaxBackoffMs()) * time.Millisecond,
+		MaxAttempts:            int(p.GetMaxAttempts()),
+		Backoff:                time.Duration(p.GetInitialBackoffMs()) * time.Millisecond,
+		MaxBackoff:             time.Duration(p.GetMaxBackoffMs()) * time.Millisecond,
+		NonRetryableErrorTypes: p.GetNonRetryableErrorTypes(),
 	}
 }
 
@@ -515,8 +522,9 @@ func (p *RetryPolicy) ToProto() *history.RetryPolicy {
 		return nil
 	}
 	return &history.RetryPolicy{
-		MaxAttempts:      int32(p.MaxAttempts),
-		InitialBackoffMs: p.Backoff.Milliseconds(),
-		MaxBackoffMs:     p.MaxBackoff.Milliseconds(),
+		MaxAttempts:            int32(p.MaxAttempts),
+		InitialBackoffMs:       p.Backoff.Milliseconds(),
+		MaxBackoffMs:           p.MaxBackoff.Milliseconds(),
+		NonRetryableErrorTypes: p.NonRetryableErrorTypes,
 	}
 }

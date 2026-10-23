@@ -52,13 +52,42 @@ export class WorkflowFailure extends Error {
   }
 }
 
-/** Thrown when an activity recorded a failure — catch it to compensate. */
+/**
+ * Thrown when an activity recorded a failure — catch it to compensate. `type` is
+ * the failure's kind (the error's name, or one of the engine's: LeaseExpired,
+ * StartToCloseTimeout, ScheduleToCloseTimeout); `nonRetryable` says the worker
+ * flagged it as not worth retrying.
+ */
 export class ActivityFailure extends Error {
-  constructor(stepName, message) {
+  constructor(stepName, message, { type = '', nonRetryable = false } = {}) {
     super(message);
     this.name = 'ActivityFailure';
     this.stepName = stepName;
+    this.type = type;
+    this.nonRetryable = nonRetryable;
   }
+}
+
+/**
+ * Throw from an activity to fail its step at once, without retries: a 4xx
+ * answer, a validation error, anything that would fail the same way again.
+ * Any error with `nonRetryable: true` does the same; any error's `type` (or
+ * its `name`, unless plain 'Error') is matched against a retry policy's
+ * `nonRetryableErrorTypes`.
+ */
+export class NonRetryableError extends Error {
+  constructor(message, { type } = {}) {
+    super(message);
+    this.name = 'NonRetryableError';
+    this.nonRetryable = true;
+    if (type) this.type = type;
+  }
+}
+
+/** The kind of failure an activity error reports: its type, else its class name. */
+function errorType(err) {
+  if (typeof err?.type === 'string' && err.type) return err.type;
+  return typeof err?.name === 'string' && err.name !== 'Error' ? err.name : '';
 }
 
 /**
@@ -127,11 +156,14 @@ function putTimeouts(obj, fields) {
 
 function retryPolicyDTO(retry) {
   if (!retry) return undefined;
-  return {
+  const dto = {
     max_attempts: retry.maxAttempts ?? 1,
     initial_backoff_ms: Math.max(0, Math.floor(retry.initialBackoffMs ?? 0)),
     max_backoff_ms: Math.max(0, Math.floor(retry.maxBackoffMs ?? 0)),
   };
+  // Only when set: an engine that predates the field refuses it.
+  if (retry.nonRetryableErrorTypes?.length) dto.non_retryable_error_types = [...retry.nonRetryableErrorTypes];
+  return dto;
 }
 
 /**
@@ -400,7 +432,10 @@ class Context {
     }
     if (recorded.status === 'FAILED') {
       // A genuine, catchable error: this is how Saga compensation works.
-      return rejected(new ActivityFailure(name, recorded.error || 'activity failed'));
+      return rejected(new ActivityFailure(name, recorded.error || 'activity failed', {
+        type: recorded.error_type ?? '',
+        nonRetryable: recorded.non_retryable === true,
+      }));
     }
     if (recorded.status === 'CANCELLED') {
       return rejected(new CancelledFailure(name, recorded.error || 'cancelled'));
@@ -735,12 +770,24 @@ export class Worker {
       putPayload(result, 'output', await entry.fn(input, { ...task, signal: abort.signal }));
     } catch (err) {
       result.error = err?.message || String(err) || 'activity failed';
+      const type = errorType(err);
+      if (type) result.error_type = type;
+      if (err?.nonRetryable === true) result.non_retryable = true;
     } finally {
       stopBeats();
       clearTimeout(limit);
     }
     try {
-      await this.conn.request('/api/activity-tasks/complete', { method: 'POST', body: result, attempts: 3 });
+      try {
+        await this.conn.request('/api/activity-tasks/complete', { method: 'POST', body: result, attempts: 3 });
+      } catch (err) {
+        // An engine before 0.2.0 refuses the fields it doesn't know: report the
+        // failure without them rather than lose it.
+        if (!(err.status === 400 && /unknown field/.test(err.message) && ('error_type' in result || 'non_retryable' in result))) throw err;
+        delete result.error_type;
+        delete result.non_retryable;
+        await this.conn.request('/api/activity-tasks/complete', { method: 'POST', body: result, attempts: 3 });
+      }
     } catch (err) {
       // A lost lease means the task was reassigned, and a cancelled step's
       // result is not wanted: either way, drop it.

@@ -33,6 +33,18 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `worker.ErrActivityCancelled`, TS `task.signal` aborts with `CancelledFailure`, Python sets
   `cancelled`. Metric `workflowd_steps_cancelled_total`.
 
+- Non-retryable failures (ADR-0010). An activity can fail its step at once, whatever the retry
+  policy: Go `worker.NonRetryable(err)`, TS `throw new NonRetryableError(msg)` (or any error with
+  `nonRetryable: true`), Python `raise NonRetryableError(msg)`, Java
+  `throw new Workflowd.NonRetryableException(msg)`. A retry policy can list error types it should
+  not retry (`NonRetryableErrorTypes` / `nonRetryableErrorTypes` / `non_retryable_error_types` /
+  `withNonRetryableErrorTypes`); an error's type is its class name in TS/Python/Java,
+  `worker.Typed(type, err)` in Go, and `LeaseExpired` / `StartToCloseTimeout` /
+  `ScheduleToCloseTimeout` for the engine's own failures. Workflow code sees the type and flag:
+  Go `*workflow.ActivityError`, TS/Python/Java `ActivityFailure.type` / `nonRetryable`. HTTP
+  `error_type` / `non_retryable` on activity completion; SDKs resend without them to an engine
+  that refuses them.
+
 ### Fixed
 - A finished workflow's steps that were still open (a race's losing timer, say) showed as
   `SCHEDULED` forever; they now show as `CANCELLED` ("not needed").

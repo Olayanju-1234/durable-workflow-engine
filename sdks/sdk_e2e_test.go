@@ -6,7 +6,9 @@ package sdks_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -83,7 +85,30 @@ func (h *e2eEngine) restart() {
 	if err := e.Recover(); err != nil {
 		h.t.Fatalf("recover: %v", err)
 	}
-	h.engine, h.handler = e, server.NewHTTPAPI(e, h.log).Handler()
+	h.engine, h.handler = e, olderEngineFor("legacy", server.NewHTTPAPI(e, h.log).Handler())
+}
+
+// olderEngineFor answers like an engine that predates error types (400,
+// unknown field) when a failure of a step whose name ends in suffix reports
+// one, so the scripts can check the SDK falls back instead of losing it.
+func olderEngineFor(suffix string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/activity-tasks/complete" {
+			body, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var req struct {
+				StepName string `json:"step_name"`
+			}
+			_ = json.Unmarshal(body, &req)
+			if strings.HasSuffix(req.StepName, suffix) && (bytes.Contains(body, []byte(`"error_type"`)) || bytes.Contains(body, []byte(`"non_retryable"`))) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, `{"error":"invalid JSON body: json: unknown field \"error_type\""}`)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // runScript runs an SDK scenario script. It prints "RESTART" when it wants the

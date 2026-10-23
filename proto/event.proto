@@ -75,6 +75,10 @@ message RetryPolicy {
   int64 initial_backoff_ms = 2;
   // Zero means no cap.
   int64 max_backoff_ms = 3;
+  // A failure whose error type is listed here is not retried: the workflow
+  // sees it at once (say, a 4xx answer that will never succeed). Older
+  // binaries ignore it and retry.
+  repeated string non_retryable_error_types = 4;
 }
 
 message StepCompletedEvent {
@@ -95,6 +99,12 @@ message StepFailedEvent {
   // race, say), so a worker still running it is told to stop. Any step kind can
   // be cancelled this way. Older binaries read it as a failure.
   bool cancelled = 6;
+  // The worker's name for the kind of failure (an error class, or one of the
+  // engine's: LeaseExpired, StartToCloseTimeout, ScheduleToCloseTimeout),
+  // matched against RetryPolicy.non_retryable_error_types.
+  string error_type = 7;
+  // The worker said the failure is not worth retrying, whatever the policy.
+  bool non_retryable = 8;
 }
 
 message WorkflowCompletedEvent {

@@ -98,7 +98,8 @@ Commands are a flat tagged union:
 
 ```json
 {"type": "schedule_activity", "step_name": "charge", "sequence": 2, "input": "...",
- "retry_policy": {"max_attempts": 3, "initial_backoff_ms": 500, "max_backoff_ms": 10000},
+ "retry_policy": {"max_attempts": 3, "initial_backoff_ms": 500, "max_backoff_ms": 10000,
+                  "non_retryable_error_types": ["BadRequest"]},
  "start_to_close_timeout_ms": 10000, "schedule_to_close_timeout_ms": 120000}
 {"type": "start_timer",       "step_name": "wait",   "sequence": 3, "delay_ms": 60000}
 {"type": "await_signal",      "step_name": "gate",   "sequence": 4, "signal_name": "approved"}
@@ -111,7 +112,9 @@ Commands are a flat tagged union:
 
 - **`retry_policy`** (optional) retries a failed attempt before the workflow sees
   the error. It is recorded with the step, so retries continue across restarts,
-  and it overrides any policy the engine has for that step name.
+  and it overrides any policy the engine has for that step name. Failures whose
+  `error_type` is in `non_retryable_error_types` are not retried (send the list only
+  when it is non-empty: an engine before 0.2.0 refuses the field).
 - **`start_to_close_timeout_ms`** / **`schedule_to_close_timeout_ms`** (optional) bound
   one attempt (from dispatch, heartbeats or not) and the whole step (every attempt and
   backoff). The activity task carries `start_to_close_timeout_ms` so the worker can stop
@@ -229,6 +232,12 @@ Activities are where real side effects happen, and they need no replay at all â€
 just "run this, report the result". Poll `GET /api/activity-tasks`, do the work,
 `POST /api/activity-tasks/complete`. Present the `lease_token` you were given;
 if it is rejected, the task was reassigned and your result must be discarded.
+
+A failure is `{"error": "..."}`, optionally with `"error_type"` (the kind of failure;
+the SDKs send the exception's class name, which a retry policy can list in
+`non_retryable_error_types`) and `"non_retryable": true` (fail the step now, whatever
+the policy: a 4xx answer that will never succeed). An engine before 0.2.0 refuses
+those two fields with a `400 unknown field`; the SDKs then resend without them.
 
 Activity workers have been language-agnostic since Week 3 â€” the SDKs here simply
 bundle a loop for convenience.

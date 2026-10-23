@@ -3,7 +3,7 @@
 // The worker is given only the follower, so everything below also proves it
 // follows the leader hint. Prints PASS on success.
 import { createInterface } from 'node:readline';
-import { Worker, DEFAULT_VERSION } from './workflowd.mjs';
+import { Worker, DEFAULT_VERSION, NonRetryableError } from './workflowd.mjs';
 
 const [follower, leader] = process.argv.slice(2);
 const fail = (msg) => {
@@ -82,6 +82,33 @@ worker.activity('ts-provision', (_input, task) => new Promise((_resolve, reject)
     reject(task.signal.reason);
   });
 }));
+// Non-retryable failures: a flagged 404 and a policy-listed BadRequest fail at
+// once, a 503 retries; against an older engine the failure still arrives.
+class BadRequest extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'BadRequest';
+  }
+}
+const webhookCalls = {};
+worker.workflow('TsWebhook', async (ctx) => {
+  try {
+    await ctx.activity(ctx.input === 'legacy' ? 'ts-legacy' : 'ts-webhook', ctx.input, {
+      retry: { maxAttempts: ctx.input === 'legacy' ? 1 : 4, initialBackoffMs: 10, nonRetryableErrorTypes: ['BadRequest'] },
+    });
+    return 'delivered';
+  } catch (err) {
+    return `${err.type}|${err.nonRetryable}|${err.message}`;
+  }
+});
+const webhook = async (code) => {
+  webhookCalls[code] = (webhookCalls[code] ?? 0) + 1;
+  if (code === '404') throw new NonRetryableError('webhook answered 404');
+  if (code === '400' || code === 'legacy') throw new BadRequest('webhook answered 400');
+  throw new Error('webhook answered 503');
+};
+worker.activity('ts-webhook', webhook);
+worker.activity('ts-legacy', webhook);
 worker.workflow('TsAfterRestart', async (ctx) => ctx.activity('ts-flaky', { n: 41 }, { as: 'json' }));
 
 worker.activity('ts-flaky', async (order) => {
@@ -132,6 +159,17 @@ if (par.output !== '{"parts":[10,20,30],"winner":1}') fail(`parallel: output ${p
 const bounded = await waitDone(await worker.startWorkflow('TsTimeouts'));
 if (!/^failed: .*start-to-close/.test(bounded.output) || !stallAborted) {
   fail(`timeouts: output ${bounded.output}, aborted=${stallAborted}; want the attempt to time out and abort`);
+}
+for (const [code, want, calls] of [
+  ['404', 'NonRetryableError|true|webhook answered 404', 1],
+  ['400', 'BadRequest|false|webhook answered 400', 1],
+  ['503', '|false|webhook answered 503', 4],
+  ['legacy', '|false|webhook answered 400', 1], // the older engine never saw the type
+]) {
+  const hook = await waitDone(await worker.startWorkflow('TsWebhook', code));
+  if (hook.output !== want || webhookCalls[code] !== calls) {
+    fail(`webhook ${code}: output ${hook.output} after ${webhookCalls[code]} calls, want ${want} after ${calls}`);
+  }
 }
 const raceId = await worker.startWorkflow('TsRace');
 for (let i = 0; ; i++) {

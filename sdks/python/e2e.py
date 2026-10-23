@@ -14,7 +14,14 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from workflowd import DEFAULT_VERSION, ActivityFailure, CancelledFailure, RetryPolicy, Worker  # noqa: E402
+from workflowd import (  # noqa: E402
+    DEFAULT_VERSION,
+    ActivityFailure,
+    CancelledFailure,
+    NonRetryableError,
+    RetryPolicy,
+    Worker,
+)
 
 follower, leader = sys.argv[1], sys.argv[2]
 
@@ -120,6 +127,42 @@ def py_provision_activity(_payload, info):
     raise RuntimeError("stopped")
 
 
+# Non-retryable failures: a flagged 404 and a policy-listed BadRequest fail at
+# once, a 503 retries; against an older engine the failure still arrives.
+class BadRequest(Exception):
+    pass
+
+
+webhook_calls = {}
+
+
+@worker.workflow("PyWebhook")
+def py_webhook(ctx):
+    legacy = ctx.input == "legacy"
+    try:
+        ctx.activity(
+            "py-legacy" if legacy else "py-webhook",
+            ctx.input,
+            retry=RetryPolicy(max_attempts=1 if legacy else 4, initial_backoff=0.01, non_retryable_error_types=("BadRequest",)),
+        )
+        return "delivered"
+    except ActivityFailure as err:
+        return f"{err.type}|{err.non_retryable}|{err}"
+
+
+def webhook(code):
+    webhook_calls[code] = webhook_calls.get(code, 0) + 1
+    if code == "404":
+        raise NonRetryableError("webhook answered 404")
+    if code in ("400", "legacy"):
+        raise BadRequest("webhook answered 400")
+    raise RuntimeError("webhook answered 503")
+
+
+worker.activity("py-webhook")(webhook)
+worker.activity("py-legacy")(webhook)
+
+
 @worker.workflow("PyAfterRestart")
 def py_after_restart(ctx):
     return ctx.activity("py-flaky", {"n": 41}, decode="json")
@@ -186,6 +229,16 @@ if json.loads(par["output"]) != {"parts": [10, 20, 30], "winner": 1}:
 bounded = wait_done(worker.start_workflow("PyTimeouts"))
 if "start-to-close" not in bounded["output"] or not stall_stopped.wait(2):
     fail(f"timeouts: output {bounded['output']}, stopped={stall_stopped.is_set()}")
+for code, want, calls in (
+    ("404", "NonRetryableError|True|webhook answered 404", 1),
+    ("400", "BadRequest|False|webhook answered 400", 1),
+    ("503", "RuntimeError|False|webhook answered 503", 4),
+    ("legacy", "|False|webhook answered 400", 1),  # the older engine never saw the type
+):
+    hook = wait_done(worker.start_workflow("PyWebhook", code))
+    if hook["output"] != want or webhook_calls.get(code) != calls:
+        fail(f"webhook {code}: output {hook['output']} after {webhook_calls.get(code)} calls, want {want} after {calls}")
+
 race_id = worker.start_workflow("PyRace")
 for _ in range(100):
     if any(s["step_name"] == "late-callback" for s in worker.describe(race_id)["steps"]):

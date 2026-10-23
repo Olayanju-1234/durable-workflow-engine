@@ -234,9 +234,10 @@ func retryPolicy(p *workflow.RetryPolicy) *state.RetryPolicy {
 		return nil
 	}
 	return &state.RetryPolicy{
-		MaxAttempts: p.MaxAttempts,
-		Backoff:     p.InitialBackoff,
-		MaxBackoff:  p.MaxBackoff,
+		MaxAttempts:            p.MaxAttempts,
+		Backoff:                p.InitialBackoff,
+		MaxBackoff:             p.MaxBackoff,
+		NonRetryableErrorTypes: p.NonRetryableErrorTypes,
 	}
 }
 
@@ -439,7 +440,10 @@ func (f *future) Get() ([]byte, error) {
 	}
 	c.observe(f.seq)
 	if rec.Status == state.StepFailed {
-		return nil, errors.New(rec.Error)
+		if rec.Kind != state.KindActivity {
+			return nil, errors.New(rec.Error)
+		}
+		return nil, &workflow.ActivityError{StepName: rec.Name, Message: rec.Error, Type: rec.ErrorType, NonRetryable: rec.NonRetryable}
 	}
 	return rec.Output, nil
 }

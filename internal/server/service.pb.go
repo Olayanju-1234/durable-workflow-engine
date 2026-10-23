@@ -1825,7 +1825,12 @@ type CompleteTaskRequest struct {
 	Result isCompleteTaskRequest_Result `protobuf_oneof:"result"`
 	// The lease token from the dispatched Task. Results without the current
 	// lease are rejected — a worker that lost its lease must not record anything.
-	LeaseToken    string `protobuf:"bytes,6,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	LeaseToken string `protobuf:"bytes,6,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
+	// With an error: the kind of failure, matched against the step's retry
+	// policy's non_retryable_error_types (SDKs send the error's class name).
+	ErrorType string `protobuf:"bytes,7,opt,name=error_type,json=errorType,proto3" json:"error_type,omitempty"`
+	// With an error: fail the step now, without retrying, whatever the policy.
+	NonRetryable  bool `protobuf:"varint,8,opt,name=non_retryable,json=nonRetryable,proto3" json:"non_retryable,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1911,6 +1916,20 @@ func (x *CompleteTaskRequest) GetLeaseToken() string {
 		return x.LeaseToken
 	}
 	return ""
+}
+
+func (x *CompleteTaskRequest) GetErrorType() string {
+	if x != nil {
+		return x.ErrorType
+	}
+	return ""
+}
+
+func (x *CompleteTaskRequest) GetNonRetryable() bool {
+	if x != nil {
+		return x.NonRetryable
+	}
+	return false
 }
 
 type isCompleteTaskRequest_Result interface {
@@ -2468,7 +2487,9 @@ type StepInfo struct {
 	FireAt     int64  `protobuf:"varint,8,opt,name=fire_at,json=fireAt,proto3" json:"fire_at,omitempty"`
 	SignalName string `protobuf:"bytes,9,opt,name=signal_name,json=signalName,proto3" json:"signal_name,omitempty"`
 	// Marker steps: "version" or "side_effect".
-	Marker        string `protobuf:"bytes,10,opt,name=marker,proto3" json:"marker,omitempty"`
+	Marker string `protobuf:"bytes,10,opt,name=marker,proto3" json:"marker,omitempty"`
+	// Failed steps: the kind of failure the worker (or engine) reported.
+	ErrorType     string `protobuf:"bytes,11,opt,name=error_type,json=errorType,proto3" json:"error_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2569,6 +2590,13 @@ func (x *StepInfo) GetSignalName() string {
 func (x *StepInfo) GetMarker() string {
 	if x != nil {
 		return x.Marker
+	}
+	return ""
+}
+
+func (x *StepInfo) GetErrorType() string {
+	if x != nil {
+		return x.ErrorType
 	}
 	return ""
 }
@@ -2942,7 +2970,7 @@ const file_service_proto_rawDesc = "" +
 	"\x11lease_duration_ms\x18\x06 \x01(\x03R\x0fleaseDurationMs\x128\n" +
 	"\x19start_to_close_timeout_ms\x18\a \x01(\x03R\x15startToCloseTimeoutMs\"9\n" +
 	"\x10PollTaskResponse\x12%\n" +
-	"\x04task\x18\x01 \x01(\v2\x11.workflow.v1.TaskR\x04task\"\xcc\x01\n" +
+	"\x04task\x18\x01 \x01(\v2\x11.workflow.v1.TaskR\x04task\"\x90\x02\n" +
 	"\x13CompleteTaskRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1b\n" +
@@ -2951,7 +2979,10 @@ const file_service_proto_rawDesc = "" +
 	"\x06output\x18\x04 \x01(\fH\x00R\x06output\x12\x16\n" +
 	"\x05error\x18\x05 \x01(\tH\x00R\x05error\x12\x1f\n" +
 	"\vlease_token\x18\x06 \x01(\tR\n" +
-	"leaseTokenB\b\n" +
+	"leaseToken\x12\x1d\n" +
+	"\n" +
+	"error_type\x18\a \x01(\tR\terrorType\x12#\n" +
+	"\rnon_retryable\x18\b \x01(\bR\fnonRetryableB\b\n" +
 	"\x06result\"\x16\n" +
 	"\x14CompleteTaskResponse\"q\n" +
 	"\x10HeartbeatRequest\x12\x1f\n" +
@@ -2989,7 +3020,7 @@ const file_service_proto_rawDesc = "" +
 	"\tworkflows\x18\x01 \x03(\v2\x1c.workflow.v1.WorkflowSummaryR\tworkflows\"5\n" +
 	"\x12GetWorkflowRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
-	"workflowId\"\x8b\x02\n" +
+	"workflowId\"\xaa\x02\n" +
 	"\bStepInfo\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x12\n" +
@@ -3002,7 +3033,9 @@ const file_service_proto_rawDesc = "" +
 	"\vsignal_name\x18\t \x01(\tR\n" +
 	"signalName\x12\x16\n" +
 	"\x06marker\x18\n" +
-	" \x01(\tR\x06marker\"\xa8\x01\n" +
+	" \x01(\tR\x06marker\x12\x1d\n" +
+	"\n" +
+	"error_type\x18\v \x01(\tR\terrorType\"\xa8\x01\n" +
 	"\x13GetWorkflowResponse\x126\n" +
 	"\asummary\x18\x01 \x01(\v2\x1c.workflow.v1.WorkflowSummaryR\asummary\x12+\n" +
 	"\x05steps\x18\x02 \x03(\v2\x15.workflow.v1.StepInfoR\x05steps\x12\x14\n" +

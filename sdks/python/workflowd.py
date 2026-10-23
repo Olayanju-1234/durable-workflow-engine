@@ -70,6 +70,7 @@ __all__ = [
     "WorkflowFailure",
     "ActivityFailure",
     "CancelledFailure",
+    "NonRetryableError",
     "DEFAULT_VERSION",
     "decide",
 ]
@@ -85,11 +86,36 @@ class WorkflowFailure(Exception):
 
 
 class ActivityFailure(Exception):
-    """Raised when an activity recorded a failure. Catch it to compensate."""
+    """Raised when an activity recorded a failure. Catch it to compensate.
 
-    def __init__(self, step_name: str, message: str):
+    ``type`` is the failure's kind (the activity's exception class name, or one
+    of the engine's: LeaseExpired, StartToCloseTimeout, ScheduleToCloseTimeout);
+    ``non_retryable`` says the worker flagged it as not worth retrying.
+    """
+
+    def __init__(self, step_name: str, message: str, type: str = "", non_retryable: bool = False):
         super().__init__(message)
         self.step_name = step_name
+        self.type = type
+        self.non_retryable = non_retryable
+
+
+class NonRetryableError(Exception):
+    """Raise from an activity to fail its step at once, without retries: a 4xx
+    answer, a validation error, anything that would fail the same way again.
+    Any exception with ``non_retryable = True`` does the same."""
+
+    non_retryable = True
+
+    def __init__(self, message: str, *, error_type: Optional[str] = None):
+        super().__init__(message)
+        if error_type:
+            self.error_type = error_type
+
+
+def _error_type(err: BaseException) -> str:
+    """The kind of failure an activity exception reports: its error_type, else its class name."""
+    return getattr(err, "error_type", None) or type(err).__name__
 
 
 class CancelledFailure(Exception):
@@ -106,20 +132,26 @@ class RetryPolicy:
 
     ``max_attempts`` counts the first attempt (1 means no retries). The wait
     before each retry starts at ``initial_backoff`` seconds and doubles, capped
-    at ``max_backoff`` (0 means no cap). It is recorded with the step, so the
-    retries survive engine restarts.
+    at ``max_backoff`` (0 means no cap). Failures whose type (the exception
+    class name, or ``error_type``) is in ``non_retryable_error_types`` are not
+    retried. It is recorded with the step, so the retries survive engine restarts.
     """
 
     max_attempts: int = 1
     initial_backoff: float = 0.0
     max_backoff: float = 0.0
+    non_retryable_error_types: tuple = ()
 
     def to_wire(self) -> dict:
-        return {
+        wire = {
             "max_attempts": self.max_attempts,
             "initial_backoff_ms": max(0, int(self.initial_backoff * 1000)),
             "max_backoff_ms": max(0, int(self.max_backoff * 1000)),
         }
+        # Only when set: an engine that predates the field refuses it.
+        if self.non_retryable_error_types:
+            wire["non_retryable_error_types"] = list(self.non_retryable_error_types)
+        return wire
 
 
 def _put_timeouts(obj: dict, **seconds: Optional[float]) -> dict:
@@ -226,7 +258,12 @@ class Future:
         if rec.get("status") == "CANCELLED":
             raise CancelledFailure(self._name, rec.get("error") or "cancelled")
         if rec.get("status") == "FAILED":
-            raise ActivityFailure(self._name, rec.get("error") or "activity failed")
+            raise ActivityFailure(
+                self._name,
+                rec.get("error") or "activity failed",
+                rec.get("error_type") or "",
+                rec.get("non_retryable") is True,
+            )
         return read_payload(rec, "output", self._decode)
 
 
@@ -735,12 +772,24 @@ class Worker:
             _put_payload(result, "output", out)
         except Exception as err:
             result["error"] = str(err) or repr(err)
+            result["error_type"] = _error_type(err)
+            if getattr(err, "non_retryable", False) is True:
+                result["non_retryable"] = True
         finally:
             stop_beats()
             if timer is not None:
                 timer.cancel()
         try:
-            self.conn.request("POST", "/api/activity-tasks/complete", result, attempts=3)
+            try:
+                self.conn.request("POST", "/api/activity-tasks/complete", result, attempts=3)
+            except _HTTPError as err:
+                # An engine before 0.2.0 refuses the fields it doesn't know:
+                # report the failure without them rather than lose it.
+                if not (err.status == 400 and "unknown field" in str(err) and "error_type" in result):
+                    raise
+                result.pop("error_type", None)
+                result.pop("non_retryable", None)
+                self.conn.request("POST", "/api/activity-tasks/complete", result, attempts=3)
         except Exception as err:
             if getattr(err, "status", None) != 409:  # lost lease: task was reassigned
                 print(f"[workflowd] activity complete failed: {err}")

@@ -418,6 +418,22 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	return nil
 }
 
+// TaskFailure is a failed activity attempt as a worker reports it.
+type TaskFailure struct {
+	Message string
+	// Type names the kind of failure, matched against the step's retry
+	// policy's NonRetryableErrorTypes.
+	Type string
+	// NonRetryable fails the step now, whatever the policy.
+	NonRetryable bool
+}
+
+// FailTask records a failed attempt of an activity in flight: retried if the
+// policy allows it, else the step's result. See CompleteTask.
+func (e *Engine) FailTask(workflowID, stepName string, sequence int64, leaseToken string, f TaskFailure) error {
+	return e.completeTask(workflowID, stepName, sequence, leaseToken, nil, &f)
+}
+
 // CompleteTask records a worker's result for an activity in flight and advances
 // the workflow. failed selects StepFailed (error) over StepCompleted (output).
 // It rejects a result that does not match an activity in flight, which makes a
@@ -426,6 +442,13 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 // a worker whose lease expired — its task reassigned — is turned away here, so
 // two workers can never both record a result for the same attempt.
 func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, leaseToken string, output []byte, stepErr string, failed bool) error {
+	if failed {
+		return e.FailTask(workflowID, stepName, sequence, leaseToken, TaskFailure{Message: stepErr})
+	}
+	return e.completeTask(workflowID, stepName, sequence, leaseToken, output, nil)
+}
+
+func (e *Engine) completeTask(workflowID, stepName string, sequence int64, leaseToken string, output []byte, failure *TaskFailure) error {
 	if err := validateID(workflowID); err != nil {
 		return err
 	}
@@ -462,14 +485,17 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 	}
 	attempt := *step
 	workflowType := st.WorkflowType
-	if failed {
+	if failure != nil {
 		// Retry transparently if attempts remain: the workflow sees the error
 		// only once the policy is exhausted, so the failure says which it is.
+		attempt.ErrorType, attempt.NonRetryable = failure.Type, failure.NonRetryable
 		delay, willRetry := e.retryAfter(&attempt, time.Now())
+		stepErr := failure.Message
 		failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 			StepFailed: &history.StepFailedEvent{
 				StepName: stepName, Sequence: sequence, Error: stepErr,
 				RetryCount: int32(attempt.Attempts), WillRetry: willRetry,
+				ErrorType: failure.Type, NonRetryable: failure.NonRetryable,
 			},
 		}}
 		if err := e.appendLocked(w, failedEv, int64(len(events)+1)); err != nil {
@@ -479,8 +505,9 @@ func (e *Engine) CompleteTask(workflowID, stepName string, sequence int64, lease
 		e.dropLease(workflowID, sequence)
 		e.metrics.taskResults.With("failed").Inc()
 		e.metrics.stepDuration.Observe(time.Since(claimedAt).Seconds())
-		e.log.Warn("step failed", "workflow_id", workflowID, "step", stepName,
-			"sequence", sequence, "error", stepErr, "attempt", attempt.Attempts, "will_retry", willRetry)
+		e.log.Warn("step failed", "workflow_id", workflowID, "step", stepName, "sequence", sequence,
+			"error", stepErr, "error_type", failure.Type, "non_retryable", failure.NonRetryable,
+			"attempt", attempt.Attempts, "will_retry", willRetry)
 		if willRetry {
 			e.scheduleRetryLocked(workflowID, &attempt, delay)
 			return nil

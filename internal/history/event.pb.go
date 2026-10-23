@@ -456,9 +456,13 @@ type RetryPolicy struct {
 	MaxAttempts      int32 `protobuf:"varint,1,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
 	InitialBackoffMs int64 `protobuf:"varint,2,opt,name=initial_backoff_ms,json=initialBackoffMs,proto3" json:"initial_backoff_ms,omitempty"`
 	// Zero means no cap.
-	MaxBackoffMs  int64 `protobuf:"varint,3,opt,name=max_backoff_ms,json=maxBackoffMs,proto3" json:"max_backoff_ms,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	MaxBackoffMs int64 `protobuf:"varint,3,opt,name=max_backoff_ms,json=maxBackoffMs,proto3" json:"max_backoff_ms,omitempty"`
+	// A failure whose error type is listed here is not retried: the workflow
+	// sees it at once (say, a 4xx answer that will never succeed). Older
+	// binaries ignore it and retry.
+	NonRetryableErrorTypes []string `protobuf:"bytes,4,rep,name=non_retryable_error_types,json=nonRetryableErrorTypes,proto3" json:"non_retryable_error_types,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *RetryPolicy) Reset() {
@@ -510,6 +514,13 @@ func (x *RetryPolicy) GetMaxBackoffMs() int64 {
 		return x.MaxBackoffMs
 	}
 	return 0
+}
+
+func (x *RetryPolicy) GetNonRetryableErrorTypes() []string {
+	if x != nil {
+		return x.NonRetryableErrorTypes
+	}
+	return nil
 }
 
 type StepCompletedEvent struct {
@@ -584,7 +595,13 @@ type StepFailedEvent struct {
 	// The step was cancelled, not failed: workflow code cancelled it (a lost
 	// race, say), so a worker still running it is told to stop. Any step kind can
 	// be cancelled this way. Older binaries read it as a failure.
-	Cancelled     bool `protobuf:"varint,6,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	Cancelled bool `protobuf:"varint,6,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	// The worker's name for the kind of failure (an error class, or one of the
+	// engine's: LeaseExpired, StartToCloseTimeout, ScheduleToCloseTimeout),
+	// matched against RetryPolicy.non_retryable_error_types.
+	ErrorType string `protobuf:"bytes,7,opt,name=error_type,json=errorType,proto3" json:"error_type,omitempty"`
+	// The worker said the failure is not worth retrying, whatever the policy.
+	NonRetryable  bool `protobuf:"varint,8,opt,name=non_retryable,json=nonRetryable,proto3" json:"non_retryable,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -657,6 +674,20 @@ func (x *StepFailedEvent) GetWillRetry() bool {
 func (x *StepFailedEvent) GetCancelled() bool {
 	if x != nil {
 		return x.Cancelled
+	}
+	return false
+}
+
+func (x *StepFailedEvent) GetErrorType() string {
+	if x != nil {
+		return x.ErrorType
+	}
+	return ""
+}
+
+func (x *StepFailedEvent) GetNonRetryable() bool {
+	if x != nil {
+		return x.NonRetryable
 	}
 	return false
 }
@@ -1089,15 +1120,16 @@ const file_event_proto_rawDesc = "" +
 	"signalName\x12:\n" +
 	"\fretry_policy\x18\x06 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\x128\n" +
 	"\x19start_to_close_timeout_ms\x18\a \x01(\x03R\x15startToCloseTimeoutMs\x12>\n" +
-	"\x1cschedule_to_close_timeout_ms\x18\b \x01(\x03R\x18scheduleToCloseTimeoutMs\"\x84\x01\n" +
+	"\x1cschedule_to_close_timeout_ms\x18\b \x01(\x03R\x18scheduleToCloseTimeoutMs\"\xbf\x01\n" +
 	"\vRetryPolicy\x12!\n" +
 	"\fmax_attempts\x18\x01 \x01(\x05R\vmaxAttempts\x12,\n" +
 	"\x12initial_backoff_ms\x18\x02 \x01(\x03R\x10initialBackoffMs\x12$\n" +
-	"\x0emax_backoff_ms\x18\x03 \x01(\x03R\fmaxBackoffMs\"e\n" +
+	"\x0emax_backoff_ms\x18\x03 \x01(\x03R\fmaxBackoffMs\x129\n" +
+	"\x19non_retryable_error_types\x18\x04 \x03(\tR\x16nonRetryableErrorTypes\"e\n" +
 	"\x12StepCompletedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x16\n" +
 	"\x06output\x18\x02 \x01(\fR\x06output\x12\x1a\n" +
-	"\bsequence\x18\x03 \x01(\x03R\bsequence\"\xbe\x01\n" +
+	"\bsequence\x18\x03 \x01(\x03R\bsequence\"\x82\x02\n" +
 	"\x0fStepFailedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1a\n" +
@@ -1106,7 +1138,10 @@ const file_event_proto_rawDesc = "" +
 	"retryCount\x12\x1d\n" +
 	"\n" +
 	"will_retry\x18\x05 \x01(\bR\twillRetry\x12\x1c\n" +
-	"\tcancelled\x18\x06 \x01(\bR\tcancelled\"0\n" +
+	"\tcancelled\x18\x06 \x01(\bR\tcancelled\x12\x1d\n" +
+	"\n" +
+	"error_type\x18\a \x01(\tR\terrorType\x12#\n" +
+	"\rnon_retryable\x18\b \x01(\bR\fnonRetryable\"0\n" +
 	"\x16WorkflowCompletedEvent\x12\x16\n" +
 	"\x06output\x18\x01 \x01(\fR\x06output\"\x86\x01\n" +
 	"\x13WorkflowFailedEvent\x12\x14\n" +

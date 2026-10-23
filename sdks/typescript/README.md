@@ -35,6 +35,13 @@ const late = (await ctx.waitAny([ctx.waitForSignal('reply', 'approved'), ctx.sle
 // Retry a failed attempt before the workflow sees the error; JSON and bytes payloads.
 const receipt = await ctx.activity('charge', { amount: 42 }, { retry: { maxAttempts: 3, initialBackoffMs: 500 }, as: 'json' });
 
+// Some failures are not worth retrying: throw NonRetryableError, or list error names in the policy.
+worker.activity('deliver', async (event) => {
+  const res = await fetch(url, { method: 'POST', body: JSON.stringify(event) });
+  if (res.status >= 400 && res.status < 500) throw new NonRetryableError(`webhook answered ${res.status}`);
+  if (!res.ok) throw new Error(`webhook answered ${res.status}`); // retried
+});
+
 // Bound one attempt and the whole step; bound a whole run when you start it.
 await ctx.activity('render', doc, { startToCloseTimeoutMs: 30_000, scheduleToCloseTimeoutMs: 300_000 });
 await worker.startWorkflow('Order', order, `order-${order.id}`, { executionTimeoutMs: 86_400_000 });

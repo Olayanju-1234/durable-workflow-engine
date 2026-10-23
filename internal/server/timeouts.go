@@ -135,7 +135,8 @@ func (e *Engine) timeOutStepLocked(w *wfState, step *state.Step) {
 	failed := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 		StepFailed: &history.StepFailedEvent{
 			StepName: step.Name, Sequence: step.Sequence, RetryCount: int32(step.Attempts),
-			Error: fmt.Sprintf("activity timed out: schedule-to-close timeout of %s exceeded", step.ScheduleToClose),
+			Error:     fmt.Sprintf("activity timed out: schedule-to-close timeout of %s exceeded", step.ScheduleToClose),
+			ErrorType: ErrorTypeScheduleToCloseTimeout,
 		},
 	}}
 	if err := e.appendLocked(w, failed, int64(len(events)+1)); err != nil {

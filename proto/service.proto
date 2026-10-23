@@ -332,6 +332,11 @@ message CompleteTaskRequest {
   // The lease token from the dispatched Task. Results without the current
   // lease are rejected — a worker that lost its lease must not record anything.
   string lease_token = 6;
+  // With an error: the kind of failure, matched against the step's retry
+  // policy's non_retryable_error_types (SDKs send the error's class name).
+  string error_type = 7;
+  // With an error: fail the step now, without retrying, whatever the policy.
+  bool non_retryable = 8;
 }
 
 message CompleteTaskResponse {}
@@ -414,6 +419,8 @@ message StepInfo {
   string signal_name = 9;
   // Marker steps: "version" or "side_effect".
   string marker = 10;
+  // Failed steps: the kind of failure the worker (or engine) reported.
+  string error_type = 11;
 }
 
 message GetWorkflowResponse {

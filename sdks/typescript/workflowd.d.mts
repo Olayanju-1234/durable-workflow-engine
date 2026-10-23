@@ -7,8 +7,22 @@ export class WorkflowFailure extends Error {
 
 /** Rejected by `ctx.activity` when the activity recorded a failure. Catch it to compensate. */
 export class ActivityFailure extends Error {
-  constructor(stepName: string, message: string);
+  constructor(stepName: string, message: string, opts?: { type?: string; nonRetryable?: boolean });
   readonly stepName: string;
+  /** The failure's kind: the activity error's name, or LeaseExpired / StartToCloseTimeout / ScheduleToCloseTimeout. */
+  readonly type: string;
+  /** The worker flagged the failure as not worth retrying. */
+  readonly nonRetryable: boolean;
+}
+
+/**
+ * Throw from an activity to fail its step at once, without retries. Any error with
+ * `nonRetryable: true` does the same.
+ */
+export class NonRetryableError extends Error {
+  constructor(message: string, opts?: { type?: string });
+  readonly nonRetryable: true;
+  readonly type?: string;
 }
 
 /**
@@ -41,6 +55,8 @@ export interface RetryPolicy {
   initialBackoffMs?: number;
   /** Cap on the wait; 0 or absent means no cap. */
   maxBackoffMs?: number;
+  /** Failures of these types (an activity error's `type`, else its `name`) are not retried. */
+  nonRetryableErrorTypes?: string[];
 }
 
 export interface ActivityOptions {

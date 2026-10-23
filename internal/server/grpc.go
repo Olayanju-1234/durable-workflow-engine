@@ -99,24 +99,21 @@ func (s *GRPCServer) PollTask(ctx context.Context, req *PollTaskRequest) (*PollT
 }
 
 func (s *GRPCServer) CompleteTask(ctx context.Context, req *CompleteTaskRequest) (*CompleteTaskResponse, error) {
-	var (
-		output  []byte
-		stepErr string
-		failed  bool
-	)
-	switch r := req.GetResult().(type) {
-	case *CompleteTaskRequest_Output:
-		output = r.Output
-	case *CompleteTaskRequest_Error:
-		stepErr, failed = r.Error, true
-	default:
-		return nil, status.Error(codes.InvalidArgument, "complete task: a result (output or error) is required")
-	}
 	e, err := s.engine(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := e.CompleteTask(req.GetWorkflowId(), req.GetStepName(), req.GetSequence(), req.GetLeaseToken(), output, stepErr, failed); err != nil {
+	switch r := req.GetResult().(type) {
+	case *CompleteTaskRequest_Output:
+		err = e.CompleteTask(req.GetWorkflowId(), req.GetStepName(), req.GetSequence(), req.GetLeaseToken(), r.Output, "", false)
+	case *CompleteTaskRequest_Error:
+		err = e.FailTask(req.GetWorkflowId(), req.GetStepName(), req.GetSequence(), req.GetLeaseToken(), TaskFailure{
+			Message: r.Error, Type: req.GetErrorType(), NonRetryable: req.GetNonRetryable(),
+		})
+	default:
+		return nil, status.Error(codes.InvalidArgument, "complete task: a result (output or error) is required")
+	}
+	if err != nil {
 		if errors.Is(err, ErrNotLeader) {
 			return nil, s.notLeader(ctx, err)
 		}

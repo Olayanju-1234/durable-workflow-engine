@@ -154,13 +154,32 @@ type Future interface {
 // RetryPolicy retries a failed activity before the workflow sees its error.
 // MaxAttempts counts the first attempt (1 means no retries). The wait before
 // each retry starts at InitialBackoff and doubles, capped at MaxBackoff (zero
-// means no cap). The policy is recorded with the step, so retries continue
-// with it across engine restarts and failovers.
+// means no cap). A failure whose type (worker.Typed, or one of the engine's:
+// "LeaseExpired", "StartToCloseTimeout", "ScheduleToCloseTimeout") is in
+// NonRetryableErrorTypes is not retried. The policy is recorded with the step,
+// so retries continue with it across engine restarts and failovers.
 type RetryPolicy struct {
-	MaxAttempts    int
-	InitialBackoff time.Duration
-	MaxBackoff     time.Duration
+	MaxAttempts            int
+	InitialBackoff         time.Duration
+	MaxBackoff             time.Duration
+	NonRetryableErrorTypes []string
 }
+
+// ActivityError is the error ExecuteActivity (or Future.Get) returns when an
+// activity failed for good. Its message is the last attempt's error.
+//
+//	var ae *workflow.ActivityError
+//	if errors.As(err, &ae) && ae.Type == "BadRequest" { ... }
+type ActivityError struct {
+	StepName string
+	Message  string
+	// Type is the failure's kind, as the worker or engine reported it.
+	Type string
+	// NonRetryable: the worker said the failure was not worth retrying.
+	NonRetryable bool
+}
+
+func (e *ActivityError) Error() string { return e.Message }
 
 // ActivityOption customises one ExecuteActivity call.
 type ActivityOption func(*ActivityOptions)
