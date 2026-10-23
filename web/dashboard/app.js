@@ -268,6 +268,7 @@ function renderDetail(w) {
 function renderStep(s) {
   const retried = s.attempts > 1
     ? `<span class="tag retry">${esc(s.attempts)} attempts</span>` : '';
+  const errType = s.error_type ? `<span class="tag" title="error type">${esc(s.error_type)}</span>` : '';
   const waitingFor = s.signal_name
     ? `<span class="step-meta">parked until “${esc(s.signal_name)}” arrives</span>` : '';
   const fireAt = s.fire_at
@@ -289,7 +290,7 @@ function renderStep(s) {
           <span class="pick-name">${esc(s.step_name)}</span>
           <span class="tag">${esc(s.kind)}</span>
           <span class="badge" data-s="${esc(s.status)}">${esc(s.status)}</span>
-          ${retried}
+          ${retried}${errType}
         </div>
         ${waitingFor}${fireAt}${err}${out}
       </div>
