@@ -109,6 +109,9 @@ type Step struct {
 	// ResolvedEventID is the id of the event that gave the step its result
 	// (zero while it has none). It orders results for WaitAny.
 	ResolvedEventID int64
+	// ResolvedAt is that event's timestamp (unix nanos): the workflow clock
+	// moves to it when the code observes the result.
+	ResolvedAt int64
 }
 
 // Open reports whether the step has no result yet: in flight, or retrying.
@@ -263,7 +266,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			if s.Retrying {
 				f.retrying--
 			}
-			s.Status, s.Error, s.Retrying, s.ResolvedEventID = StepScheduled, "", false, 0
+			s.Status, s.Error, s.Retrying, s.ResolvedEventID, s.ResolvedAt = StepScheduled, "", false, 0, 0
 			s.ErrorType, s.NonRetryable = "", false
 			s.Input = ss.GetInput()
 			s.Attempts++
@@ -334,6 +337,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			Output:          mr.GetData(),
 			Marker:          mr.GetMarker(),
 			ResolvedEventID: ev.GetEventId(),
+			ResolvedAt:      ev.GetTimestamp(),
 		})
 		f.lastSeq = mr.GetSequence()
 		resolves = true
@@ -343,7 +347,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		if err != nil {
 			return err
 		}
-		s.Status, s.Output, s.ResolvedEventID = StepCompleted, attr.StepCompleted.GetOutput(), ev.GetEventId()
+		s.Status, s.Output, s.ResolvedEventID, s.ResolvedAt = StepCompleted, attr.StepCompleted.GetOutput(), ev.GetEventId(), ev.GetTimestamp()
 		f.open--
 		resolves = true
 
@@ -354,7 +358,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		}
 		// A sleep produces no new data: its output is its input, so the pipeline
 		// continues past the timer with the value that flowed into it.
-		s.Status, s.Output, s.ResolvedEventID = StepCompleted, s.Input, ev.GetEventId()
+		s.Status, s.Output, s.ResolvedEventID, s.ResolvedAt = StepCompleted, s.Input, ev.GetEventId(), ev.GetTimestamp()
 		f.open--
 		resolves = true
 
@@ -373,7 +377,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		if s := st.Step(sf.GetSequence()); s != nil && s.Retrying && !sf.GetWillRetry() && s.Name == sf.GetStepName() {
 			// A final failure closes a step between attempts (its deadline
 			// passed, or it was cancelled): the retry will not happen.
-			s.Error, s.Retrying, s.ResolvedEventID = sf.GetError(), false, ev.GetEventId()
+			s.Error, s.Retrying, s.ResolvedEventID, s.ResolvedAt = sf.GetError(), false, ev.GetEventId(), ev.GetTimestamp()
 			s.ErrorType, s.NonRetryable = sf.GetErrorType(), sf.GetNonRetryable()
 			if sf.GetCancelled() {
 				s.Status = StepCancelled
@@ -390,7 +394,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		s.ErrorType, s.NonRetryable = sf.GetErrorType(), sf.GetNonRetryable()
 		f.open--
 		if sf.GetCancelled() {
-			s.Status, s.ResolvedEventID = StepCancelled, ev.GetEventId()
+			s.Status, s.ResolvedEventID, s.ResolvedAt = StepCancelled, ev.GetEventId(), ev.GetTimestamp()
 			resolves = true
 			break
 		}
@@ -398,7 +402,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			s.Retrying = true
 			f.retrying++
 		} else {
-			s.ResolvedEventID = ev.GetEventId()
+			s.ResolvedEventID, s.ResolvedAt = ev.GetEventId(), ev.GetTimestamp()
 			resolves = true
 		}
 

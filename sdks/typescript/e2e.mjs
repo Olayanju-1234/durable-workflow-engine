@@ -109,6 +109,26 @@ const webhook = async (code) => {
 };
 worker.activity('ts-webhook', webhook);
 worker.activity('ts-legacy', webhook);
+// Ergonomics: a deterministic clock and random numbers (what history recorded
+// at the first decision equals what the last replay computes), sleepUntil, a
+// signal wait with a timeout, and attempt numbers with a stable activity id.
+worker.workflow('TsErgonomics', async (ctx) => {
+  const started = ctx.now().getTime();
+  const roll = ctx.random();
+  const seen = await ctx.activity('ts-attempts', { roll }, { as: 'json', retry: { maxAttempts: 2, initialBackoffMs: 10 } });
+  const afterActivity = ctx.now().getTime();
+  await ctx.sleepUntil('until', new Date(afterActivity + 150));
+  // The timed-out wait is cancelled, so the signal sent later reaches the next wait.
+  const missing = await ctx.waitForSignal('missing', 'late', { timeoutMs: 100 });
+  const present = await ctx.waitForSignal('present', 'late', { timeoutMs: 60_000 });
+  return { started, roll, seen, clockMoved: afterActivity > started, missing: missing ?? null, present };
+});
+const attemptsSeen = [];
+worker.activity('ts-attempts', async (input, task) => {
+  attemptsSeen.push({ attempt: task.attempt, id: task.activityId, roll: input.roll });
+  if (task.attempt === 1) throw new Error('first attempt fails');
+  return attemptsSeen;
+}, { as: 'json' });
 worker.workflow('TsAfterRestart', async (ctx) => ctx.activity('ts-flaky', { n: 41 }, { as: 'json' }));
 
 worker.activity('ts-flaky', async (order) => {
@@ -171,6 +191,28 @@ for (const [code, want, calls] of [
     fail(`webhook ${code}: output ${hook.output} after ${webhookCalls[code]} calls, want ${want} after ${calls}`);
   }
 }
+const ergoId = await worker.startWorkflow('TsErgonomics');
+for (let i = 0; ; i++) {
+  const wf = await worker.describe(ergoId);
+  if (wf.steps.some((s) => s.step_name === 'present')) break;
+  if (i > 100) fail('ergonomics: never reached the second signal wait');
+  await new Promise((r) => setTimeout(r, 50));
+}
+await worker.signal(ergoId, 'late', 'world');
+const ergo = await waitDone(ergoId);
+const out = JSON.parse(ergo.output);
+const startedAt = Date.parse(ergo.started_at.replace(/(\.\d{3})\d+/, '$1'));
+const ids = new Set(out.seen.map((s) => s.id));
+if (out.started !== startedAt || !out.clockMoved || out.missing !== null || out.present !== 'world' ||
+    out.seen.map((s) => s.attempt).join() !== '1,2' || ids.size !== 1 || ![...ids][0].startsWith(`${ergoId}/`) ||
+    out.seen.some((s) => s.roll !== out.roll)) {
+  fail(`ergonomics: ${ergo.output} (started_at ${ergo.started_at})`);
+}
+const ergoSteps = ergo.steps.map((s) => `${s.step_name}=${s.status}`).join(' ');
+if (ergoSteps !== 'ts-attempts=COMPLETED until=COMPLETED missing=CANCELLED missing.timeout=COMPLETED present=COMPLETED present.timeout=CANCELLED') {
+  fail(`ergonomics steps: ${ergoSteps}`);
+}
+
 const raceId = await worker.startWorkflow('TsRace');
 for (let i = 0; ; i++) {
   const wf = await worker.describe(raceId);

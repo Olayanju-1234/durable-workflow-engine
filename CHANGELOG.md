@@ -45,7 +45,18 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `error_type` / `non_retryable` on activity completion; SDKs resend without them to an engine
   that refuses them.
 
+- TypeScript: a **CommonJS build** next to the ESM one (`require('workflowd')` works on any Node
+  18+; both load one module, so `instanceof` checks hold across them); `ctx.now()` (deterministic
+  clock), `ctx.random()` (seeded per execution), `ctx.sleepUntil(name, date)`,
+  `ctx.waitForSignal(name, signal, { timeoutMs })` (resolves to `undefined` on timeout and
+  cancels the wait), and `task.attempt` / `task.activityId` in activities.
+- Activity tasks carry `attempt` and a stable `activity_id` (Go `worker.ActivityInfo.Attempt` /
+  `ActivityID`, Python `info["attempt"]` / `info["activity_id"]`); workflow tasks carry
+  `started_at` and each step's `resolved_at`.
+
 ### Fixed
+- Go: `ctx.Now()` after `GetVersion` or `SideEffect` read the marker's time on replay but not on
+  the first run; markers no longer move the workflow clock.
 - A finished workflow's steps that were still open (a race's losing timer, say) showed as
   `SCHEDULED` forever; they now show as `CANCELLED` ("not needed").
 

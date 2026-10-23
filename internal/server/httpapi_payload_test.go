@@ -300,3 +300,44 @@ func TestHTTPNonRetryable(t *testing.T) {
 		t.Fatalf("GET workflow steps %v, want error_type BadRequest", steps)
 	}
 }
+
+// TestHTTPAttemptsAndTimestamps: activity tasks carry their attempt and a
+// stable activity id; workflow tasks carry the start time and when each step
+// got its result (the SDK's ctx.now()).
+func TestHTTPAttemptsAndTimestamps(t *testing.T) {
+	h := newAPIHarness(t)
+	h.do(t, "POST", "/api/workflow-types", `{"workflow_types":["RemoteA"],"worker_id":"w"}`)
+	_, start := h.do(t, "POST", "/api/workflows", `{"type":"RemoteA"}`)
+	id := start["workflow_id"].(string)
+	_, task := h.do(t, "GET", "/api/workflow-tasks?types=RemoteA", "")
+	if task["started_at"] == nil || task["started_at"] == "" {
+		t.Fatalf("workflow task %v, want started_at", task)
+	}
+	h.do(t, "POST", "/api/workflow-tasks/complete", fmt.Sprintf(
+		`{"workflow_id":%q,"task_token":%q,"command":{"type":"schedule_activity","step_name":"a","sequence":1,"retry_policy":{"max_attempts":2}}}`,
+		id, task["task_token"]))
+	var ids []any
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, act := h.do(t, "GET", "/api/activity-tasks?activities=a", "")
+		if act["attempt"] != float64(attempt) {
+			t.Fatalf("activity task %v, want attempt %d", act, attempt)
+		}
+		ids = append(ids, act["activity_id"])
+		result := `"error":"try again"`
+		if attempt == 2 {
+			result = `"output":"ok"`
+		}
+		h.do(t, "POST", "/api/activity-tasks/complete", fmt.Sprintf(
+			`{"workflow_id":%q,"step_name":"a","sequence":1,"lease_token":%q,%s}`, id, act["lease_token"], result))
+	}
+	if ids[0] != id+"/1" || ids[1] != ids[0] {
+		t.Fatalf("activity ids %v, want %s/1 on every attempt", ids, id)
+	}
+	_, task = h.do(t, "GET", "/api/workflow-tasks?types=RemoteA", "")
+	step := task["steps"].([]any)[0].(map[string]any)
+	resolved, err := time.Parse(time.RFC3339Nano, fmt.Sprint(step["resolved_at"]))
+	started, _ := time.Parse(time.RFC3339Nano, fmt.Sprint(task["started_at"]))
+	if err != nil || !resolved.After(started) {
+		t.Fatalf("step %v started %v: want resolved_at after started_at", step, task["started_at"])
+	}
+}

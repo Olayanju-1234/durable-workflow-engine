@@ -3,6 +3,7 @@ package replay
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
@@ -140,5 +141,33 @@ func TestSideEffectRecordedOnce(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("fn ran %d times, want once", calls)
+	}
+}
+
+// TestNowIgnoresMarkers: a marker is recorded by the code itself, so the first
+// run never observes its time. A replay must not either, or ctx.Now() after a
+// GetVersion or SideEffect would read differently on replay.
+func TestNowIgnoresMarkers(t *testing.T) {
+	fn := func(ctx workflow.Context, in []byte) ([]byte, error) {
+		ctx.GetVersion("change", workflow.DefaultVersion, 1)
+		ctx.SideEffect("id", func() []byte { return []byte("x") })
+		before := ctx.Now()
+		if _, err := ctx.ExecuteActivity("work", nil); err != nil {
+			return nil, err
+		}
+		return []byte(before.Format(time.RFC3339)), nil
+	}
+	marker := func(name string, seq int64, kind, data string) *history.HistoryEvent {
+		return &history.HistoryEvent{Attributes: &history.HistoryEvent_MarkerRecorded{MarkerRecorded: &history.MarkerRecordedEvent{
+			StepName: name, Sequence: seq, Marker: kind, Data: []byte(data)}}}
+	}
+	evs := at(started(""), marker("change", 1, "version", "1"), marker("id", 2, "side_effect", "x"),
+		scheduled("work", 3), completed("work", 3, "done"))
+	ds, err := DecideAll(fn, evs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ds) != 1 || ds[0].Type != state.DecideCompleteWorkflow || string(ds[0].Output) != t0.Format(time.RFC3339) {
+		t.Fatalf("decisions %+v, want completion with the start time %s", ds, t0.Format(time.RFC3339))
 	}
 }

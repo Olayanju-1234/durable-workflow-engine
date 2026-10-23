@@ -55,14 +55,16 @@ func (a *HTTPAPI) registerPolyglotRoutes(mux *http.ServeMux) {
 // workflowTaskDTO is the replay input an SDK receives: everything needed to
 // decide what happens next, and nothing else.
 type workflowTaskDTO struct {
-	WorkflowID    string       `json:"workflow_id"`
-	WorkflowType  string       `json:"workflow_type"`
-	TaskToken     string       `json:"task_token"`
-	HistoryLength int64        `json:"history_length"`
-	Input         string       `json:"input"`
-	InputBase64   string       `json:"input_base64,omitempty"`
-	Steps         []*stepDTO   `json:"steps"`
-	Signals       []*signalDTO `json:"signals"`
+	WorkflowID    string `json:"workflow_id"`
+	WorkflowType  string `json:"workflow_type"`
+	TaskToken     string `json:"task_token"`
+	HistoryLength int64  `json:"history_length"`
+	// When the workflow started (RFC 3339): the workflow clock's first reading.
+	StartedAt   string       `json:"started_at,omitempty"`
+	Input       string       `json:"input"`
+	InputBase64 string       `json:"input_base64,omitempty"`
+	Steps       []*stepDTO   `json:"steps"`
+	Signals     []*signalDTO `json:"signals"`
 }
 
 type signalDTO struct {
@@ -82,6 +84,10 @@ type activityTaskDTO struct {
 	LeaseDurationMs int64  `json:"lease_duration_ms"`
 	// The engine fails the attempt this long after dispatch (absent: no limit).
 	StartToCloseTimeoutMs int64 `json:"start_to_close_timeout_ms,omitempty"`
+	// Which attempt this is (from 1), and "<workflow_id>/<sequence>", the same
+	// for every attempt: an idempotency key for the activity's side effect.
+	Attempt    int32  `json:"attempt"`
+	ActivityID string `json:"activity_id"`
 }
 
 func (a *HTTPAPI) registerWorkflowTypes(w http.ResponseWriter, r *http.Request) {
@@ -144,6 +150,7 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		WorkflowType:  task.GetWorkflowType(),
 		TaskToken:     task.GetTaskToken(),
 		HistoryLength: task.GetHistoryLength(),
+		StartedAt:     formatNanos(st.StartedAt),
 		Input:         string(st.Input),
 		InputBase64:   base64Twin(st.Input),
 		Steps:         make([]*stepDTO, 0, len(st.Steps)),
@@ -161,7 +168,7 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 			ErrorType: s.ErrorType, NonRetryable: s.NonRetryable,
 			Output: string(s.Output), OutputBase64: base64Twin(s.Output),
 			FireAt: formatNanos(s.FireAt), SignalName: s.Signal, Marker: s.Marker,
-			ResolvedEventID: s.ResolvedEventID,
+			ResolvedEventID: s.ResolvedEventID, ResolvedAt: formatNanos(s.ResolvedAt),
 		})
 	}
 	for _, sig := range st.Signals {
@@ -353,6 +360,8 @@ func (a *HTTPAPI) pollActivityTask(w http.ResponseWriter, r *http.Request) {
 		LeaseDurationMs: task.GetLeaseDurationMs(),
 
 		StartToCloseTimeoutMs: task.GetStartToCloseTimeoutMs(),
+		Attempt:               task.GetAttempt(),
+		ActivityID:            task.GetActivityId(),
 	})
 }
 

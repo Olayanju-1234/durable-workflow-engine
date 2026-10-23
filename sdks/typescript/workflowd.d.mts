@@ -1,4 +1,5 @@
-// Type definitions for workflowd.mjs. Keep in step with its exports.
+// Type definitions for the workflowd SDK (workflowd.cjs, re-exported by workflowd.mjs).
+// workflowd.d.cts must stay identical (CI checks it): one for import, one for require.
 
 /** Throw inside a workflow to fail it deliberately. */
 export class WorkflowFailure extends Error {
@@ -87,6 +88,18 @@ export interface Context {
   activity<T = unknown>(name: string, input: Payload, opts: ActivityOptions & { as: 'json' }): Promise<T>;
   /** Pause durably for `ms` milliseconds. Survives engine restarts. */
   sleep(name: string, ms: number): Promise<unknown>;
+  /** Pause durably until `when` (a Date, epoch milliseconds or a date string), measured on ctx.now(). */
+  sleepUntil(name: string, when: Date | number | string): Promise<unknown>;
+  /**
+   * The workflow's deterministic clock: when the latest step result the code has received was
+   * recorded (the start, at first). Reads the same on every replay; use it instead of Date.now().
+   */
+  now(): Date;
+  /**
+   * A deterministic random number in [0, 1): the same sequence on every replay. Not for secrets
+   * (it derives from the workflow id); use sideEffect with crypto for those.
+   */
+  random(): number;
   /**
    * Resolve to the index of the first of several ctx promises to settle, by the order history
    * recorded their results, so every replay agrees. Use it instead of Promise.race.
@@ -98,7 +111,14 @@ export interface Context {
    * CancelledFailure. A step that already has a result is left alone.
    */
   cancel(step: Promise<unknown>, reason?: string): void;
-  /** Block until a matching external signal arrives; resolves to its payload. */
+  /**
+   * Block until a matching external signal arrives; resolves to its payload. With timeoutMs it
+   * resolves to undefined if none arrives in time (the wait is cancelled; a timer step named
+   * `${name}.timeout` measures it), and the promise can't be given to waitAny or cancel.
+   */
+  waitForSignal(name: string, signalName: string, opts: { as?: 'text'; timeoutMs: number }): Promise<string | undefined>;
+  waitForSignal(name: string, signalName: string, opts: { as: 'bytes'; timeoutMs: number }): Promise<Uint8Array | undefined>;
+  waitForSignal<T = unknown>(name: string, signalName: string, opts: { as: 'json'; timeoutMs: number }): Promise<T | undefined>;
   waitForSignal(name: string, signalName: string, opts?: { as?: 'text' }): Promise<string>;
   waitForSignal(name: string, signalName: string, opts: { as: 'bytes' }): Promise<Uint8Array>;
   waitForSignal<T = unknown>(name: string, signalName: string, opts: { as: 'json' }): Promise<T>;
@@ -126,6 +146,11 @@ export interface ActivityTask {
   signal: AbortSignal;
   /** The attempt's start-to-close timeout, if the workflow set one. */
   start_to_close_timeout_ms?: number;
+  /** Which attempt this is, from 1; more means the engine is retrying the step. */
+  attempt: number;
+  /** "<workflow_id>/<sequence>": the same for every attempt, so an idempotency key for the side effect. */
+  activityId: string;
+  activity_id: string;
   [field: string]: unknown;
 }
 
@@ -159,6 +184,8 @@ export interface WorkflowTask {
   workflow_id: string;
   workflow_type?: string;
   task_token?: string;
+  /** When the workflow started (RFC 3339): ctx.now()'s first reading. */
+  started_at?: string;
   input?: string;
   input_base64?: string;
   steps?: Array<Record<string, unknown>>;

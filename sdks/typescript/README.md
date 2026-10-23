@@ -5,7 +5,7 @@ Write durable workflows in plain async JavaScript or TypeScript and run them on
 durable workflow engine. Zero dependencies: Node 18+'s built-in `fetch` only.
 
 ```js
-import { Worker, WorkflowFailure } from 'workflowd';
+import { Worker, WorkflowFailure } from 'workflowd'; // or: const { Worker } = require('workflowd')
 
 const worker = new Worker({ address: 'http://localhost:8233' });
 
@@ -46,14 +46,28 @@ worker.activity('deliver', async (event) => {
 await ctx.activity('render', doc, { startToCloseTimeoutMs: 30_000, scheduleToCloseTimeoutMs: 300_000 });
 await worker.startWorkflow('Order', order, `order-${order.id}`, { executionTimeoutMs: 86_400_000 });
 
+// Time and randomness that replay the same: no Date.now() or Math.random() in workflow code.
+const due = new Date(ctx.now().getTime() + 24 * 3600_000);
+await ctx.sleepUntil('until-due', due);
+const variant = ctx.random() < 0.5 ? 'a' : 'b';
+
+// Wait for a signal, or give up: undefined if none arrives in time.
+const reply = await ctx.waitForSignal('reply', 'approved', { timeoutMs: 48 * 3600_000 });
+if (reply === undefined) return 'expired';
+
 // Change code safely while executions are in flight; record a non-deterministic value once.
 if ((await ctx.getVersion('fraud-check', DEFAULT_VERSION, 1)) === 1) await ctx.activity('fraud-check', receipt);
 const id = await ctx.sideEffect('id', () => crypto.randomUUID());
 ```
 
 A cluster: `new Worker({ addresses: ['http://n1:8233', 'http://n2:8233', 'http://n3:8233'] })`
-follows the leader. Activities longer than the lease heartbeat automatically; `task.signal`
-(the second argument) aborts if the lease is lost.
+follows the leader. Activities longer than the lease heartbeat automatically. An activity's
+second argument is its task: `task.signal` aborts if the lease is lost, the attempt times out
+or the work is cancelled; `task.attempt` counts from 1; `task.activityId` is the same on every
+attempt, a ready-made idempotency key.
+
+ESM and CommonJS both work (`import` or `require`, Node 18+), and both load the same module,
+so `instanceof ActivityFailure` holds wherever the error came from.
 
 Cancel a whole workflow with `worker.cancel(id, reason)`: it ends as `CANCELLED` and the
 activities it was running get their `task.signal` aborted with a `CancelledFailure`.
