@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/olayanju-1234/durable-workflow-engine/internal/ctl"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/raft"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/replay"
@@ -30,6 +31,10 @@ import (
 )
 
 func main() {
+	// `workflowd ctl ...` is the operator's command line, a client of the API.
+	if len(os.Args) > 1 && os.Args[1] == "ctl" {
+		os.Exit(ctl.Main(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, os.Getenv))
+	}
 	var (
 		dataDir     = flag.String("data-dir", "data", "directory for workflow history files")
 		showVersion = flag.Bool("version", false, "print version and exit")

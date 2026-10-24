@@ -264,3 +264,23 @@ func TestGRPCNamespaceTokens(t *testing.T) {
 		t.Fatalf("beta terminating acme's g1: %v, want ErrNotFound", err)
 	}
 }
+
+// A backup holds every namespace, so only the engine token may take one: not
+// a namespace token, and not anyone at all on an open engine.
+func TestBackupNeedsTheEngineToken(t *testing.T) {
+	for _, c := range []struct {
+		admin, token string
+		want         int
+	}{
+		{"", "", http.StatusForbidden},
+		{"", "acme-token", http.StatusForbidden},
+		{"admin", "acme-token", http.StatusForbidden},
+		{"admin", "", http.StatusUnauthorized},
+		{"admin", "admin", http.StatusOK},
+	} {
+		h := newNSHarness(t, c.admin)
+		if code, _ := h.do(t, nsReq{"GET", "/api/admin/backup", c.token, "", ""}); code != c.want {
+			t.Errorf("engine token %q, caller %q: HTTP %d, want %d", c.admin, c.token, code, c.want)
+		}
+	}
+}

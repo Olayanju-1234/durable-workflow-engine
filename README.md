@@ -158,6 +158,26 @@ if ctx.GetVersion("fraud-check", workflow.DefaultVersion, 1) == 1 {
 The `sdk` package from earlier phases still compiles; it is deprecated in favour of `workflow`
 and `worker`. The design is in [ADR-0005](docs/adr/0005-public-go-sdk.md).
 
+## Operate it
+
+`workflowd ctl` is the command line for a running engine, over its HTTP API. The address,
+token file and namespace come from flags or `WORKFLOWD_ADDR`, `WORKFLOWD_TOKEN_FILE` and
+`WORKFLOWD_NAMESPACE`:
+
+```sh
+workflowd ctl list --status waiting
+workflowd ctl describe order-7          # status, input, output and every step
+workflowd ctl history order-7           # the events, exactly as recorded
+workflowd ctl signal order-7 approval --payload yes
+workflowd ctl start Checkout --id order-8 --input-file order.json --task-queue billing
+workflowd ctl backup nightly.tar.gz     # every history (engine token); restore offline:
+workflowd ctl restore --data-dir /var/lib/workflowd-new nightly.tar.gz
+```
+
+Tables by default, `--json` for scripts. One engine can serve several apps as
+[namespaces](docs/adr/0015-namespaces.md), each with its own token, and route work by
+[task queue](docs/adr/0016-task-queues.md).
+
 ## How it works
 
 Every workflow is an append-only history of events in one file, CRC-framed and fsync'd. The

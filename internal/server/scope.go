@@ -87,6 +87,16 @@ func (s *Scope) GetWorkflowRun(workflowID, runID string) (*GetWorkflowResponse, 
 	return resp, err
 }
 
+// History returns a run's events as recorded: the current run when runID is
+// empty or names it, else an earlier one.
+func (s *Scope) History(workflowID, runID string) ([]*history.HistoryEvent, error) {
+	k, err := s.lookupKey(workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return s.e.runHistory(k, runID)
+}
+
 // ListWorkflowRuns lists a workflow id's runs; see Engine.ListWorkflowRuns.
 func (s *Scope) ListWorkflowRuns(workflowID string) ([]*RunInfo, error) {
 	k, err := s.lookupKey(workflowID)
