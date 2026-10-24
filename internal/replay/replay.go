@@ -50,6 +50,19 @@ func (p Planner) DecideAll(events []*history.HistoryEvent) ([]state.Decision, er
 	return DecideAll(p.Fn, events, p.Logger)
 }
 
+// DecideAllSuggesting is DecideAll that also tells the code where the history
+// crossed the engine's warning threshold (ctx.ContinueAsNewSuggested).
+func (p Planner) DecideAllSuggesting(events []*history.HistoryEvent, suggestAt int64) ([]state.Decision, error) {
+	return DecideAllWith(p.Fn, events, p.Logger, Options{SuggestContinueAsNewAt: suggestAt})
+}
+
+// Options are what a replay knows beyond the history itself.
+type Options struct {
+	// SuggestContinueAsNewAt is the id of the event at which the history crossed
+	// the engine's warning threshold (zero: it has not).
+	SuggestContinueAsNewAt int64
+}
+
 // Decide is DecideAll for callers that take one decision at a time: the first
 // command the code issued, or a noop.
 func Decide(fn workflow.Func, events []*history.HistoryEvent, logger *slog.Logger) (state.Decision, error) {
@@ -65,6 +78,11 @@ func Decide(fn workflow.Func, events []*history.HistoryEvent, logger *slog.Logge
 // result (several, with the Async calls), then completion or failure if the
 // function returned. A single noop means it is waiting on steps in flight.
 func DecideAll(fn workflow.Func, events []*history.HistoryEvent, logger *slog.Logger) ([]state.Decision, error) {
+	return DecideAllWith(fn, events, logger, Options{})
+}
+
+// DecideAllWith is DecideAll with what the engine knows beyond the history.
+func DecideAllWith(fn workflow.Func, events []*history.HistoryEvent, logger *slog.Logger, opts Options) ([]state.Decision, error) {
 	st, err := state.Reconstruct(events)
 	if err != nil {
 		return nil, fmt.Errorf("replay: %w", err)
@@ -73,7 +91,9 @@ func DecideAll(fn workflow.Func, events []*history.HistoryEvent, logger *slog.Lo
 	if st.Status.IsTerminal() || st.Status == state.StatusNotStarted {
 		return []state.Decision{{Type: state.DecideNoop}}, nil
 	}
-	return newContext(st, events, logger).run(fn)
+	c := newContext(st, events, logger)
+	c.suggestAt = opts.SuggestContinueAsNewAt
+	return c.run(fn)
 }
 
 // replayContext walks the workflow's steps in call order. next is the 1-based
@@ -91,6 +111,7 @@ type replayContext struct {
 
 	latestResolved int64 // the newest step result in history (event id)
 	observed       int64 // the newest step result the code has seen
+	suggestAt      int64 // where the history crossed the limits' warning share
 
 	// Steps this replay cancelled that history does not show closed yet, in
 	// cancel order: they count as resolved, after every recorded result.
@@ -103,8 +124,11 @@ type replayContext struct {
 
 func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Logger) *replayContext {
 	c := &replayContext{
-		st:         st,
-		info:       workflow.Info{WorkflowID: events[0].GetWorkflowStarted().GetWorkflowId(), WorkflowType: st.WorkflowType},
+		st: st,
+		info: workflow.Info{
+			WorkflowID: events[0].GetWorkflowStarted().GetWorkflowId(), WorkflowType: st.WorkflowType,
+			RunID: st.RunID, ContinuedFromRunID: st.ContinuedFromRunID,
+		},
 		resolvedAt: make(map[int64]int64),
 		now:        events[0].GetTimestamp(),
 		versions:   make(map[string]workflow.Version),
@@ -168,6 +192,18 @@ func (c *replayContext) run(fn workflow.Func) ([]state.Decision, error) {
 	case panicked != nil:
 		return nil, panicked
 	case fnErr != nil:
+		var next *workflow.ContinueAsNewError
+		if errors.As(fnErr, &next) {
+			if c.next < int64(len(c.st.Steps)) {
+				// The code stopped before steps history recorded: a different path.
+				return nil, fmt.Errorf("%w: continued as new after %d steps, but history has %d",
+					ErrNondeterminism, c.next, len(c.st.Steps))
+			}
+			return append(c.pending, state.Decision{
+				Type: state.DecideContinueAsNew, Input: next.Input,
+				WorkflowType: next.WorkflowType, ExecutionTimeout: max(next.ExecutionTimeout, 0),
+			}), nil
+		}
 		return append(c.pending, state.Decision{Type: state.DecideFailWorkflow, Error: fnErr.Error()}), nil
 	default:
 		return append(c.pending, state.Decision{Type: state.DecideCompleteWorkflow, Output: out}), nil
@@ -202,7 +238,12 @@ func (c *replayContext) live() {
 	}
 }
 
-func (c *replayContext) Input() []byte       { return c.st.Input }
+func (c *replayContext) Input() []byte { return c.st.Input }
+
+func (c *replayContext) ContinueAsNewSuggested() bool {
+	c.live()
+	return c.suggestAt > 0 && c.observed >= c.suggestAt
+}
 func (c *replayContext) Info() workflow.Info { return c.info }
 func (c *replayContext) Logger() *slog.Logger {
 	return c.logger

@@ -4,9 +4,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 )
 
@@ -339,5 +341,66 @@ func TestHTTPAttemptsAndTimestamps(t *testing.T) {
 	started, _ := time.Parse(time.RFC3339Nano, fmt.Sprint(task["started_at"]))
 	if err != nil || !resolved.After(started) {
 		t.Fatalf("step %v started %v: want resolved_at after started_at", step, task["started_at"])
+	}
+}
+
+// TestHTTPContinueAsNew: an SDK continues a workflow as new over HTTP; the
+// next task is for the new run, with an empty history; earlier runs are listed.
+func TestHTTPContinueAsNew(t *testing.T) {
+	h := newAPIHarness(t)
+	if code, body := h.do(t, "POST", "/api/workflow-types", `{"workflow_types":["Loop"],"worker_id":"w"}`); code != http.StatusOK {
+		t.Fatalf("register: %d %v", code, body)
+	}
+	code, start := h.do(t, "POST", "/api/workflows", `{"type":"Loop","input":"1","workflow_id":"loop"}`)
+	if code != http.StatusCreated || start["run_id"] == "" {
+		t.Fatalf("start: %d %v", code, start)
+	}
+	_, task := h.do(t, "GET", "/api/workflow-tasks?types=Loop", "")
+	if task["run_id"] != start["run_id"] {
+		t.Fatalf("task run_id %v, want %v", task["run_id"], start["run_id"])
+	}
+	code, body := h.do(t, "POST", "/api/workflow-tasks/complete", fmt.Sprintf(
+		`{"workflow_id":"loop","task_token":%q,"command":{"type":"continue_as_new","input":"2"}}`, task["task_token"]))
+	if code != http.StatusOK {
+		t.Fatalf("continue_as_new: %d %v", code, body)
+	}
+	_, task = h.do(t, "GET", "/api/workflow-tasks?types=Loop", "")
+	if task["input"] != "2" || len(task["steps"].([]any)) != 0 || task["run_id"] == start["run_id"] || task["history_length"] != float64(1) {
+		t.Fatalf("next run's task = %v", task)
+	}
+	_, wf := h.do(t, "GET", "/api/workflows/loop", "")
+	if wf["continued_from_run_id"] != start["run_id"] || wf["run_id"] != task["run_id"] {
+		t.Fatalf("workflow = %v", wf)
+	}
+	_, runs := h.do(t, "GET", "/api/workflows/loop/runs", "")
+	list := runs["runs"].([]any)
+	if len(list) != 2 || list[1].(map[string]any)["status"] != "CONTINUED_AS_NEW" || list[0].(map[string]any)["current"] != true {
+		t.Fatalf("runs = %v", runs)
+	}
+	_, old := h.do(t, "GET", "/api/workflows/loop?run_id="+start["run_id"].(string), "")
+	if old["status"] != "CONTINUED_AS_NEW" || old["continued_as_new_run_id"] != task["run_id"] || old["input"] != "1" {
+		t.Fatalf("earlier run = %v", old)
+	}
+	if code, _ := h.do(t, "GET", "/api/workflows/loop?run_id=nope", ""); code != http.StatusNotFound {
+		t.Fatalf("unknown run: HTTP %d, want 404", code)
+	}
+}
+
+// TestHTTPPayloadLimits: a payload over the engine's limit is 413, and so is
+// a body over the transport's request limit, on every route that takes one.
+func TestHTTPPayloadLimits(t *testing.T) {
+	h := newAPIHarness(t)
+	h.do(t, "POST", "/api/workflow-types", `{"workflow_types":["Big"],"worker_id":"w"}`)
+	big := strings.Repeat("x", server.DefaultMaxPayloadBytes+1)
+	if code, body := h.do(t, "POST", "/api/workflows", fmt.Sprintf(`{"type":"Big","input":%q}`, big)); code != http.StatusRequestEntityTooLarge ||
+		!strings.Contains(fmt.Sprint(body["error"]), "workflow input is 2097153 bytes, over the 2097152-byte limit") {
+		t.Fatalf("big input: HTTP %d %v", code, body)
+	}
+	huge := strings.Repeat("x", server.Limits{MaxPayloadBytes: server.DefaultMaxPayloadBytes}.RequestBytes())
+	if code, _ := h.do(t, "POST", "/api/workflows", fmt.Sprintf(`{"type":"Big","input":%q}`, huge)); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("body over the request limit: HTTP %d", code)
+	}
+	if code, _ := h.do(t, "POST", "/api/workflow-tasks/complete", fmt.Sprintf(`{"workflow_id":"x","task_token":"y","replay_error":%q}`, huge)); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("workflow task body over the request limit: HTTP %d", code)
 	}
 }

@@ -66,6 +66,8 @@ func (m *stateMachine) Apply(e *raft.LogEntry) (any, error) {
 		return m.appendEvent(e.GetIndex(), c.Append.GetWorkflowId(), c.Append.GetEvent())
 	case *Command_Delete:
 		return m.deleteWorkflow(e.GetIndex(), c.Delete.GetWorkflowId())
+	case *Command_NewRun:
+		return m.newRun(e.GetIndex(), c.NewRun.GetWorkflowId(), c.NewRun.GetArchiveId(), c.NewRun.GetEvent())
 	default:
 		return fmt.Errorf("cluster: empty command at index %d", e.GetIndex()), nil
 	}
@@ -131,6 +133,32 @@ func (m *stateMachine) deleteWorkflow(index uint64, id string) (any, error) {
 		return nil, fmt.Errorf("cluster: delete %s: %w", id, err)
 	}
 	m.pos[id] = position{}
+	return nil, nil
+}
+
+func (m *stateMachine) newRun(index uint64, id, archiveID string, ev *history.HistoryEvent) (any, error) {
+	p, err := m.position(id)
+	if err != nil {
+		return nil, err
+	}
+	if index <= p.lastIndex {
+		return nil, nil // applied before a restart: the new run's first event carries this index
+	}
+	events, err := m.store.ReadAll(id)
+	if err != nil {
+		return nil, fmt.Errorf("cluster: read %s: %w", id, err)
+	}
+	if n := len(events); n == 0 || !isTerminal(events[n-1]) || ev.GetEventId() != 1 {
+		return fmt.Errorf("%w: %s can start a new run only after its current one finished", ErrConflict, id), nil
+	}
+	stamped := proto.Clone(ev).(*history.HistoryEvent)
+	stamped.RaftIndex = index
+	if err := m.store.NewRun(id, archiveID, stamped); err != nil {
+		delete(m.pos, id)
+		return nil, fmt.Errorf("cluster: new run of %s: %w", id, err)
+	}
+	m.pos[id] = position{events: 1, lastIndex: index}
+	delete(m.pos, archiveID)
 	return nil, nil
 }
 

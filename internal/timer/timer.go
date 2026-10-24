@@ -20,9 +20,12 @@ import (
 // Timer is one pending timer: fire callback target for a specific workflow step.
 type Timer struct {
 	WorkflowID string
-	StepName   string
-	Sequence   int64
-	FireAt     time.Time
+	// RunID, when set, names the run of the workflow the timer belongs to, so
+	// a timer left over from an earlier run is recognised once a new one starts.
+	RunID    string
+	StepName string
+	Sequence int64
+	FireAt   time.Time
 }
 
 // Service schedules timers and fires them in deadline order. Safe for concurrent

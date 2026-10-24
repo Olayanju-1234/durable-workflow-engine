@@ -39,6 +39,49 @@ import (
 // ErrCancelled is what Future.Get returns for a step that was cancelled.
 var ErrCancelled = errors.New("workflow: step cancelled")
 
+// ContinueAsNewError, returned by a workflow function, ends this run and
+// starts a fresh one under the same workflow id, with an empty history and
+// Input as its input. A workflow that loops forever (polling, a subscription,
+// an entity that lives for months) uses it to keep its history small. Build
+// one with ContinueAsNew.
+type ContinueAsNewError struct {
+	Input []byte
+	// WorkflowType runs the next run as another type; empty keeps this one's.
+	WorkflowType string
+	// ExecutionTimeout bounds the next run; zero keeps this run's.
+	ExecutionTimeout time.Duration
+}
+
+func (e *ContinueAsNewError) Error() string { return "workflow: continue as new" }
+
+// ContinueAsNew returns the error that ends this run and starts the next:
+//
+//	if ctx.ContinueAsNewSuggested() {
+//		return nil, workflow.ContinueAsNew(state)
+//	}
+//
+// Signals the run has not consumed are not carried over.
+func ContinueAsNew(input []byte, opts ...ContinueAsNewOption) error {
+	e := &ContinueAsNewError{Input: input}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
+}
+
+// ContinueAsNewOption customises ContinueAsNew.
+type ContinueAsNewOption func(*ContinueAsNewError)
+
+// WithNewWorkflowType runs the next run as another registered workflow type.
+func WithNewWorkflowType(workflowType string) ContinueAsNewOption {
+	return func(e *ContinueAsNewError) { e.WorkflowType = workflowType }
+}
+
+// WithNewExecutionTimeout gives the next run its own execution timeout.
+func WithNewExecutionTimeout(d time.Duration) ContinueAsNewOption {
+	return func(e *ContinueAsNewError) { e.ExecutionTimeout = d }
+}
+
 // Func is a workflow: orchestration logic over the Context's durable primitives.
 // Its return value is the workflow's output; a returned error fails the workflow.
 type Func func(ctx Context, input []byte) ([]byte, error)
@@ -140,6 +183,13 @@ type Context interface {
 	// recorded result on every replay. Use it for small non-deterministic values
 	// such as a random id. It must not fail or do I/O; use an activity for that.
 	SideEffect(name string, fn func() []byte) []byte
+
+	// ContinueAsNewSuggested reports whether the history has grown past the
+	// engine's warning share of its limits, as of the latest result the code
+	// has observed, so every replay gives the same answer at the same point.
+	// Then return ContinueAsNew: a history that reaches its limit fails the
+	// workflow.
+	ContinueAsNewSuggested() bool
 }
 
 // Future is the result of a durable call started without waiting for it. Get
@@ -223,4 +273,8 @@ const DefaultVersion Version = -1
 type Info struct {
 	WorkflowID   string
 	WorkflowType string
+	// RunID names this run: a workflow id that continues as new gets a new one.
+	RunID string
+	// ContinuedFromRunID is the run this one continued from, if any.
+	ContinuedFromRunID string
 }

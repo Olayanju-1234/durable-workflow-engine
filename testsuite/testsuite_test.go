@@ -227,3 +227,32 @@ func TestCancelStepInVirtualTime(t *testing.T) {
 		t.Fatalf("out %q err %v elapsed %s", out, err, env.Elapsed())
 	}
 }
+
+// The test environment follows continue-as-new and suggests it the way the
+// engine does near its limits.
+func TestContinueAsNewInVirtualTime(t *testing.T) {
+	env := testsuite.NewEnv()
+	env.RegisterActivity("tick", func(context.Context, []byte) ([]byte, error) { return nil, nil })
+	env.SuggestContinueAsNewAfter(6)
+	out, err := env.ExecuteWorkflow(func(ctx workflow.Context, in []byte) ([]byte, error) {
+		total := len(in)
+		for i := 0; ; i++ {
+			if total >= 10 {
+				return []byte(fmt.Sprintf("%d ticks over runs, this one continued from %s", total, ctx.Info().ContinuedFromRunID)), nil
+			}
+			if ctx.ContinueAsNewSuggested() {
+				return nil, workflow.ContinueAsNew(make([]byte, total))
+			}
+			if _, err := ctx.ExecuteActivity("tick", nil); err != nil {
+				return nil, err
+			}
+			total++
+		}
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.Runs() < 3 || !strings.HasPrefix(string(out), "10 ticks over runs, this one continued from test-run-") {
+		t.Fatalf("%d runs, output %q", env.Runs(), out)
+	}
+}

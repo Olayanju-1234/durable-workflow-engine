@@ -135,6 +135,18 @@ public final class Workflowd {
         }
     }
 
+    /**
+     * Thrown by {@link Context#continueAsNew}: ends the replay with that command. An Error for
+     * the same reason as {@link Suspend}: {@code catch (Exception e)} must not stop it.
+     */
+    static final class ContinueAsNew extends Error {
+        final transient Map<String, Object> command;
+        ContinueAsNew(Map<String, Object> command) {
+            super("workflowd continue as new", null, false, false);
+            this.command = command;
+        }
+    }
+
     /** Replay found that the code no longer matches the recorded history. */
     static final class NonDeterminism extends Error {
         NonDeterminism(String message) { super(message, null, false, false); }
@@ -299,6 +311,7 @@ public final class Workflowd {
         private Instant now; // the latest step result the code has received (the start, at first)
         private java.util.Random random;
         private int next = 0;
+        private long observedEventId; // the newest step result the code has received
 
         @SuppressWarnings("unchecked")
         Context(Map<String, Object> task) {
@@ -312,6 +325,44 @@ public final class Workflowd {
         public String input() { return text(task, "input"); }
         public byte[] inputBytes() { return bytes(task, "input"); }
         public String workflowId() { return workflowId; }
+
+        /** This run's id: a workflow that continues as new gets a new one. */
+        public String runId() { return str(task.get("run_id")); }
+
+        /**
+         * True once the history has grown past the engine's warning share of its limits, as of
+         * the latest result the code has received, so every replay answers the same at the same
+         * point. Then {@code return ctx.continueAsNew(state)}: a history that reaches its limit
+         * fails the workflow.
+         */
+        public boolean continueAsNewSuggested() {
+            Object at = task.get("suggest_continue_as_new_at");
+            long suggestAt = at instanceof Number ? ((Number) at).longValue() : 0;
+            return suggestAt > 0 && observedEventId >= suggestAt;
+        }
+
+        /**
+         * End this run and start a fresh one under the same workflow id, with an empty history
+         * and {@code input}: {@code return ctx.continueAsNew(state);}. It never returns. Steps
+         * started before it still run; signals this run has not consumed are not carried over.
+         */
+        public String continueAsNew(String input) {
+            return continueAsNew(input, null, null);
+        }
+
+        /** {@link #continueAsNew(String)} as another workflow type and/or with a new execution timeout (null: this run's). */
+        public String continueAsNew(String input, String workflowType, Duration executionTimeout) {
+            if (next < steps.size()) {
+                throw new NonDeterminism("non-determinism: continued as new after " + next
+                        + " steps, but history has " + steps.size());
+            }
+            Map<String, Object> cmd = new LinkedHashMap<>();
+            cmd.put("type", "continue_as_new");
+            cmd.put("input", input == null ? "" : input);
+            if (workflowType != null && !workflowType.isEmpty()) cmd.put("workflow_type", workflowType);
+            putMillis(cmd, "execution_timeout_ms", executionTimeout);
+            throw new ContinueAsNew(cmd);
+        }
 
         /**
          * The workflow's deterministic clock: when the latest step result the code has received
@@ -568,6 +619,8 @@ public final class Workflowd {
             if (rec == null || "MARKER".equals(str(rec.get("kind"))) || "CANCELLED".equals(str(rec.get("status")))) return;
             Instant at = instant(rec.get("resolved_at"));
             if (at != null && (now == null || at.isAfter(now))) now = at;
+            Object id = rec.get("resolved_event_id");
+            if (id instanceof Number) observedEventId = Math.max(observedEventId, ((Number) id).longValue());
         }
     }
 
@@ -672,6 +725,8 @@ public final class Workflowd {
             return new Decision(withLast(ctx.pending, cmd), null);
         } catch (Suspend s) {
             return new Decision(new ArrayList<>(ctx.pending), null);
+        } catch (ContinueAsNew c) {
+            return new Decision(withLast(ctx.pending, c.command), null);
         } catch (NonDeterminism e) {
             return new Decision(null, e.getMessage());
         } catch (Throwable t) {
@@ -927,9 +982,24 @@ public final class Workflowd {
         }
 
         /** A workflow's current state, as the engine's JSON API describes it. */
-        @SuppressWarnings("unchecked")
         public Map<String, Object> describe(String workflowId) throws IOException, InterruptedException {
-            return (Map<String, Object>) request("GET", "/api/workflows/" + enc(workflowId), null);
+            return describe(workflowId, null);
+        }
+
+        /** An earlier run's state (see {@link #runs}); null means the current run. */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> describe(String workflowId, String runId) throws IOException, InterruptedException {
+            String q = runId == null || runId.isEmpty() ? "" : "?run_id=" + enc(runId);
+            return (Map<String, Object>) request("GET", "/api/workflows/" + enc(workflowId) + q, null);
+        }
+
+        /** The runs kept for a workflow id: the current one, then earlier ones (continued as new), newest first. */
+        @SuppressWarnings("unchecked")
+        public List<Map<String, Object>> runs(String workflowId) throws IOException, InterruptedException {
+            Map<String, Object> res = (Map<String, Object>) request("GET", "/api/workflows/" + enc(workflowId) + "/runs", null);
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (Object r : (List<Object>) res.get("runs")) out.add((Map<String, Object>) r);
+            return out;
         }
 
         /** The base URL of the node currently in use. */

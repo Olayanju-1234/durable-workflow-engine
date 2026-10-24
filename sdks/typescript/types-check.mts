@@ -55,6 +55,7 @@ cluster.workflow('Typed', async (ctx) => {
   const maybe: string | undefined = await ctx.waitForSignal('callback', 'callback', { timeoutMs: 60_000 });
   const typed = await ctx.waitForSignal<{ ok: boolean }>('typed', 'callback', { as: 'json', timeoutMs: 1000 });
   void [maybe, typed?.ok];
+  if (ctx.continueAsNewSuggested()) return ctx.continueAsNew({ after: ctx.runId }, { executionTimeoutMs: 60_000 });
   void [a, b, timedOut];
   return { id, ok: receipt.ok && approved.yes, size: blob.length };
 });

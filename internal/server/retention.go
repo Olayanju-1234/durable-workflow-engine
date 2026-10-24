@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 )
 
 // PurgeTerminated deletes the history of every finished workflow (completed,
@@ -18,7 +20,10 @@ func (e *Engine) PurgeTerminated(cutoff time.Time) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("server: purge: %w", err)
 	}
-	purged := 0
+	purged, err := e.purgeArchivedRuns(cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("server: purge archived runs: %w", err)
+	}
 	for _, s := range due {
 		id := s.GetWorkflowId()
 		ok, err := e.purgeIfExpired(id, cutoff)
@@ -45,7 +50,10 @@ func (e *Engine) purgeIfExpired(workflowID string, cutoff time.Time) (bool, erro
 	if len(events) == 0 {
 		return false, nil
 	}
-	if !st.Status.IsTerminal() || time.Unix(0, events[len(events)-1].GetTimestamp()).After(cutoff) {
+	// A current run that continued as new is mid-way to its next run (a crash
+	// came in between; recovery finishes it): never purge it.
+	if !st.Status.IsTerminal() || st.Status == state.StatusContinuedAsNew ||
+		time.Unix(0, events[len(events)-1].GetTimestamp()).After(cutoff) {
 		return false, nil
 	}
 	w.forget()
@@ -80,7 +88,8 @@ func (e *Engine) RunRetention(ctx context.Context, keep, interval time.Duration)
 func isTerminalStatus(s WorkflowStatus) bool {
 	switch s {
 	case WorkflowStatus_WORKFLOW_STATUS_COMPLETED, WorkflowStatus_WORKFLOW_STATUS_FAILED,
-		WorkflowStatus_WORKFLOW_STATUS_TERMINATED, WorkflowStatus_WORKFLOW_STATUS_TIMED_OUT:
+		WorkflowStatus_WORKFLOW_STATUS_TERMINATED, WorkflowStatus_WORKFLOW_STATUS_TIMED_OUT,
+		WorkflowStatus_WORKFLOW_STATUS_CANCELLED, WorkflowStatus_WORKFLOW_STATUS_CONTINUED_AS_NEW:
 		return true
 	}
 	return false

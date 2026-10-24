@@ -152,6 +152,19 @@ async function waitDone(id) {
   fail(`workflow ${id} did not complete`);
 }
 
+// Continue-as-new: a loop keeps its history small by starting a fresh run
+// whenever the engine suggests it (the harness's engine allows 60 events).
+worker.workflow('TsLoop', async (ctx) => {
+  let total = Number(ctx.input || '0');
+  while (!ctx.continueAsNewSuggested()) {
+    if (total >= 50) return `${total} ticks; run ${ctx.runId}`;
+    await ctx.activity('ts-tick', '');
+    total++;
+  }
+  return ctx.continueAsNew(String(total));
+});
+worker.activity('ts-tick', async () => 'tick');
+
 // Registered before anything starts, so the first start can't race it.
 await worker.register();
 worker.run().catch((err) => fail(`worker: ${err.message}`));
@@ -237,6 +250,16 @@ const provisioned = await worker.describe(provisionId);
 if (provisioned.status !== 'CANCELLED' || cancelReason.name !== 'CancelledFailure') {
   fail(`cancel: status ${provisioned.status}, abort reason ${cancelReason?.name}: ${cancelReason?.message}`);
 }
+const loopId = await worker.startWorkflow('TsLoop', '0');
+const loop = await waitDone(loopId);
+const { runs } = await worker.runs(loopId);
+const earlier = await worker.describe(loopId, { runId: runs.at(-1).run_id });
+if (loop.output !== `50 ticks; run ${loop.run_id}` || runs.length !== 3 || loop.history_length > 60 ||
+    runs.slice(1).some((r) => r.status !== 'CONTINUED_AS_NEW') || loop.continued_from_run_id !== runs[1].run_id ||
+    earlier.input !== '0' || earlier.continued_as_new_run_id !== runs[1].run_id) {
+  fail(`continue-as-new: output ${loop.output}, ${loop.history_length} events, runs ${JSON.stringify(runs)}`);
+}
+
 const foreverId = await worker.startWorkflow('TsForever', '', '', { executionTimeoutMs: 300 });
 for (let i = 0; ; i++) {
   const wf = await worker.describe(foreverId);

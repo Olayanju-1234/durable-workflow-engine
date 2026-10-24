@@ -45,6 +45,8 @@ const (
 	ErrorTypeLeaseExpired           = "LeaseExpired"
 	ErrorTypeStartToCloseTimeout    = "StartToCloseTimeout"
 	ErrorTypeScheduleToCloseTimeout = "ScheduleToCloseTimeout"
+	// ErrorTypePayloadTooLarge: an activity's output was over the payload limit.
+	ErrorTypePayloadTooLarge = "PayloadTooLarge"
 )
 
 // retryAfter decides whether a failed attempt of step runs again, and after
@@ -68,9 +70,9 @@ func (e *Engine) retryAfter(step *state.Step, now time.Time) (time.Duration, boo
 // is already recorded; when the timer fires, onRetryDue re-schedules the same step
 // sequence (another attempt). A zero delay fires promptly
 // (used on recovery, where the original backoff window is lost).
-func (e *Engine) scheduleRetryLocked(workflowID string, step *state.Step, delay time.Duration) {
+func (e *Engine) scheduleRetryLocked(workflowID, runID string, step *state.Step, delay time.Duration) {
 	e.retryTimers.Add(timer.Timer{
-		WorkflowID: workflowID, StepName: step.Name,
+		WorkflowID: workflowID, RunID: runID, StepName: step.Name,
 		Sequence: step.Sequence, FireAt: time.Now().Add(delay),
 	})
 	e.metrics.retriesScheduled.Inc()
@@ -96,7 +98,7 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 	// failure recorded as will_retry, or (histories from before that flag) the
 	// latest step's failure with nothing else in flight.
 	target := st.Step(tm.Sequence)
-	if st.Status.IsTerminal() || target == nil || target.Name != tm.StepName || target.Status != state.StepFailed ||
+	if staleRun(tm, st) || st.Status.IsTerminal() || target == nil || target.Name != tm.StepName || target.Status != state.StepFailed ||
 		!(target.Retrying || (target == st.Tail() && st.Status == state.StatusRunning)) {
 		return
 	}

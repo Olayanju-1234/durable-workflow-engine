@@ -81,7 +81,10 @@ func (h *e2eEngine) restart() {
 		h.engine.Close()
 	}
 	// A short lease, so an activity that runs longer survives only by heartbeating.
-	e := server.NewEngine(h.store, h.log, server.WithLeaseDuration(600*time.Millisecond))
+	// Small history limits, so a looping workflow is told to continue as new.
+	e := server.NewEngine(h.store, h.log, server.WithLeaseDuration(600*time.Millisecond), server.WithLimits(server.Limits{
+		MaxHistoryEvents: 60, MaxHistoryBytes: server.DefaultMaxHistoryBytes, MaxPayloadBytes: server.DefaultMaxPayloadBytes,
+	}))
 	if err := e.Recover(); err != nil {
 		h.t.Fatalf("recover: %v", err)
 	}

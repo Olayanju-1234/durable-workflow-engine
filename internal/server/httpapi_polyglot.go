@@ -60,11 +60,17 @@ type workflowTaskDTO struct {
 	TaskToken     string `json:"task_token"`
 	HistoryLength int64  `json:"history_length"`
 	// When the workflow started (RFC 3339): the workflow clock's first reading.
-	StartedAt   string       `json:"started_at,omitempty"`
-	Input       string       `json:"input"`
-	InputBase64 string       `json:"input_base64,omitempty"`
-	Steps       []*stepDTO   `json:"steps"`
-	Signals     []*signalDTO `json:"signals"`
+	StartedAt string `json:"started_at,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	// The event id at which the history crossed the limits' warning share
+	// (absent: not yet). Code that has seen a result at or after it should
+	// continue as new; it is an event id, so every replay agrees.
+	SuggestContinueAsNewAt int64        `json:"suggest_continue_as_new_at,omitempty"`
+	HistorySizeBytes       int64        `json:"history_size_bytes,omitempty"`
+	Input                  string       `json:"input"`
+	InputBase64            string       `json:"input_base64,omitempty"`
+	Steps                  []*stepDTO   `json:"steps"`
+	Signals                []*signalDTO `json:"signals"`
 }
 
 type signalDTO struct {
@@ -96,8 +102,8 @@ func (a *HTTPAPI) registerWorkflowTypes(w http.ResponseWriter, r *http.Request) 
 		WorkerID      string   `json:"worker_id"`
 		SDK           string   `json:"sdk"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := a.decodeJSON(r, &body); err != nil {
+		writeError(w, decodeStatus(err), err)
 		return
 	}
 	e := a.engine(w)
@@ -151,10 +157,14 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		TaskToken:     task.GetTaskToken(),
 		HistoryLength: task.GetHistoryLength(),
 		StartedAt:     formatNanos(st.StartedAt),
-		Input:         string(st.Input),
-		InputBase64:   base64Twin(st.Input),
-		Steps:         make([]*stepDTO, 0, len(st.Steps)),
-		Signals:       make([]*signalDTO, 0, len(st.Signals)),
+		RunID:         task.GetRunId(),
+
+		SuggestContinueAsNewAt: task.GetSuggestContinueAsNewAt(),
+		HistorySizeBytes:       task.GetHistorySizeBytes(),
+		Input:                  string(st.Input),
+		InputBase64:            base64Twin(st.Input),
+		Steps:                  make([]*stepDTO, 0, len(st.Steps)),
+		Signals:                make([]*signalDTO, 0, len(st.Signals)),
 	}
 	for _, s := range st.Steps {
 		status := s.Status.String()
@@ -198,6 +208,10 @@ type commandDTO struct {
 	ScheduleToCloseTimeoutMs int64 `json:"schedule_to_close_timeout_ms,omitempty"`
 	// cancel_step: why the code no longer wants the step (optional).
 	Reason string `json:"reason,omitempty"`
+	// continue_as_new: the next run's type and execution timeout (absent:
+	// this run's); its input travels in input.
+	WorkflowType       string `json:"workflow_type,omitempty"`
+	ExecutionTimeoutMs int64  `json:"execution_timeout_ms,omitempty"`
 	// record_marker: "version" or "side_effect", and the recorded value.
 	Marker     string  `json:"marker,omitempty"`
 	Data       string  `json:"data,omitempty"`
@@ -220,8 +234,8 @@ func (a *HTTPAPI) completeWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		Commands    []*commandDTO `json:"commands"`
 		ReplayError string        `json:"replay_error"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := a.decodeJSON(r, &body); err != nil {
+		writeError(w, decodeStatus(err), err)
 		return
 	}
 	dtos := body.Commands
@@ -258,6 +272,9 @@ func (a *HTTPAPI) completeWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, ErrInvalidCommand):
 		writeError(w, http.StatusBadRequest, err)
+	case errors.Is(err, ErrHistoryLimit):
+		// The workflow ended at its history limit: nothing more to decide.
+		writeError(w, http.StatusConflict, err)
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err)
 	default:
@@ -327,6 +344,10 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 		return &WorkflowCommand{Command: &WorkflowCommand_CancelStep{
 			CancelStep: &CancelStepCommand{StepName: c.StepName, Sequence: c.Sequence, Reason: c.Reason},
 		}}, nil
+	case "continue_as_new":
+		return &WorkflowCommand{Command: &WorkflowCommand_ContinueAsNew{
+			ContinueAsNew: &ContinueAsNewCommand{Input: input, WorkflowType: c.WorkflowType, ExecutionTimeoutMs: c.ExecutionTimeoutMs},
+		}}, nil
 	default:
 		return nil, fmt.Errorf("unknown command type %q", c.Type)
 	}
@@ -380,8 +401,8 @@ func (a *HTTPAPI) completeActivityTask(w http.ResponseWriter, r *http.Request) {
 		ErrorType    string `json:"error_type"`
 		NonRetryable bool   `json:"non_retryable"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := a.decodeJSON(r, &body); err != nil {
+		writeError(w, decodeStatus(err), err)
 		return
 	}
 
@@ -428,8 +449,8 @@ func (a *HTTPAPI) heartbeatActivityTask(w http.ResponseWriter, r *http.Request) 
 		LeaseToken string `json:"lease_token"`
 		WorkerID   string `json:"worker_id"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := a.decodeJSON(r, &body); err != nil {
+		writeError(w, decodeStatus(err), err)
 		return
 	}
 	e := a.engine(w)

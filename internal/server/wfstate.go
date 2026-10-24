@@ -41,6 +41,10 @@ type wfState struct {
 	loaded bool
 	events []*history.HistoryEvent
 	fold   *state.Folder
+	// bytes is the history's size on disk; suggestAt the id of the event at
+	// which it crossed the limits' warning threshold (0: not yet).
+	bytes     int64
+	suggestAt int64
 }
 
 // lockWorkflow returns the workflow's wfState, locked.
@@ -86,7 +90,7 @@ func (e *Engine) unlockWorkflow(w *wfState) {
 }
 
 // load reads the history from the store unless it is already in memory.
-func (w *wfState) load(store *history.HistoryStore) error {
+func (w *wfState) load(store *history.HistoryStore, l Limits) error {
 	if w.loaded {
 		return nil
 	}
@@ -94,7 +98,10 @@ func (w *wfState) load(store *history.HistoryStore) error {
 	if err != nil {
 		return err
 	}
-	w.events, w.fold = events, state.NewFolder()
+	w.events, w.fold, w.bytes, w.suggestAt = nil, state.NewFolder(), 0, 0
+	for _, ev := range events {
+		w.track(ev, l)
+	}
 	for _, ev := range events {
 		if w.fold.Apply(ev) != nil {
 			break // the folder keeps the error; the history is invalid
@@ -104,16 +111,32 @@ func (w *wfState) load(store *history.HistoryStore) error {
 	return nil
 }
 
+// track adds an event to the cached history's size accounting.
+func (w *wfState) track(ev *history.HistoryEvent, l Limits) {
+	w.events = append(w.events, ev)
+	w.bytes += eventSize(ev)
+	if w.suggestAt == 0 && l.crossedWarning(len(w.events), w.bytes) {
+		w.suggestAt = ev.GetEventId()
+	}
+}
+
+// reset makes the cache a new run holding only first.
+func (w *wfState) reset(first *history.HistoryEvent, l Limits) {
+	w.loaded, w.events, w.fold, w.bytes, w.suggestAt = true, nil, state.NewFolder(), 0, 0
+	w.track(first, l)
+	_ = w.fold.Apply(first)
+}
+
 // forget drops the cached history, so the next operation reads the store.
 func (w *wfState) forget() {
-	w.loaded, w.events, w.fold = false, nil, nil
+	w.loaded, w.events, w.fold, w.bytes, w.suggestAt = false, nil, nil, 0, 0
 }
 
 // historyLocked returns the workflow's events and replayed state. The events
 // slice is safe to keep; the state is updated in place by later appends, so
 // copy what must outlive one. The caller must hold w.mu.
 func (e *Engine) historyLocked(w *wfState) ([]*history.HistoryEvent, *state.State, error) {
-	if err := w.load(e.store); err != nil {
+	if err := w.load(e.store, e.limits); err != nil {
 		return nil, nil, fmt.Errorf("server: read history %s: %w", w.id, err)
 	}
 	events := w.events[:len(w.events):len(w.events)]
@@ -124,10 +147,18 @@ func (e *Engine) historyLocked(w *wfState) ([]*history.HistoryEvent, *state.Stat
 }
 
 // recordLocked adds a just-appended event to the cached history.
-func (w *wfState) recordLocked(ev *history.HistoryEvent) {
+func (w *wfState) recordLocked(ev *history.HistoryEvent, l Limits) {
 	if !w.loaded {
 		return
 	}
-	w.events = append(w.events, ev)
+	w.track(ev, l)
 	_ = w.fold.Apply(ev) // an invalid history is reported by the next read
+}
+
+// runID is the cached run's id ("" if nothing is loaded).
+func (w *wfState) runID() string {
+	if w.fold == nil {
+		return ""
+	}
+	return w.fold.State().RunID
 }

@@ -381,6 +381,102 @@ func (s *HistoryStore) Delete(workflowID string) error {
 	return s.syncDir()
 }
 
+// NewRun ends a workflow's current history file and starts the next: the
+// finished history is kept under archiveID, and the workflow's history becomes
+// just first. A crash at any point leaves the old history current (the caller
+// redoes the whole step: it reads a finished run) or the new one, never neither.
+//
+//  1. link the current file to the archive name, and fsync the directory;
+//  2. write first to <id>.history.next and fsync it;
+//  3. rename it over the current file, and fsync the directory.
+//
+// Redoing it after a crash between 1 and 3 finds the archive already linked
+// to the same file, which is fine. It always fsyncs, even for a cluster's
+// buffered store: it is rare, and the rename must not outrun the data.
+func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent) error {
+	if err := validateWorkflowID(workflowID); err != nil {
+		return err
+	}
+	if err := validateWorkflowID(archiveID); err != nil {
+		return err
+	}
+	payload, err := proto.Marshal(first)
+	if err != nil {
+		return fmt.Errorf("history: marshal event: %w", err)
+	}
+	rec, err := record.Encode(payload)
+	if err != nil {
+		return fmt.Errorf("history: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireFormatLocked(first.GetMinReaderFormat()); err != nil {
+		return err
+	}
+	cur, arch := s.path(workflowID), s.path(archiveID)
+
+	// The finished run's buffered tail must be on disk before it is renamed.
+	if f, ok := s.files[workflowID]; ok {
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("history: fsync %s before a new run: %w", workflowID, err)
+		}
+	} else if s.dirty[workflowID] {
+		if err := syncFile(cur); err != nil {
+			return err
+		}
+	}
+	delete(s.dirty, workflowID)
+	if err := s.releaseLocked(workflowID); err != nil {
+		return err
+	}
+
+	if err := os.Link(cur, arch); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("history: keep %s as %s: %w", workflowID, archiveID, err)
+		}
+		a, aerr := os.Stat(arch)
+		c, cerr := os.Stat(cur)
+		if aerr != nil || cerr != nil || !os.SameFile(a, c) {
+			return fmt.Errorf("history: keep %s as %s: a different history already has that name", workflowID, archiveID)
+		}
+	}
+	if err := s.syncDir(); err != nil {
+		return err
+	}
+	next := cur + ".next"
+	f, err := os.OpenFile(next, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("history: create %s: %w", next, err)
+	}
+	_, werr := s.writeFile(f, rec)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("history: write the first event of %s's next run: %w", workflowID, werr)
+	}
+	if err := os.Rename(next, cur); err != nil {
+		return fmt.Errorf("history: start %s's next run: %w", workflowID, err)
+	}
+	return s.syncDir()
+}
+
+// syncFile fsyncs a file through a fresh descriptor.
+func syncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("history: open %s to fsync: %w", path, err)
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("history: fsync %s: %w", path, err)
+	}
+	return nil
+}
+
 // fileLocked returns a cached append handle for the workflow, opening one on
 // first use. On the first open of an existing file it recovers a torn tail; on
 // the first creation of a new file it fsyncs the parent directory (or, with

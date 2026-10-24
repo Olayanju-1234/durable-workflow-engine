@@ -38,6 +38,12 @@ type batchPlanner interface {
 	DecideAll(events []*history.HistoryEvent) ([]state.Decision, error)
 }
 
+// suggestingPlanner is a batchPlanner that is told where the history crossed
+// the limits' warning share, so the code can continue as new in time.
+type suggestingPlanner interface {
+	DecideAllSuggesting(events []*history.HistoryEvent, suggestAt int64) ([]state.Decision, error)
+}
+
 // HistoryLog is where the engine records history mutations. Single-node mode
 // writes straight to the HistoryStore; a cluster replicates each mutation
 // through Raft and returns once it is applied locally. Reads always go to the
@@ -45,6 +51,9 @@ type batchPlanner interface {
 type HistoryLog interface {
 	Append(workflowID string, ev *history.HistoryEvent) error
 	Delete(workflowID string) error
+	// NewRun keeps a finished history under archiveID and starts the
+	// workflow's next run with first (see HistoryStore.NewRun).
+	NewRun(workflowID, archiveID string, first *history.HistoryEvent) error
 }
 
 // Engine is the running heart of the workflow service: it owns the history
@@ -78,6 +87,7 @@ type Engine struct {
 	leaseDuration   time.Duration // immutable after NewEngine
 	decisionTimeout time.Duration // immutable after NewEngine
 	cacheSize       int           // immutable after NewEngine
+	limits          Limits        // immutable after NewEngine
 
 	wfMu sync.Mutex
 	wfs  map[string]*wfState // workflows in use or cached
@@ -137,9 +147,13 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 		leaseDuration:   defaultLeaseDuration,
 		decisionTimeout: defaultDecisionTimeout,
 		cacheSize:       defaultStateCacheSize,
-		workflowQueue:   newWorkflowTaskQueue(),
-		wfs:             make(map[string]*wfState),
-		idle:            list.New(),
+		limits: Limits{
+			MaxHistoryEvents: DefaultMaxHistoryEvents, MaxHistoryBytes: DefaultMaxHistoryBytes,
+			MaxPayloadBytes: DefaultMaxPayloadBytes,
+		},
+		workflowQueue: newWorkflowTaskQueue(),
+		wfs:           make(map[string]*wfState),
+		idle:          list.New(),
 
 		planners:         make(map[string]Planner),
 		policies:         make(map[string]RetryPolicy),
@@ -226,56 +240,60 @@ func WithExecutionTimeout(d time.Duration) StartOption {
 // first step, returning the workflow id. A blank workflowID is auto-generated;
 // a supplied one must not already exist.
 func (e *Engine) StartWorkflow(workflowType string, input []byte, workflowID string, opts ...StartOption) (string, error) {
+	s, err := e.Start(workflowType, input, workflowID, opts...)
+	return s.WorkflowID, err
+}
+
+// Start is StartWorkflow that also says which run it started.
+func (e *Engine) Start(workflowType string, input []byte, workflowID string, opts ...StartOption) (Started, error) {
 	var so startOptions
 	for _, o := range opts {
 		o(&so)
 	}
 	if so.executionTimeout < 0 {
-		return "", fmt.Errorf("%w: execution timeout must not be negative", ErrInvalidArgument)
+		return Started{}, fmt.Errorf("%w: execution timeout must not be negative", ErrInvalidArgument)
 	}
-	planner, ok := e.planner(workflowType)
-	if !ok {
-		return "", fmt.Errorf("%w: %q is not registered on this node", ErrUnknownType, workflowType)
+	if _, ok := e.planner(workflowType); !ok {
+		return Started{}, fmt.Errorf("%w: %q is not registered on this node", ErrUnknownType, workflowType)
+	}
+	if err := e.checkPayload("workflow input", input); err != nil {
+		return Started{}, err
 	}
 	if workflowID == "" {
 		// Timestamp alone can collide at coarse clock resolution or under rapid
 		// calls; the random suffix makes a generated id effectively unique.
 		workflowID = fmt.Sprintf("%s-%d-%08x", workflowType, time.Now().UnixNano(), rand.Uint32())
 	}
-
 	if err := validateID(workflowID); err != nil {
-		return "", err
+		return Started{}, err
+	}
+	if len(workflowID) > maxWorkflowIDBytes {
+		return Started{}, fmt.Errorf("%w: workflow id is %d bytes, over the %d-byte limit", ErrInvalidArgument, len(workflowID), maxWorkflowIDBytes)
 	}
 	w := e.lockWorkflow(workflowID)
 	defer e.unlockWorkflow(w)
 	existing, _, err := e.historyLocked(w)
 	if len(existing) > 0 {
-		return "", fmt.Errorf("%w: %q already has history", ErrAlreadyExists, workflowID)
+		return Started{}, fmt.Errorf("%w: %q already has history", ErrAlreadyExists, workflowID)
 	}
 	if err != nil {
-		return "", err
+		return Started{}, err
 	}
 
+	runID := newRunID()
 	started := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
 		WorkflowStarted: &history.WorkflowStartedEvent{
 			WorkflowId: workflowID, WorkflowType: workflowType, Input: input,
-			ExecutionTimeoutMs: so.executionTimeout.Milliseconds(),
+			ExecutionTimeoutMs: so.executionTimeout.Milliseconds(), RunId: runID,
 		},
 	}}
 	if err := e.appendLocked(w, started, 1); err != nil {
-		return "", err
+		return Started{}, err
 	}
-	if so.executionTimeout > 0 {
-		e.armExecutionDeadline(workflowID, time.Unix(0, started.GetTimestamp()).Add(so.executionTimeout))
+	if err := e.startRunLocked(w); err != nil {
+		return Started{}, err
 	}
-	e.metrics.workflowsStarted.Inc()
-	e.metrics.workflowsActive.Inc()
-	e.log.Info("workflow started", "workflow_id", workflowID, "type", workflowType)
-
-	if err := e.advanceLocked(w, planner); err != nil {
-		return "", err
-	}
-	return workflowID, nil
+	return Started{WorkflowID: workflowID, RunID: runID}, nil
 }
 
 // Recover rebuilds runtime state from durable history after a restart. The task
@@ -346,6 +364,12 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	if err != nil {
 		return fmt.Errorf("server: recover: %w", err)
 	}
+	if st.Status == state.StatusContinuedAsNew {
+		// A crash came between ending this run and starting the next.
+		e.log.Info("recovery: finishing continue-as-new", "workflow_id", id, "run_id", st.RunID)
+		c.advanced++
+		return e.startNextRunLocked(w)
+	}
 	if st.Status.IsTerminal() || st.Status == state.StatusNotStarted {
 		return nil
 	}
@@ -354,7 +378,7 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	e.metrics.workflowsActive.Inc()
 	if st.ExecutionTimeout > 0 {
 		// A deadline that passed while we were down fires at once.
-		e.armExecutionDeadline(id, time.Unix(0, st.StartedAt).Add(st.ExecutionTimeout))
+		e.armExecutionDeadline(id, st.RunID, time.Unix(0, st.StartedAt).Add(st.ExecutionTimeout))
 	}
 
 	// Resuming in-flight steps needs no planner, only deciding what comes next
@@ -365,20 +389,20 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	for i := range steps {
 		step := &steps[i]
 		if step.Kind == state.KindActivity && step.Open() {
-			e.armStepDeadline(id, step)
+			e.armStepDeadline(id, st.RunID, step)
 		}
 		switch {
 		case step.Retrying:
 			// The backoff timer was in memory: retry promptly, since the
 			// original window is unknown.
-			e.scheduleRetryLocked(id, step, 0)
+			e.scheduleRetryLocked(id, st.RunID, step, 0)
 			c.rearmed++
 		case step.Status != state.StepScheduled:
 		case step.Kind == state.KindTimer:
 			// Re-arm against the durable deadline. If it already passed while we
 			// were down, the timer service fires it immediately.
 			e.timers.Add(timer.Timer{
-				WorkflowID: id, StepName: step.Name,
+				WorkflowID: id, RunID: st.RunID, StepName: step.Name,
 				Sequence: step.Sequence, FireAt: time.Unix(0, step.FireAt),
 			})
 			c.rearmed++
@@ -397,7 +421,7 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	if tail := st.Tail(); st.Status == state.StatusRunning && tail != nil && tail.Status == state.StepFailed &&
 		!tail.Retrying && tail.Kind == state.KindActivity {
 		if _, retry := e.retryAfter(tail, time.Now()); retry {
-			e.scheduleRetryLocked(id, tail, 0)
+			e.scheduleRetryLocked(id, st.RunID, tail, 0)
 			c.rearmed++
 			return nil
 		}
@@ -492,8 +516,16 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 			stepName, sequence, workflowID, st.Status)
 	}
 	attempt := *step
-	workflowType := st.WorkflowType
+	workflowType, runID := st.WorkflowType, st.RunID
+	if failure == nil {
+		if err := e.checkPayload("activity output", output); err != nil {
+			// Unrecordable as a result, so the step fails, for good: the same
+			// output would come back from every retry.
+			failure = &TaskFailure{Message: err.Error(), Type: ErrorTypePayloadTooLarge, NonRetryable: true}
+		}
+	}
 	if failure != nil {
+		failure.Message = e.clip(failure.Message)
 		// Retry transparently if attempts remain: the workflow sees the error
 		// only once the policy is exhausted, so the failure says which it is.
 		attempt.ErrorType, attempt.NonRetryable = failure.Type, failure.NonRetryable
@@ -517,7 +549,7 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 			"error", stepErr, "error_type", failure.Type, "non_retryable", failure.NonRetryable,
 			"attempt", attempt.Attempts, "will_retry", willRetry)
 		if willRetry {
-			e.scheduleRetryLocked(workflowID, &attempt, delay)
+			e.scheduleRetryLocked(workflowID, runID, &attempt, delay)
 			return nil
 		}
 		return e.advanceIfRegisteredLocked(w, workflowType)
@@ -631,6 +663,9 @@ func (e *Engine) SignalWorkflowOnce(workflowID, signalName, requestID string, pa
 	if st.Status.IsTerminal() {
 		return fmt.Errorf("%w: %q is %s; cannot signal a terminal workflow", ErrAlreadyTerminal, workflowID, st.Status)
 	}
+	if err := e.checkPayload("signal payload", payload); err != nil {
+		return err
+	}
 
 	sig := &history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
 		SignalReceived: &history.SignalReceivedEvent{SignalName: signalName, Payload: payload, RequestId: requestID},
@@ -705,7 +740,7 @@ func (e *Engine) onTimerFired(tm timer.Timer) {
 		return
 	}
 	step := st.Step(tm.Sequence)
-	if st.Status.IsTerminal() || step == nil || step.Kind != state.KindTimer ||
+	if staleRun(tm, st) || st.Status.IsTerminal() || step == nil || step.Kind != state.KindTimer ||
 		step.Status != state.StepScheduled || step.Name != tm.StepName {
 		return // already resolved; nothing to do
 	}
@@ -748,6 +783,8 @@ func (e *Engine) advanceLocked(w *wfState, planner Planner) error {
 
 	var decisions []state.Decision
 	switch p := planner.(type) {
+	case suggestingPlanner:
+		decisions, err = p.DecideAllSuggesting(events, w.suggestAt)
 	case batchPlanner:
 		decisions, err = p.DecideAll(events)
 	case statePlanner:
@@ -800,6 +837,10 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 	recorded := false
 	for _, decision := range decisions {
 		nextID := int64(len(w.events) + 1)
+		if err := e.checkDecisionPayloads(decision); err != nil {
+			// The code will make the same decision on every replay: end the run.
+			decision = state.Decision{Type: state.DecideFailWorkflow, Error: err.Error()}
+		}
 		switch decision.Type {
 		case state.DecideScheduleStep:
 			scheduled := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
@@ -818,7 +859,7 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 				StartToClose: decision.StartToClose, ScheduleToClose: decision.ScheduleToClose,
 				ScheduledAt: scheduled.GetTimestamp(),
 			}
-			e.armStepDeadline(workflowID, step)
+			e.armStepDeadline(workflowID, w.runID(), step)
 			// Record-then-enqueue: the step is durable before any worker can see it,
 			// so a crash can never dispatch a task the history doesn't know about.
 			e.queue.enqueue(activityTask(workflowID, step))
@@ -838,7 +879,7 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 				return err
 			}
 			e.timers.Add(timer.Timer{
-				WorkflowID: workflowID, StepName: decision.StepName,
+				WorkflowID: workflowID, RunID: w.runID(), StepName: decision.StepName,
 				Sequence: decision.Sequence, FireAt: fireAt,
 			})
 			e.log.Info("timer started", "workflow_id", workflowID, "step", decision.StepName,
@@ -886,9 +927,12 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 			e.log.Info("workflow completed", "workflow_id", workflowID)
 			return nil
 
+		case state.DecideContinueAsNew:
+			return e.continueAsNewLocked(w, decision)
+
 		case state.DecideFailWorkflow:
 			failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowFailed{
-				WorkflowFailed: &history.WorkflowFailedEvent{Error: decision.Error},
+				WorkflowFailed: &history.WorkflowFailedEvent{Error: e.clip(decision.Error)},
 			}}
 			if err := e.appendLocked(w, failedEv, nextID); err != nil {
 				return err
@@ -944,6 +988,11 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 	}
 	ev.EventId = eventID
 	ev.Timestamp = time.Now().UnixNano()
+	if !isTerminalEvent(ev) && w.loaded {
+		if why := e.overLimit(w, eventSize(ev)); why != "" {
+			return e.failAtLimitLocked(w, why)
+		}
+	}
 	if w.fold != nil {
 		// Stamped so a binary that predates what the event uses refuses it.
 		if need := w.fold.FormatOf(ev); need > history.FormatBase {
@@ -956,8 +1005,14 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 		e.indexLocked(w)
 		return fmt.Errorf("server: append %s: %w", workflowID, err)
 	}
-	w.recordLocked(ev)
+	warnedBefore := w.suggestAt != 0
+	w.recordLocked(ev, e.limits)
 	e.indexLocked(w)
+	if !warnedBefore && w.suggestAt != 0 {
+		e.metrics.historyLimit.With("warned").Inc()
+		e.log.Warn("history is nearing its limit; the workflow should continue as new", "workflow_id", workflowID,
+			"events", len(w.events), "bytes", w.bytes, "max_events", e.limits.MaxHistoryEvents, "max_bytes", e.limits.MaxHistoryBytes)
+	}
 	if isTerminalEvent(ev) {
 		// The event is already durable; a failed close only costs a descriptor.
 		if err := e.store.Release(workflowID); err != nil {
@@ -976,6 +1031,8 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 func terminalStatus(ev *history.HistoryEvent) string {
 	f := ev.GetWorkflowFailed()
 	switch {
+	case ev.GetWorkflowCompleted().GetContinuedAsNew() != nil:
+		return "continued as new"
 	case ev.GetWorkflowCompleted() != nil:
 		return "completed"
 	case f.GetCancelled():
@@ -1007,7 +1064,7 @@ const callbackRetryDelay = 10 * time.Second
 // rearmCallback re-arms a popped callback timer after a transient failure.
 func (e *Engine) rearmCallback(svc *timer.Service, tm timer.Timer) {
 	svc.Add(timer.Timer{
-		WorkflowID: tm.WorkflowID, StepName: tm.StepName,
+		WorkflowID: tm.WorkflowID, RunID: tm.RunID, StepName: tm.StepName,
 		Sequence: tm.Sequence, FireAt: time.Now().Add(callbackRetryDelay),
 	})
 }

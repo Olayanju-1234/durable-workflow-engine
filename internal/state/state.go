@@ -16,6 +16,7 @@ import (
 //	Failed     → terminal: WorkflowFailed was recorded.
 //	TimedOut   → terminal: the engine ended it when its execution timeout passed.
 //	Cancelled  → terminal: a client cancelled it.
+//	ContinuedAsNew → terminal for this run: the workflow id goes on as a new run.
 type Status int
 
 const (
@@ -26,6 +27,7 @@ const (
 	StatusFailed
 	StatusTimedOut
 	StatusCancelled
+	StatusContinuedAsNew
 )
 
 func (s Status) String() string {
@@ -44,6 +46,8 @@ func (s Status) String() string {
 		return "TIMED_OUT"
 	case StatusCancelled:
 		return "CANCELLED"
+	case StatusContinuedAsNew:
+		return "CONTINUED_AS_NEW"
 	default:
 		return fmt.Sprintf("Status(%d)", int(s))
 	}
@@ -51,7 +55,8 @@ func (s Status) String() string {
 
 // IsTerminal reports whether the workflow has reached an end state.
 func (s Status) IsTerminal() bool {
-	return s == StatusCompleted || s == StatusFailed || s == StatusTimedOut || s == StatusCancelled
+	return s == StatusCompleted || s == StatusFailed || s == StatusTimedOut || s == StatusCancelled ||
+		s == StatusContinuedAsNew
 }
 
 // StepStatus is the lifecycle of a single step within a workflow.
@@ -139,6 +144,13 @@ type State struct {
 	Error        string           // workflow error, set when Status == StatusFailed
 	Terminated   bool             // the failure was an operator termination, not workflow code
 	StartedAt    int64            // unix nanos of WorkflowStarted
+	// RunID is this run's id: recorded on WorkflowStarted, or for a history
+	// from before run ids, derived from its start time (LegacyRunID).
+	RunID string
+	// ContinuedFromRunID is the run this one continued from, if any.
+	ContinuedFromRunID string
+	// ContinuedAsNew describes the next run, once Status is StatusContinuedAsNew.
+	ContinuedAsNew *history.ContinuedAsNew
 	// ExecutionTimeout is how long after StartedAt the workflow times out
 	// (zero = never).
 	ExecutionTimeout time.Duration
@@ -240,8 +252,18 @@ func (f *Folder) FormatOf(ev *history.HistoryEvent) uint32 {
 		if s := f.st.Step(sf.GetSequence()); sf.GetCancelled() || (s != nil && s.Retrying && !sf.GetWillRetry()) {
 			need = max(need, history.FormatClosedSteps)
 		}
+	case *history.HistoryEvent_WorkflowCompleted:
+		if attr.WorkflowCompleted.GetContinuedAsNew() != nil {
+			need = max(need, history.FormatRuns)
+		}
 	}
 	return need
+}
+
+// LegacyRunID is the run id of a history recorded before run ids existed:
+// its start time in hex, which is fixed once recorded.
+func LegacyRunID(startedAt int64) string {
+	return fmt.Sprintf("%016x", startedAt)
 }
 
 // Apply folds one more event into the state.
@@ -292,6 +314,10 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		st.Input = ws.GetInput()
 		st.StartedAt = ev.GetTimestamp()
 		st.ExecutionTimeout = time.Duration(ws.GetExecutionTimeoutMs()) * time.Millisecond
+		st.RunID, st.ContinuedFromRunID = ws.GetRunId(), ws.GetContinuedFromRunId()
+		if st.RunID == "" {
+			st.RunID = LegacyRunID(ev.GetTimestamp())
+		}
 		resolves = true
 
 	case *history.HistoryEvent_StepScheduled:
@@ -453,6 +479,9 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		// waiting for every timer or activity it started.
 		st.Status = StatusCompleted
 		st.Output = attr.WorkflowCompleted.GetOutput()
+		if can := attr.WorkflowCompleted.GetContinuedAsNew(); can != nil {
+			st.Status, st.ContinuedAsNew = StatusContinuedAsNew, can
+		}
 
 	case *history.HistoryEvent_WorkflowFailed:
 		st.Status = StatusFailed

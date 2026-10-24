@@ -54,6 +54,8 @@
     <a href="#cancellation">Cancellation</a>
     <a href="#schedules">Schedules</a>
     <a href="#testing">Testing workflows</a>
+    <a href="#continue-as-new">Continue-as-new</a>
+    <a href="#limits">Limits</a>
     <a href="#versioning">Changing running code</a>
     <a href="#embedding">Embedding the engine</a>
 
@@ -612,6 +614,63 @@ ctx.CancelStep(race[1-i]) // a no-op if the loser already has a result</code></p
       <li>Engine-side retry policies are not simulated: a failed activity returns its error at once.</li>
     </ul>
 
+    <h2 id="continue-as-new">Continue-as-new</h2>
+    <p>
+      A history only grows, and every replay, workflow task and recovery reads all of it. A workflow
+      that loops (polls, reminds, bills every month, lives as long as a customer does) should end its
+      run now and then and start a fresh one under the <em>same workflow id</em>, with an empty history
+      and the state it needs as input. That is continue-as-new:
+    </p>
+    <pre data-lang="go"><code>func Subscription(ctx workflow.Context, input []byte) ([]byte, error) {
+	for {
+		if ctx.ContinueAsNewSuggested() {
+			return nil, workflow.ContinueAsNew(input) // a new run, same id, empty history
+		}
+		if _, err := ctx.ExecuteActivity("bill", input); err != nil {
+			return nil, err
+		}
+		ctx.Sleep("month", 30*24*time.Hour)
+	}
+}</code></pre>
+    <p>
+      TypeScript: <code>return ctx.continueAsNew(state)</code> and <code>ctx.continueAsNewSuggested()</code>.
+      Python: <code>return ctx.continue_as_new(state)</code>, <code>ctx.continue_as_new_suggested()</code>.
+      Java: <code>return ctx.continueAsNew(state);</code>, <code>ctx.continueAsNewSuggested()</code>.
+      Each takes an optional workflow type and execution timeout for the next run (default: this run's).
+    </p>
+    <ul>
+      <li><strong>Every run has a run id</strong> (<code>run_id</code> in the API, <code>ctx.Info().RunID</code>,
+        <code>ctx.runId</code>); the next run records the one it <em>continued from</em>. Clients keep using
+        the workflow id: describing it shows the current run, and <code>WaitForResult</code> waits through
+        every run to the last one's output.</li>
+      <li><strong>Earlier runs are kept</strong> until <code>--retention</code> removes them:
+        <code>GET /api/workflows/{id}/runs</code> lists them (newest first), <code>GET /api/workflows/{id}?run_id=…</code>
+        shows one, as do <code>client.ListWorkflowRuns</code> / <code>DescribeWorkflowRun</code>.</li>
+      <li><strong>When to do it:</strong> when <code>ContinueAsNewSuggested()</code> turns true (the history passed
+        80% of its <a href="#limits">limits</a>), or on your own count, every <em>n</em> iterations. The suggestion is
+        a function of the history the code has seen, so every replay agrees.</li>
+      <li>Steps the run started and did not wait for are abandoned, as when a workflow returns. Signals it had
+        not consumed are <strong>not</strong> carried over: drain them first. Continuing as new before reaching the
+        steps history recorded is a non-determinism error, so stale state is never carried forward.</li>
+      <li>It is crash-safe: the run's end is recorded first; a crash before the next run starts is finished by
+        recovery.</li>
+    </ul>
+
+    <h2 id="limits">Limits</h2>
+    <p>Each run's history and each payload are bounded, the same on HTTP and gRPC:</p>
+    <table>
+      <thead><tr><th>Limit</th><th>Default</th><th>Flag</th><th>At the limit</th></tr></thead>
+      <tbody>
+        <tr><td>Events in a run's history</td><td>51,200</td><td><code>--max-history-events</code></td><td rowspan="2">At 80% the engine logs a warning, counts it in <code>workflowd_history_limit_total{kind="warned"}</code> and tells the code to continue as new. At the limit the workflow fails, with an error naming the limit; the event that would have crossed it is not written.</td></tr>
+        <tr><td>Bytes in a run's history</td><td>50 MiB</td><td><code>--max-history-bytes</code></td></tr>
+        <tr><td>One payload: an input, output, signal payload or marker value</td><td>2 MiB</td><td><code>--max-payload-bytes</code></td><td>A start or signal is refused (HTTP <code>413</code>, gRPC <code>RESOURCE_EXHAUSTED</code>). An activity output fails its step as <code>PayloadTooLarge</code>, not retried. A workflow output or step input fails the workflow.</td></tr>
+        <tr><td>One request (HTTP body, gRPC message)</td><td>9 MiB</td><td>four payloads + 1 MiB</td><td>HTTP <code>413</code>; gRPC <code>RESOURCE_EXHAUSTED</code>.</td></tr>
+        <tr><td>A workflow id</td><td>190 bytes</td><td>—</td><td>Start refused (<code>400</code>): an earlier run's file name must fit.</td></tr>
+      </tbody>
+    </table>
+    <p>Store large blobs elsewhere (object storage, your database) and pass a reference. <code>0</code> turns a
+      limit off. <code>history_size_bytes</code> on every workflow shows how close it is.</p>
+
     <h2 id="versioning">Changing running code</h2>
     <p>
       Workflows can run for weeks, so you will change code while executions are in flight. Adding,
@@ -851,7 +910,8 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--metrics-auth-token-file</code></td><td><code>$WORKFLOWD_METRICS_AUTH_TOKEN</code></td><td>Require a separate bearer token on <code>/metrics</code>, so Prometheus never holds the API token. Unset leaves <code>/metrics</code> open.</td></tr>
         <tr><td><code>--tls-cert</code>, <code>--tls-key</code></td><td>empty</td><td>Serve TLS on the gRPC, dashboard/API and metrics listeners with this PEM certificate and key. Re-read when the files change, so a renewed certificate needs no restart. Unset: plaintext.</td></tr>
         <tr><td><code>--demo-worker</code></td><td><code>false</code></td><td>Run an in-process worker for the built-in demo activities (<code>reserve</code>, <code>charge</code>, <code>ship</code>, <code>release</code>), so <code>OrderSaga</code> and <code>OrderWorkflow</code> run with no separate worker. An input containing <code>decline</code> makes <code>charge</code> fail for good, which shows the saga compensating.</td></tr>
-        <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated) this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
+        <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated, timed out, cancelled) and earlier runs of a workflow that <a href="#continue-as-new">continued as new</a> this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
+        <tr><td><code>--max-history-events</code>, <code>--max-history-bytes</code>, <code>--max-payload-bytes</code></td><td>51200, 50 MiB, 2 MiB</td><td>The <a href="#limits">limits</a> on a run's history and on each payload. <code>0</code> turns one off.</td></tr>
         <tr><td><code>--version</code></td><td>—</td><td>Print the version and the newest history format this binary reads, and exit.</td></tr>
         <tr><td><code>--check-format</code></td><td>—</td><td>With the engine stopped: report the data directory's recorded history format, what its histories need, and whether this binary can serve it, then exit (non-zero if not). See <a href="#upgrading">Upgrading &amp; rolling back</a>.</td></tr>
         <tr><td><code>--rescan-format</code></td><td>—</td><td>Like <code>--check-format</code>, then record the format the histories need now: how the format comes back down once workflows that needed a newer one are purged.</td></tr>
@@ -969,12 +1029,14 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
 }</code></pre>
 
     <h3>Get one workflow</h3>
-    <pre data-lang="sh"><code>GET /api/workflows/{id}</code></pre>
+    <pre data-lang="sh"><code>GET /api/workflows/{id}[?run_id=...]</code></pre>
     <pre data-lang="json"><code>{
   "workflow_id": "order-42",
   "workflow_type": "OrderSaga",
   "status": "WAITING",
   "history_length": 5,
+  "run_id": "9f3c0a51e2d47b68",
+  "history_size_bytes": 412,
   "input": "order-42",
   "steps": [
     {
@@ -988,10 +1050,19 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
   ]
 }</code></pre>
 
+    <p>Without <code>run_id</code> it is the current run; with one, an earlier run of the id. A run that
+      continued as new carries <code>continued_as_new_run_id</code>, and the run after it
+      <code>continued_from_run_id</code>.</p>
+
+    <h3>List a workflow's runs</h3>
+    <pre data-lang="sh"><code>GET /api/workflows/{id}/runs
+→ 200 {"runs":[{"run_id":"9f3c…","status":"RUNNING","started_at":"…","current":true},
+               {"run_id":"41aa…","status":"CONTINUED_AS_NEW","started_at":"…","closed_at":"…"}]}</code></pre>
+
     <h3>Start a workflow</h3>
     <pre data-lang="sh"><code>POST /api/workflows
 {"type":"OrderSaga","input":"order-42","workflow_id":"optional","execution_timeout_ms":86400000}
-→ 201 {"workflow_id":"order-42"}</code></pre>
+→ 201 {"workflow_id":"order-42","run_id":"9f3c0a51e2d47b68"}</code></pre>
     <p>
       A duplicate <code>workflow_id</code> returns <code>409</code>; an unregistered type
       returns <code>400</code>. <code>execution_timeout_ms</code> is optional
@@ -1051,7 +1122,8 @@ DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
       <thead><tr><th>Metric</th><th>Type</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>workflowd_workflows_started_total</code></td><td>counter</td><td>Executions started</td></tr>
-        <tr><td><code>workflowd_workflows_finished_total{status}</code></td><td>counter</td><td>Terminal outcomes: <code>completed</code>, <code>failed</code>, <code>terminated</code>, <code>timed_out</code>, <code>cancelled</code></td></tr>
+        <tr><td><code>workflowd_workflows_finished_total{status}</code></td><td>counter</td><td>Terminal outcomes: <code>completed</code>, <code>failed</code>, <code>terminated</code>, <code>timed_out</code>, <code>cancelled</code>, <code>continued_as_new</code> (a run that handed over to the next)</td></tr>
+        <tr><td><code>workflowd_history_limit_total{kind}</code></td><td>counter</td><td>Runs whose history crossed 80% of a <a href="#limits">limit</a> (<code>warned</code>) or reached it and failed (<code>failed</code>)</td></tr>
         <tr><td><code>workflowd_workflows_active</code></td><td>gauge</td><td>Running or waiting right now</td></tr>
         <tr><td><code>workflowd_tasks_dispatched_total</code></td><td>counter</td><td>Tasks handed to workers (including retries)</td></tr>
         <tr><td><code>workflowd_task_results_total{result}</code></td><td>counter</td><td>Worker-reported results: <code>completed</code> / <code>failed</code></td></tr>

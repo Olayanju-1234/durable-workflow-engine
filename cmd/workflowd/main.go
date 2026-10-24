@@ -40,6 +40,9 @@ func main() {
 		httpAddr    = flag.String("http-addr", ":8233", "HTTP listen address for the dashboard + JSON API (serve mode; empty disables)")
 		demoWorker  = flag.Bool("demo-worker", false, "run an in-process worker for the built-in demo activities (reserve, charge, ship, release)")
 		retention   = flag.Duration("retention", 0, "delete finished workflows this long after their last event, e.g. 168h (0 keeps them forever)")
+		maxEvents   = flag.Int("max-history-events", server.DefaultMaxHistoryEvents, "events a workflow run's history may hold; at 80% the engine warns and suggests continue-as-new, at the limit the workflow fails (0: no limit)")
+		maxBytes    = flag.Int64("max-history-bytes", server.DefaultMaxHistoryBytes, "bytes a workflow run's history may hold, like --max-history-events (0: no limit)")
+		maxPayload  = flag.Int("max-payload-bytes", server.DefaultMaxPayloadBytes, "the largest input, output, signal payload or marker value, on HTTP and gRPC alike (0: no limit)")
 		checkFmt    = flag.Bool("check-format", false, "report the data directory's history format and whether this binary can serve it, then exit (run with the engine stopped)")
 		rescanFmt   = flag.Bool("rescan-format", false, "like --check-format, then record the format the histories need now (lowers it once newer histories are gone)")
 
@@ -102,6 +105,11 @@ func main() {
 		cfg := serveConfig{
 			addr: *addr, metricsAddr: *metricsAddr, httpAddr: *httpAddr,
 			sec: sec, demoWorker: *demoWorker, retention: *retention,
+			limits: server.Limits{MaxHistoryEvents: *maxEvents, MaxHistoryBytes: *maxBytes, MaxPayloadBytes: *maxPayload},
+		}
+		if err := cfg.limits.Validate(); err != nil {
+			logger.Error("invalid limits", "err", err)
+			os.Exit(2)
 		}
 		if clustered {
 			if err := runCluster(logger, store, *dataDir, cfg, clusterCfg); err != nil {
@@ -135,6 +143,13 @@ type serveConfig struct {
 	sec                         security
 	demoWorker                  bool
 	retention                   time.Duration
+	limits                      server.Limits
+}
+
+// grpcServerOptions are the client-facing gRPC server's options: TLS and
+// auth, and a message size that fits the largest request the limits allow.
+func (cfg serveConfig) grpcServerOptions() []grpc.ServerOption {
+	return append(cfg.sec.grpcServerOptions(), grpc.MaxRecvMsgSize(cfg.limits.RequestBytes()))
 }
 
 // demoWorkerConcurrency is how many demo activities run at once.
@@ -148,7 +163,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 	if cfg.retention < 0 {
 		return fmt.Errorf("--retention must not be negative, got %s", cfg.retention)
 	}
-	engine := server.NewEngine(store, logger)
+	engine := server.NewEngine(store, logger, server.WithLimits(cfg.limits))
 	defer engine.Close()
 	registerDemoTypes(engine)
 
@@ -199,7 +214,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 		return fmt.Errorf("listen %s: %w", cfg.addr, err)
 	}
 
-	gs := grpc.NewServer(cfg.sec.grpcServerOptions()...)
+	gs := grpc.NewServer(cfg.grpcServerOptions()...)
 	server.RegisterWorkflowServiceServer(gs, server.NewGRPCServer(engine, logger))
 
 	go func() {

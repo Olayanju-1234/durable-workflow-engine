@@ -315,7 +315,7 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 			"worker_id", le.workerID, "step", le.stepName, "sequence", le.sequence, "attempt", attempt.Attempts)
 	}
 	if willRetry {
-		e.scheduleRetryLocked(tm.WorkflowID, &attempt, delay)
+		e.scheduleRetryLocked(tm.WorkflowID, st.RunID, &attempt, delay)
 		return
 	}
 	e.advanceOrRetry(w, workflowType)

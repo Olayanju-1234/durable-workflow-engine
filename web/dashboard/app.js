@@ -251,6 +251,12 @@ function renderDetail(w) {
   $('d-started').textContent = fmtTime(w.started_at);
   $('d-updated').textContent = fmtTime(w.updated_at);
   $('d-events').textContent = w.history_length;
+  // A workflow that continues as new keeps its id; each run gets a new run id.
+  const short = (id) => (id || '').slice(0, 8);
+  $('d-run').textContent = w.run_id
+    ? `${short(w.run_id)}${w.continued_from_run_id ? ` · continued from ${short(w.continued_from_run_id)}` : ''}`
+    : '—';
+  $('d-run').title = w.run_id || '';
 
   $('d-error-wrap').hidden = !w.error;
   if (w.error) $('d-error').textContent = w.error;

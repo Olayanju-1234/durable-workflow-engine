@@ -107,6 +107,7 @@ Commands are a flat tagged union:
 {"type": "cancel_step",       "step_name": "gate",   "sequence": 4, "reason": "lost a race"}
 {"type": "complete_workflow", "output": "..."}
 {"type": "fail_workflow",     "error": "..."}
+{"type": "continue_as_new",   "input": "...", "workflow_type": "optional", "execution_timeout_ms": 0}
 {"type": "noop"}
 ```
 
@@ -125,6 +126,15 @@ Commands are a flat tagged union:
   Engines before 0.2.0 refuse the command.
 - A worker turned away because its step was cancelled or its workflow finished gets a
   `409` with `"cancelled": true` from heartbeat and complete; stop the work.
+- **`continue_as_new`** ends the run and starts a fresh one under the same workflow id,
+  with an empty history and `input` (absent `workflow_type` / `execution_timeout_ms`: this
+  run's). Like `complete_workflow` it comes last in a batch. The SDK must refuse it (as
+  non-determinism) when the code continues before reaching every step in `steps[]`, or
+  it would carry stale state forward. Engines before 0.3.0 refuse the command.
+- The task carries `run_id`, `history_size_bytes` and, once the history has passed 80%
+  of the engine's limits, `suggest_continue_as_new_at`: an event id. `continueAsNewSuggested()`
+  is true once the code has received a step result whose `resolved_event_id` is at least
+  that, so every replay answers the same at the same point of the code.
 - **`record_marker`** is how `getVersion` / `sideEffect` work: a step that
   completes as it is recorded. In `steps[]` it comes back with `"kind": "MARKER"`,
   `"marker": "version"` or `"side_effect"`, and the value in `output`. A version

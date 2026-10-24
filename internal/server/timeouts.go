@@ -25,15 +25,21 @@ import (
 // The deadlines service holds both durable deadlines: Sequence 0 is a
 // workflow's execution timeout, anything else a step's schedule-to-close.
 
-func (e *Engine) armExecutionDeadline(workflowID string, at time.Time) {
-	e.deadlines.Add(timer.Timer{WorkflowID: workflowID, FireAt: at})
+func (e *Engine) armExecutionDeadline(workflowID, runID string, at time.Time) {
+	e.deadlines.Add(timer.Timer{WorkflowID: workflowID, RunID: runID, FireAt: at})
 }
 
 // armStepDeadline arms an activity's schedule-to-close timeout, if it has one.
-func (e *Engine) armStepDeadline(workflowID string, s *state.Step) {
+func (e *Engine) armStepDeadline(workflowID, runID string, s *state.Step) {
 	if at, ok := scheduleToCloseDeadline(s); ok {
-		e.deadlines.Add(timer.Timer{WorkflowID: workflowID, StepName: s.Name, Sequence: s.Sequence, FireAt: at})
+		e.deadlines.Add(timer.Timer{WorkflowID: workflowID, RunID: runID, StepName: s.Name, Sequence: s.Sequence, FireAt: at})
 	}
+}
+
+// staleRun reports whether a timer was armed for an earlier run of the
+// workflow than the one now current.
+func staleRun(tm timer.Timer, st *state.State) bool {
+	return tm.RunID != "" && tm.RunID != st.RunID
 }
 
 func scheduleToCloseDeadline(s *state.Step) (time.Time, bool) {
@@ -75,11 +81,11 @@ func (e *Engine) onExecutionDeadline(tm timer.Timer) {
 		}
 		return
 	}
-	if st.Status.IsTerminal() || st.Status == state.StatusNotStarted || st.ExecutionTimeout <= 0 {
+	if staleRun(tm, st) || st.Status.IsTerminal() || st.Status == state.StatusNotStarted || st.ExecutionTimeout <= 0 {
 		return
 	}
 	if deadline := time.Unix(0, st.StartedAt).Add(st.ExecutionTimeout); time.Now().Before(deadline) {
-		e.armExecutionDeadline(tm.WorkflowID, deadline)
+		e.armExecutionDeadline(tm.WorkflowID, st.RunID, deadline)
 		return
 	}
 	msg := fmt.Sprintf("workflow timed out: execution timeout of %s exceeded", st.ExecutionTimeout)
@@ -110,7 +116,7 @@ func (e *Engine) onStepDeadline(tm timer.Timer) {
 		return
 	}
 	step := st.Step(tm.Sequence)
-	if st.Status.IsTerminal() || step == nil || step.Kind != state.KindActivity || step.Name != tm.StepName || !step.Open() {
+	if staleRun(tm, st) || st.Status.IsTerminal() || step == nil || step.Kind != state.KindActivity || step.Name != tm.StepName || !step.Open() {
 		return
 	}
 	deadline, ok := scheduleToCloseDeadline(step)
@@ -118,7 +124,7 @@ func (e *Engine) onStepDeadline(tm timer.Timer) {
 		return
 	}
 	if time.Now().Before(deadline) {
-		e.deadlines.Add(timer.Timer{WorkflowID: tm.WorkflowID, StepName: step.Name, Sequence: step.Sequence, FireAt: deadline})
+		e.deadlines.Add(timer.Timer{WorkflowID: tm.WorkflowID, RunID: st.RunID, StepName: step.Name, Sequence: step.Sequence, FireAt: deadline})
 		return
 	}
 	s := *step
@@ -143,7 +149,7 @@ func (e *Engine) timeOutStepLocked(w *wfState, step *state.Step) {
 	}}
 	if err := e.appendLocked(w, failed, int64(len(events)+1)); err != nil {
 		e.log.Error("schedule-to-close timeout: append", "workflow_id", w.id, "err", err)
-		e.deadlines.Add(timer.Timer{WorkflowID: w.id, StepName: step.Name, Sequence: step.Sequence,
+		e.deadlines.Add(timer.Timer{WorkflowID: w.id, RunID: st.RunID, StepName: step.Name, Sequence: step.Sequence,
 			FireAt: time.Now().Add(callbackRetryDelay)})
 		return
 	}

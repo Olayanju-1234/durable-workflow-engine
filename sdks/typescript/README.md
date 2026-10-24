@@ -58,6 +58,9 @@ if (reply === undefined) return 'expired';
 // Change code safely while executions are in flight; record a non-deterministic value once.
 if ((await ctx.getVersion('fraud-check', DEFAULT_VERSION, 1)) === 1) await ctx.activity('fraud-check', receipt);
 const id = await ctx.sideEffect('id', () => crypto.randomUUID());
+
+// A loop that runs forever keeps its history small: a fresh run, same workflow id.
+if (ctx.continueAsNewSuggested()) return ctx.continueAsNew(state);
 ```
 
 A cluster: `new Worker({ addresses: ['http://n1:8233', 'http://n2:8233', 'http://n3:8233'] })`

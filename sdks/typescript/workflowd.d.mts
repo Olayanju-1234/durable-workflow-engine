@@ -78,6 +78,18 @@ export interface Context {
   /** The workflow's input as text, as given to startWorkflow. */
   readonly input: string;
   readonly workflowId: string;
+  /** This run's id: a workflow that continues as new gets a new one. */
+  readonly runId: string;
+  /**
+   * True once the history has grown past the engine's warning share of its limits, as of the
+   * latest result the code has received (so every replay agrees). Then continue as new.
+   */
+  continueAsNewSuggested(): boolean;
+  /**
+   * End this run and start a fresh one under the same workflow id with an empty history:
+   * `return ctx.continueAsNew(state)`. Unconsumed signals are not carried over.
+   */
+  continueAsNew(input?: Payload, opts?: { workflowType?: string; executionTimeoutMs?: number }): Promise<never>;
   /** The input decoded as text, JSON or bytes. */
   inputAs(as?: 'text'): string;
   inputAs(as: 'bytes'): Uint8Array;
@@ -186,6 +198,9 @@ export interface WorkflowTask {
   task_token?: string;
   /** When the workflow started (RFC 3339): ctx.now()'s first reading. */
   started_at?: string;
+  run_id?: string;
+  /** The event id where the history crossed the engine's warning share (absent: not yet). */
+  suggest_continue_as_new_at?: number;
   input?: string;
   input_base64?: string;
   steps?: Array<Record<string, unknown>>;
@@ -237,8 +252,10 @@ export class Worker {
   signal(workflowId: string, name: string, payload?: Payload, opts?: { requestId?: string }): Promise<void>;
   /** End a running workflow as CANCELLED; workers running its activities are told to stop. */
   cancel(workflowId: string, reason?: string): Promise<void>;
-  /** The engine's view of a workflow: status, steps, output, error. */
-  describe(workflowId: string): Promise<Record<string, unknown>>;
+  /** The engine's view of a workflow: status, steps, output, error; opts.runId for an earlier run. */
+  describe(workflowId: string, opts?: { runId?: string }): Promise<Record<string, unknown>>;
+  /** The runs kept for a workflow id, current first, then earlier ones (continued as new). */
+  runs(workflowId: string): Promise<{ runs: Array<{ run_id: string; status: string; started_at?: string; closed_at?: string; current?: boolean }> }>;
   /** Register, then serve workflow decisions and activities until stop(). */
   run(): Promise<void>;
 }

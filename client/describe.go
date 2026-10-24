@@ -17,12 +17,16 @@ const (
 	StatusTerminated Status = "TERMINATED" // ended by TerminateWorkflow
 	StatusTimedOut   Status = "TIMED_OUT"  // its execution timeout passed (WithExecutionTimeout)
 	StatusCancelled  Status = "CANCELLED"  // ended by CancelWorkflow
-	StatusUnknown    Status = "UNKNOWN"    // the history could not be read
+	// An earlier run that continued as new (workflow.ContinueAsNew); the
+	// workflow id went on as a new run. Only DescribeWorkflowRun shows it.
+	StatusContinuedAsNew Status = "CONTINUED_AS_NEW"
+	StatusUnknown        Status = "UNKNOWN" // the history could not be read
 )
 
 // Done reports whether the workflow has finished, successfully or not.
 func (s Status) Done() bool {
-	return s == StatusCompleted || s == StatusFailed || s == StatusTerminated || s == StatusTimedOut || s == StatusCancelled
+	return s == StatusCompleted || s == StatusFailed || s == StatusTerminated || s == StatusTimedOut || s == StatusCancelled ||
+		s == StatusContinuedAsNew
 }
 
 // WorkflowDescription is a workflow as replayed from its history.
@@ -37,6 +41,23 @@ type WorkflowDescription struct {
 	Error         string // set when the workflow failed or was terminated
 	HistoryLength int64
 	Steps         []Step
+	// RunID names the run described. A workflow that continues as new has a
+	// chain of runs: ContinuedFromRunID is the one before this, and
+	// ContinuedAsNewRunID (for an earlier run) the one after.
+	RunID               string
+	ContinuedFromRunID  string
+	ContinuedAsNewRunID string
+	// HistorySizeBytes is the run's history size on disk.
+	HistorySizeBytes int64
+}
+
+// Run is one run of a workflow id (see ListWorkflowRuns).
+type Run struct {
+	RunID     string
+	Status    Status
+	StartedAt time.Time
+	ClosedAt  time.Time // zero while the run is open
+	Current   bool
 }
 
 // Step is one durable call the workflow made.
@@ -62,6 +83,8 @@ var statuses = map[server.WorkflowStatus]Status{
 	server.WorkflowStatus_WORKFLOW_STATUS_TERMINATED: StatusTerminated,
 	server.WorkflowStatus_WORKFLOW_STATUS_TIMED_OUT:  StatusTimedOut,
 	server.WorkflowStatus_WORKFLOW_STATUS_CANCELLED:  StatusCancelled,
+
+	server.WorkflowStatus_WORKFLOW_STATUS_CONTINUED_AS_NEW: StatusContinuedAsNew,
 }
 
 func describe(r *server.GetWorkflowResponse) *WorkflowDescription {
@@ -75,6 +98,9 @@ func describe(r *server.GetWorkflowResponse) *WorkflowDescription {
 		StartedAt: unixNanos(sum.GetStartedAt()), UpdatedAt: unixNanos(sum.GetUpdatedAt()),
 		Input: r.GetInput(), Output: r.GetOutput(), Error: sum.GetError(),
 		HistoryLength: sum.GetHistoryLength(),
+
+		RunID: sum.GetRunId(), ContinuedFromRunID: r.GetContinuedFromRunId(),
+		ContinuedAsNewRunID: r.GetContinuedAsNewRunId(), HistorySizeBytes: sum.GetHistorySizeBytes(),
 	}
 	for _, s := range r.GetSteps() {
 		d.Steps = append(d.Steps, Step{

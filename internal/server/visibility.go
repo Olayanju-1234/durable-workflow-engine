@@ -47,19 +47,43 @@ func (e *Engine) ListWorkflows(filter WorkflowStatus) ([]*WorkflowSummary, error
 // GetWorkflow returns one workflow in full reconstructed detail: its summary
 // plus every step as replay sees it. Unknown ids return ErrNotFound.
 func (e *Engine) GetWorkflow(workflowID string) (*GetWorkflowResponse, error) {
+	return e.GetWorkflowRun(workflowID, "")
+}
+
+// GetWorkflowRun is GetWorkflow for one run of the workflow id: the current
+// one when runID is empty or names it, else an earlier, archived run.
+func (e *Engine) GetWorkflowRun(workflowID, runID string) (*GetWorkflowResponse, error) {
 	if err := validateID(workflowID); err != nil {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, workflowID)
 	}
 	w := e.lockWorkflow(workflowID)
-	defer e.unlockWorkflow(w)
 	events, st, err := e.historyLocked(w)
-	if err != nil {
+	if err != nil || runID == "" || (len(events) > 0 && runID == st.RunID) {
+		// The cached state changes with every append: describe it under the lock.
+		defer e.unlockWorkflow(w)
+		if err != nil {
+			return nil, err
+		}
+		return describeRun(workflowID, events, st, w.bytes)
+	}
+	e.unlockWorkflow(w)
+	if events, err = e.archivedRunHistory(workflowID, runID); err != nil {
 		return nil, err
 	}
+	if st, err = state.Reconstruct(events); err != nil {
+		return nil, fmt.Errorf("server: reconstruct run %s of %s: %w", runID, workflowID, err)
+	}
+	var bytes int64
+	for _, ev := range events {
+		bytes += eventSize(ev)
+	}
+	return describeRun(workflowID, events, st, bytes)
+}
+
+func describeRun(workflowID string, events []*history.HistoryEvent, st *state.State, bytes int64) (*GetWorkflowResponse, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, workflowID)
 	}
-
 	steps := make([]*StepInfo, 0, len(st.Steps))
 	for _, s := range st.Steps {
 		status, stepErr := s.Status.String(), s.Error
@@ -82,10 +106,12 @@ func (e *Engine) GetWorkflow(workflowID string) (*GetWorkflowResponse, error) {
 		})
 	}
 	return &GetWorkflowResponse{
-		Summary: summaryFrom(workflowID, events, st),
-		Steps:   steps,
-		Input:   st.Input,
-		Output:  st.Output,
+		Summary:             summaryFrom(workflowID, events, st, bytes),
+		Steps:               steps,
+		Input:               st.Input,
+		Output:              st.Output,
+		ContinuedFromRunId:  st.ContinuedFromRunID,
+		ContinuedAsNewRunId: st.ContinuedAsNew.GetRunId(),
 	}, nil
 }
 
@@ -110,13 +136,15 @@ func protoStatusName(st *state.State) string {
 	return strings.TrimPrefix(protoStatus(st).String(), "WORKFLOW_STATUS_")
 }
 
-func summaryFrom(workflowID string, events []*history.HistoryEvent, st *state.State) *WorkflowSummary {
+func summaryFrom(workflowID string, events []*history.HistoryEvent, st *state.State, bytes int64) *WorkflowSummary {
 	sum := &WorkflowSummary{
-		WorkflowId:    workflowID,
-		WorkflowType:  st.WorkflowType,
-		Status:        protoStatus(st),
-		Error:         st.Error,
-		HistoryLength: int64(len(events)),
+		WorkflowId:       workflowID,
+		WorkflowType:     st.WorkflowType,
+		Status:           protoStatus(st),
+		Error:            st.Error,
+		HistoryLength:    int64(len(events)),
+		RunId:            st.RunID,
+		HistorySizeBytes: bytes,
 	}
 	if len(events) > 0 {
 		sum.StartedAt = events[0].GetTimestamp()
@@ -145,6 +173,8 @@ func protoStatus(st *state.State) WorkflowStatus {
 		return WorkflowStatus_WORKFLOW_STATUS_TIMED_OUT
 	case state.StatusCancelled:
 		return WorkflowStatus_WORKFLOW_STATUS_CANCELLED
+	case state.StatusContinuedAsNew:
+		return WorkflowStatus_WORKFLOW_STATUS_CONTINUED_AS_NEW
 	default:
 		return WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED
 	}

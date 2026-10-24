@@ -93,7 +93,10 @@ types); otherwise the feature is simply unavailable until the engine is upgraded
 
 - **0.3.0:** adds formats (this document). A workflow that continues as new raises the
   directory to format 5 and moves its finished runs to `__workflowd-run~...` history files,
-  which older binaries ignore.
+  which older binaries ignore. The new limits apply to existing workflows as soon as you
+  upgrade: one already past 51,200 events (or 50 MiB) fails at its next event, so raise
+  `--max-history-events` / `--max-history-bytes` first if you have any that long
+  (`history_length` in `GET /api/workflows`). Payloads over 2 MiB are refused from now on.
 - **0.2.0** (format 4): older binaries read timed-out and cancelled workflows as `FAILED`,
   ignore timeouts and non-retryable flags, and refuse a history where a step between retries
   was closed by a deadline or a cancel.
