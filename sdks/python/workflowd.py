@@ -53,6 +53,7 @@ import base64
 import inspect
 import json
 import random
+import re
 import ssl
 import threading
 import time
@@ -60,7 +61,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional, Union
 
 __all__ = [
     "Worker",
@@ -182,6 +184,19 @@ class _NonDeterminism(BaseException):
     """
 
 
+_RFC3339 = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$")
+
+
+def _parse_time(value: Optional[str]) -> Optional[datetime]:
+    """An RFC 3339 time from the engine (nanoseconds trimmed to micro), in UTC."""
+    m = _RFC3339.match(value or "")
+    if not m:
+        return None
+    zone = "+00:00" if m.group(3) == "Z" else m.group(3)
+    frac = (m.group(2) or "0")[:6].ljust(6, "0")
+    return datetime.fromisoformat(f"{m.group(1)}.{frac}{zone}").astimezone(timezone.utc)
+
+
 # ---- payloads ----
 
 
@@ -257,6 +272,7 @@ class Future:
             raise _Yield()
         if rec.get("status") == "CANCELLED":
             raise CancelledFailure(self._name, rec.get("error") or "cancelled")
+        self._ctx._observe(self._seq)
         if rec.get("status") == "FAILED":
             raise ActivityFailure(
                 self._name,
@@ -280,6 +296,40 @@ class Context:
         self._versions: Dict[str, int] = {}
         self._pending: List[dict] = []  # new commands, in sequence order
         self._cancelled: Dict[int, int] = {}  # seq -> cancel order, for steps cancelled in this replay
+        self._started_at = _parse_time(task.get("started_at"))
+        self._now = self._started_at  # the latest result the code has received
+        self._random: Optional[random.Random] = None
+
+    def now(self) -> datetime:
+        """The workflow's deterministic clock (UTC): when the latest step result
+        the code has received was recorded, the start at first. It moves only
+        as results arrive and reads the same on every replay, so use it instead
+        of ``datetime.now()``."""
+        if self._now is None:
+            raise RuntimeError("ctx.now() needs a workflowd engine that sends started_at (0.2.0 or later)")
+        return self._now
+
+    def random(self) -> float:
+        """A deterministic random number in [0, 1): the same sequence on every
+        replay of this execution. Fine for jitter or picking a variant; not for
+        secrets (it is derived from the workflow id), use side_effect for those."""
+        if self._random is None:
+            self._random = random.Random(f"{self.workflow_id}\0{self.task.get('started_at') or ''}")
+        return self._random.random()
+
+    def sleep_until(self, name: str, when: Union[datetime, float]) -> str:
+        """Pause durably until ``when`` (an aware datetime, or epoch seconds),
+        measured on ``ctx.now()``."""
+        at = when.timestamp() if isinstance(when, datetime) else float(when)
+        return self.sleep(name, max(0.0, at - self.now().timestamp()))
+
+    def _observe(self, seq: int) -> None:
+        rec = self._steps[seq - 1] if seq <= len(self._steps) else None
+        if rec is None or rec.get("kind") == "MARKER" or rec.get("status") == "CANCELLED":
+            return
+        at = _parse_time(rec.get("resolved_at"))
+        if at is not None and (self._now is None or at > self._now):
+            self._now = at
 
     def input_as(self, decode: str = "text") -> Any:
         """The start input decoded as "text" (same as ctx.input), "json" or "bytes"."""
@@ -346,9 +396,22 @@ class Context:
             "TIMER", name, {"type": "start_timer", "step_name": name, "delay_ms": max(0, int(seconds * 1000))}, "text"
         )
 
-    def wait_for_signal(self, name: str, signal_name: str, *, decode: str = "text") -> Any:
-        """Block until a matching external signal arrives; return its payload."""
-        return self.wait_for_signal_async(name, signal_name, decode=decode).result()
+    def wait_for_signal(
+        self, name: str, signal_name: str, *, decode: str = "text", timeout: Optional[float] = None
+    ) -> Any:
+        """Block until a matching external signal arrives; return its payload.
+
+        With ``timeout`` (seconds) it returns None if none arrives in time, and
+        the wait is cancelled so a late signal goes to the next wait for it.
+        (That uses a timer step named ``<name>.timeout``.)
+        """
+        wait = self.wait_for_signal_async(name, signal_name, decode=decode)
+        if timeout is None:
+            return wait.result()
+        deadline = self.sleep_async(f"{name}.timeout", timeout)
+        if self.wait_any(wait, deadline, cancel_rest=True) == 1:
+            return None
+        return wait.result()
 
     def wait_for_signal_async(self, name: str, signal_name: str, *, decode: str = "text") -> Future:
         """Start waiting for a signal and return at once."""
@@ -384,6 +447,8 @@ class Context:
             for i, f in enumerate(futures):
                 if i != best:
                     f.cancel("lost a wait_any race")
+        if futures[best]._recorded() is not None:
+            self._observe(futures[best]._seq)
         return best
 
     def get_version(self, change_id: str, min_supported: int, max_supported: int) -> int:

@@ -153,7 +153,7 @@ and returns them as one batch:
 - A step whose attempt failed and will be retried is sent as `SCHEDULED`: it has no
   result yet, and workflow code must keep waiting on it.
 - Each resolved step carries `resolved_at` (RFC 3339) and the task carries `started_at`:
-  an SDK's deterministic clock reads them (the TypeScript `ctx.now()`).
+  an SDK's deterministic clock reads them (`ctx.now()` in TypeScript, Python and Java).
 - Each resolved step carries `resolved_event_id`. "Wait for whichever finishes first"
   must pick the step with the lowest one, not the first in code order: the order of
   results is fixed in history, so every replay makes the same choice. (A plain
@@ -162,13 +162,14 @@ and returns them as one batch:
 - Workflow code may finish while steps are still in flight (a lost race); the engine
   abandons them and turns their workers away.
 
-| | TypeScript | Python | Go |
-|---|---|---|---|
-| start without waiting | `ctx.activity(...)` (don't `await` yet), `ctx.sleep`, `ctx.waitForSignal` | `ctx.activity_async`, `sleep_async`, `wait_for_signal_async` | `ExecuteActivityAsync`, `NewTimer`, `WaitForSignalAsync` |
-| wait for all | `Promise.all([...])` | `ctx.wait_all(*futures)` | `f.Get()` on each |
-| wait for the first | `ctx.waitAny([...])` | `ctx.wait_any(*futures)` | `ctx.WaitAny(futures...)` |
-
-The Java SDK still issues one command per task, which the engine accepts unchanged.
+| | TypeScript | Python | Java | Go |
+|---|---|---|---|---|
+| start without waiting | `ctx.activity(...)` (don't `await` yet), `ctx.sleep`, `ctx.waitForSignal` | `ctx.activity_async`, `sleep_async`, `wait_for_signal_async` | `ctx.activityAsync`, `sleepAsync`, `waitForSignalAsync` | `ExecuteActivityAsync`, `NewTimer`, `WaitForSignalAsync` |
+| wait for all | `Promise.all([...])` | `ctx.wait_all(*futures)` | `ctx.waitAll(futures...)` | `f.Get()` on each |
+| wait for the first | `ctx.waitAny([...])` | `ctx.wait_any(*futures)` | `ctx.waitAny(futures...)` | `ctx.WaitAny(futures...)` |
+| cancel a step | `ctx.cancel(p)`, `{ cancelRest: true }` | `future.cancel()`, `cancel_rest=True` | `future.cancel()`, `waitAny(true, ...)` | `ctx.CancelStep(f)` |
+| deterministic clock / random | `ctx.now()`, `ctx.random()` | `ctx.now()`, `ctx.random()` | `ctx.now()`, `ctx.random()` | `ctx.Now()`, `SideEffect` |
+| signal wait with a timeout | `waitForSignal(n, s, { timeoutMs })` | `wait_for_signal(n, s, timeout=)` | `waitForSignal(n, s, Duration)` | `WaitAny` with `NewTimer` |
 
 ### Payloads
 

@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+from datetime import timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -163,6 +164,34 @@ worker.activity("py-webhook")(webhook)
 worker.activity("py-legacy")(webhook)
 
 
+# The deterministic clock and random numbers read the same on every replay
+# (side_effect records the first run's values to compare against), the clock
+# moves with results, and a signal wait with a timeout gives up or gets one.
+@worker.workflow("PyClock")
+def py_clock(ctx):
+    start, r = ctx.now(), ctx.random()
+    first = ctx.side_effect("first", lambda: json.dumps([start.isoformat(), r]))
+    ctx.activity("py-tick")
+    after = ctx.now()
+    ctx.sleep_until("until", after + timedelta(milliseconds=50))
+    slept = ctx.now()
+    # The timed-out wait is cancelled, so the "reply" sent later goes to the second wait.
+    late = ctx.wait_for_signal("maybe", "reply", timeout=0.1)
+    timed_out = ctx.now()
+    got = ctx.wait_for_signal("reply", "reply", timeout=10)
+    return {
+        "replayed_same": json.loads(first) == [start.isoformat(), r],
+        "moved": after > start and slept >= after + timedelta(milliseconds=50),
+        "timeout_moved_clock": timed_out >= slept + timedelta(milliseconds=100),
+        "late": late,
+        "got": got,
+        "second_random_differs": ctx.random() != r,
+    }
+
+
+worker.activity("py-tick")(lambda _payload: time.sleep(0.02) or "tick")
+
+
 @worker.workflow("PyAfterRestart")
 def py_after_restart(ctx):
     return ctx.activity("py-flaky", {"n": 41}, decode="json")
@@ -257,6 +286,29 @@ if not provision_started.wait(5):
 worker.cancel(provision_id, "tenant deleted")
 if not provision_cancelled.wait(5) or worker.describe(provision_id)["status"] != "CANCELLED":
     fail("the cancelled workflow's activity was never told")
+
+clock_id = worker.start_workflow("PyClock")
+for _ in range(200):
+    if any(s["step_name"] == "reply" for s in worker.describe(clock_id)["steps"]):
+        break
+    time.sleep(0.05)
+else:
+    fail("clock: never reached the reply wait")
+worker.signal(clock_id, "reply", "hi")
+clock = wait_done(clock_id)
+want = {
+    "replayed_same": True,
+    "moved": True,
+    "timeout_moved_clock": True,
+    "late": None,
+    "got": "hi",
+    "second_random_differs": True,
+}
+if json.loads(clock["output"]) != want:
+    fail(f"clock: output {clock['output']}, want {want}")
+clock_steps = " ".join(f"{s['step_name']}={s['status']}" for s in clock["steps"])
+if "maybe=CANCELLED maybe.timeout=COMPLETED" not in clock_steps:
+    fail(f"clock: the timed-out wait was not cancelled: {clock_steps}")
 
 forever_id = worker.start_workflow("PyForever", execution_timeout=0.3)
 for _ in range(100):

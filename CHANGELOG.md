@@ -16,6 +16,17 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `workflowd --check-format` reports what a directory needs and whether this binary serves it;
   `--rescan-format` records the current need (lowering it after purges); `--version` and
   `/api/health` (`history_format`, `reads_history_format`) report formats.
+- **Python** SDK: `ctx.now()` (deterministic clock, UTC `datetime`), `ctx.random()`,
+  `ctx.sleep_until(name, when)`, and `ctx.wait_for_signal(name, signal, timeout=seconds)` (returns
+  `None` on timeout and cancels the wait).
+- **Java** SDK: parallel steps (`ctx.activityAsync`, `sleepAsync`, `waitForSignalAsync` return a
+  `Workflowd.Future`; `ctx.waitAll`, `ctx.waitAny(cancelRest, ...)`), step cancellation
+  (`future.cancel()`, `CancelledFailure`), `ctx.now()`, `ctx.random()`, `ctx.sleepUntil`,
+  `ctx.waitForSignal(name, signal, Duration)` (null on timeout), and
+  `worker.activityWithContext` (an `ActivityContext` with the attempt, an idempotency key and
+  `isLeaseLost()` / `isCancelled()`). `worker.start()` serves in the background; `worker.describe`.
+  Several commands per task (`commands`), like the other SDKs.
+- The Java SDK runs end to end from `go test ./sdks` when a JDK is installed (as in CI).
 
 ## [0.2.0] - 2026-10-23
 

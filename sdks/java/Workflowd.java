@@ -15,6 +15,7 @@ import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -129,10 +130,8 @@ public final class Workflowd {
      * should never do.
      */
     static final class Suspend extends Error {
-        final Map<String, Object> command; // null == "blocked, nothing to do"
-        Suspend(Map<String, Object> command) {
+        Suspend() {
             super("workflowd internal suspend", null, false, false); // no stack trace: hot path
-            this.command = command;
         }
     }
 
@@ -154,6 +153,45 @@ public final class Workflowd {
     /** An activity over raw bytes, for payloads that are not text. */
     public interface BytesActivityFunction {
         byte[] run(byte[] input) throws Exception;
+    }
+
+    /** An activity that also gets its task's {@link ActivityContext}: who it runs for, and when to stop. */
+    public interface ContextActivityFunction {
+        String run(String input, ActivityContext ctx) throws Exception;
+    }
+
+    /**
+     * What an activity registered with {@link Worker#activityWithContext} learns about its task.
+     * Long-running work should check {@link #isLeaseLost()} and stop when it turns true.
+     */
+    public static final class ActivityContext {
+        private final Map<String, Object> task;
+        private volatile boolean leaseLost;
+        private volatile boolean cancelled;
+
+        ActivityContext(Map<String, Object> task) { this.task = task; }
+
+        public String workflowId() { return str(task.get("workflow_id")); }
+        public String stepName() { return str(task.get("step_name")); }
+        /** {@code <workflowId>/<sequence>}: the same for every attempt, an idempotency key. */
+        public String activityId() { return str(task.get("activity_id")); }
+        /** Which attempt this is, from 1. */
+        public int attempt() {
+            Object a = task.get("attempt");
+            return a instanceof Number ? Math.max(1, ((Number) a).intValue()) : 1;
+        }
+        /**
+         * True once the work should stop: the engine gave the task to another worker, the
+         * attempt's start-to-close timeout passed, or the work was cancelled.
+         */
+        public boolean isLeaseLost() { return leaseLost; }
+        /** True once the engine said the work is no longer wanted: its step was cancelled or its workflow ended. */
+        public boolean isCancelled() { return cancelled; }
+    }
+
+    /** How the worker runs any registered activity. */
+    private interface ActivityRunner {
+        byte[] run(byte[] input, ActivityContext ctx) throws Exception;
     }
 
     /** The version {@code getVersion} returns to executions that predate the change. */
@@ -240,12 +278,26 @@ public final class Workflowd {
         if (d != null && !d.isZero() && !d.isNegative()) obj.put(field, Math.max(1L, d.toMillis()));
     }
 
-    /** What a workflow function receives. Every method is durable. */
+    /**
+     * What a workflow function receives. Every method is durable. The plain methods block until
+     * the step has a result; the {@code Async} ones start the step and return a {@link Future}, so
+     * several activities, timers and signal waits can be in flight at once:
+     *
+     * <pre>{@code
+     * Workflowd.Future a = ctx.activityAsync("charge", order);
+     * Workflowd.Future b = ctx.activityAsync("email", order);
+     * ctx.waitAll(a, b);
+     * }</pre>
+     */
     public static final class Context {
         private final Map<String, Object> task;
         private final String workflowId;
         private final List<Object> steps;
         private final Map<String, Integer> versions = new LinkedHashMap<>();
+        private final List<Map<String, Object>> pending = new ArrayList<>(); // new commands, in sequence order
+        private final Map<Integer, Integer> cancelled = new LinkedHashMap<>(); // seq -> cancel order, this replay
+        private Instant now; // the latest step result the code has received (the start, at first)
+        private java.util.Random random;
         private int next = 0;
 
         @SuppressWarnings("unchecked")
@@ -254,15 +306,44 @@ public final class Workflowd {
             this.workflowId = str(task.get("workflow_id"));
             Object s = task.get("steps");
             this.steps = s instanceof List ? (List<Object>) s : new ArrayList<>();
+            this.now = instant(task.get("started_at"));
         }
 
         public String input() { return text(task, "input"); }
         public byte[] inputBytes() { return bytes(task, "input"); }
         public String workflowId() { return workflowId; }
 
+        /**
+         * The workflow's deterministic clock: when the latest step result the code has received
+         * was recorded (the start, at first). It moves only as results arrive and reads the same on
+         * every replay, so use it instead of {@code Instant.now()}.
+         */
+        public Instant now() {
+            if (now == null) {
+                throw new IllegalStateException("ctx.now() needs a workflowd engine that sends started_at (0.2.0 or later)");
+            }
+            return now;
+        }
+
+        /**
+         * A deterministic random number in [0, 1): the same sequence on every replay of this
+         * execution. Fine for jitter or picking a variant; not for secrets (it is derived from the
+         * workflow id), use {@link #sideEffect} for those.
+         */
+        public double random() {
+            if (random == null) random = new java.util.Random(seed(workflowId + "\u0000" + str(task.get("started_at"))));
+            return random.nextDouble();
+        }
+
+        /** Pause durably until {@code when}, measured on {@link #now()}. */
+        public void sleepUntil(String name, Instant when) {
+            Duration d = Duration.between(now(), when);
+            sleep(name, d.isNegative() ? Duration.ZERO : d);
+        }
+
         /** Run a named activity on a worker and return its output. */
         public String activity(String name, String input) {
-            return activity(name, input, (ActivityOptions) null);
+            return activityAsync(name, input).get();
         }
 
         /** Run a named activity, retrying a failed attempt per {@code retry} first. */
@@ -272,9 +353,7 @@ public final class Workflowd {
 
         /** Run a named activity with a retry policy and timeouts. */
         public String activity(String name, String input, ActivityOptions opts) {
-            Map<String, Object> cmd = scheduleActivity(name, opts);
-            cmd.put("input", input == null ? "" : input);
-            return text(command("ACTIVITY", name, cmd), "output");
+            return activityAsync(name, input, opts).get();
         }
 
         /** Run a named activity over raw bytes. */
@@ -284,9 +363,26 @@ public final class Workflowd {
 
         /** Run a named activity over raw bytes, with a retry policy and timeouts. */
         public byte[] activityBytes(String name, byte[] input, ActivityOptions opts) {
+            return activityBytesAsync(name, input, opts).getBytes();
+        }
+
+        /** Start an activity and return at once; {@link Future#get()} waits for its output. */
+        public Future activityAsync(String name, String input) {
+            return activityAsync(name, input, new ActivityOptions());
+        }
+
+        /** Start an activity with a retry policy and timeouts, and return at once. */
+        public Future activityAsync(String name, String input, ActivityOptions opts) {
+            Map<String, Object> cmd = scheduleActivity(name, opts);
+            cmd.put("input", input == null ? "" : input);
+            return issue("ACTIVITY", name, cmd);
+        }
+
+        /** Start an activity over raw bytes and return at once; {@link Future#getBytes()} waits. */
+        public Future activityBytesAsync(String name, byte[] input, ActivityOptions opts) {
             Map<String, Object> cmd = scheduleActivity(name, opts);
             putBytes(cmd, "input", input);
-            return bytes(command("ACTIVITY", name, cmd), "output");
+            return issue("ACTIVITY", name, cmd);
         }
 
         private static Map<String, Object> scheduleActivity(String name, ActivityOptions opts) {
@@ -299,20 +395,83 @@ public final class Workflowd {
 
         /** Pause durably. Survives engine restarts. */
         public void sleep(String name, Duration duration) {
+            sleepAsync(name, duration).get();
+        }
+
+        /** Start a durable timer and return at once; {@link Future#get()} returns when it fires. */
+        public Future sleepAsync(String name, Duration duration) {
             Map<String, Object> cmd = new LinkedHashMap<>();
             cmd.put("type", "start_timer");
             cmd.put("step_name", name);
             cmd.put("delay_ms", Math.max(0L, duration.toMillis()));
-            command("TIMER", name, cmd);
+            return issue("TIMER", name, cmd);
         }
 
         /** Block until a matching external signal arrives; return its payload. */
         public String waitForSignal(String name, String signalName) {
+            return waitForSignalAsync(name, signalName).get();
+        }
+
+        /**
+         * Block until a matching signal arrives, or return null if none arrives within
+         * {@code timeout}. A timed-out wait is cancelled, so a late signal goes to the next wait
+         * for it. (That uses a timer step named {@code <name>.timeout}.)
+         */
+        public String waitForSignal(String name, String signalName, Duration timeout) {
+            Future wait = waitForSignalAsync(name, signalName);
+            Future deadline = sleepAsync(name + ".timeout", timeout);
+            return waitAny(true, wait, deadline) == 0 ? wait.get() : null;
+        }
+
+        /** Start waiting for a signal and return at once; {@link Future#get()} returns its payload. */
+        public Future waitForSignalAsync(String name, String signalName) {
             Map<String, Object> cmd = new LinkedHashMap<>();
             cmd.put("type", "await_signal");
             cmd.put("step_name", name);
             cmd.put("signal_name", signalName);
-            return text(command("SIGNAL", name, cmd), "output");
+            return issue("SIGNAL", name, cmd);
+        }
+
+        /** Wait for every future and return their outputs, in order. */
+        public List<String> waitAll(Future... futures) {
+            List<String> out = new ArrayList<>();
+            for (Future f : futures) out.add(f.get());
+            return out;
+        }
+
+        /**
+         * Wait until one of the futures has a result and return its index. When several have one,
+         * the step history recorded first wins, so every replay agrees:
+         *
+         * <pre>{@code
+         * Workflowd.Future reply = ctx.waitForSignalAsync("reply", "approved");
+         * Workflowd.Future deadline = ctx.sleepAsync("deadline", Duration.ofHours(48));
+         * if (ctx.waitAny(true, reply, deadline) == 1) { ... timed out ... }
+         * }</pre>
+         */
+        public int waitAny(Future... futures) {
+            return waitAny(false, futures);
+        }
+
+        /** {@link #waitAny(Future...)}; with {@code cancelRest} the losers are cancelled. */
+        public int waitAny(boolean cancelRest, Future... futures) {
+            int best = -1;
+            long bestId = 0;
+            for (int i = 0; i < futures.length; i++) {
+                Long id = futures[i].resolvedId();
+                if (id != null && (best < 0 || id < bestId)) {
+                    best = i;
+                    bestId = id;
+                }
+            }
+            if (best < 0) throw new Suspend();
+            if (cancelRest) {
+                for (int i = 0; i < futures.length; i++) {
+                    if (i != best) futures[i].cancel("lost a waitAny race");
+                }
+            }
+            if (futures[best].recorded() != null) observe(futures[best].seq);
+            return best;
         }
 
         /**
@@ -334,15 +493,17 @@ public final class Workflowd {
                     cmd.put("sequence", (long) seq);
                     cmd.put("marker", "version");
                     cmd.put("data", Integer.toString(maxSupported));
-                    throw new Suspend(cmd);
-                }
-                Map<String, Object> rec = (Map<String, Object>) steps.get(seq - 1);
-                if (!"MARKER".equals(str(rec.get("kind"))) || !"version".equals(str(rec.get("marker")))
-                        || !changeId.equals(str(rec.get("step_name")))) {
-                    v = DEFAULT_VERSION; // this execution ran past here before the change
+                    pending.add(cmd);
+                    v = maxSupported;
                 } else {
-                    next = seq;
-                    v = Integer.parseInt(text(rec, "output"));
+                    Map<String, Object> rec = (Map<String, Object>) steps.get(seq - 1);
+                    if (!"MARKER".equals(str(rec.get("kind"))) || !"version".equals(str(rec.get("marker")))
+                            || !changeId.equals(str(rec.get("step_name")))) {
+                        v = DEFAULT_VERSION; // this execution ran past here before the change
+                    } else {
+                        next = seq;
+                        v = Integer.parseInt(text(rec, "output"));
+                    }
                 }
                 versions.put(changeId, v);
             }
@@ -368,20 +529,23 @@ public final class Workflowd {
                 cmd.put("marker", "side_effect");
                 String data = fn.get();
                 cmd.put("data", data == null ? "" : data);
-                throw new Suspend(cmd);
+                pending.add(cmd);
+                return data == null ? "" : data; // what every replay will return
             }
-            return text(command("MARKER", name, null), "output");
+            return issue("MARKER", name, null).get();
         }
 
-        /** Return the recorded step, stay blocked, or suspend with the next command. */
+        /** Give the next durable call its sequence, check it against history, start it if new. */
         @SuppressWarnings("unchecked")
-        private Map<String, Object> command(String kind, String name, Map<String, Object> cmd) {
+        private Future issue(String kind, String name, Map<String, Object> cmd) {
             int seq = ++next;
-            Map<String, Object> recorded = seq <= steps.size()
-                    ? (Map<String, Object>) steps.get(seq - 1)
-                    : null;
-
-            if (recorded != null) {
+            Map<String, Object> recorded = seq <= steps.size() ? (Map<String, Object>) steps.get(seq - 1) : null;
+            if (recorded == null) {
+                Map<String, Object> c = new LinkedHashMap<>();
+                if (cmd != null) c.putAll(cmd);
+                c.put("sequence", (long) seq);
+                pending.add(c);
+            } else {
                 // Determinism: the call being made now must be the step history recorded here.
                 boolean markerMismatch = kind.equals("MARKER") && !"side_effect".equals(str(recorded.get("marker")));
                 if (!kind.equals(str(recorded.get("kind"))) || !name.equals(str(recorded.get("step_name"))) || markerMismatch) {
@@ -389,31 +553,110 @@ public final class Workflowd {
                             + kind + " \"" + name + "\" but history has "
                             + str(recorded.get("kind")) + " \"" + str(recorded.get("step_name")) + "\"");
                 }
-                String status = str(recorded.get("status"));
-                if ("COMPLETED".equals(status)) return recorded;
-                if ("FAILED".equals(status)) {
-                    String err = str(recorded.get("error"));
-                    throw new ActivityFailure(name, err.isEmpty() ? "activity failed" : err,
-                            str(recorded.get("error_type")), Boolean.TRUE.equals(recorded.get("non_retryable")));
-                }
-                if ("CANCELLED".equals(status)) {
-                    String err = str(recorded.get("error"));
-                    throw new CancelledFailure(name, err.isEmpty() ? "cancelled" : err);
-                }
-                throw new Suspend(null); // SCHEDULED: still in flight
             }
+            return new Future(this, seq, name);
+        }
 
-            cmd.put("sequence", (long) seq);
-            throw new Suspend(cmd);
+        @SuppressWarnings("unchecked")
+        private Map<String, Object> step(int seq) {
+            return seq >= 1 && seq <= steps.size() ? (Map<String, Object>) steps.get(seq - 1) : null;
+        }
+
+        /** Move the clock to a step's result as the code receives it (not markers or cancels). */
+        private void observe(int seq) {
+            Map<String, Object> rec = step(seq);
+            if (rec == null || "MARKER".equals(str(rec.get("kind"))) || "CANCELLED".equals(str(rec.get("status")))) return;
+            Instant at = instant(rec.get("resolved_at"));
+            if (at != null && (now == null || at.isAfter(now))) now = at;
         }
     }
 
-    /** The outcome of one replay: either a command to send, or a replay error. */
+    /**
+     * The result of a durable call started without waiting for it. {@link #get()} returns it, or
+     * blocks the workflow until the step has one. Use a future only with the context that made it.
+     */
+    public static final class Future {
+        private final Context ctx;
+        private final int seq;
+        private final String name;
+
+        Future(Context ctx, int seq, String name) {
+            this.ctx = ctx;
+            this.seq = seq;
+            this.name = name;
+        }
+
+        /** The step's output as text: throws ActivityFailure or CancelledFailure, or blocks. */
+        public String get() { return text(result(), "output"); }
+
+        /** The step's output as bytes. */
+        public byte[] getBytes() { return bytes(result(), "output"); }
+
+        /**
+         * Cancel the step if it has no result yet: a timer stops mattering, a signal wait stops
+         * taking signals (a later wait for the same signal gets the next one), and an activity's
+         * worker is told to stop. {@link #get()} then throws {@link CancelledFailure}.
+         */
+        public void cancel() { cancel(""); }
+
+        /** {@link #cancel()}, recording why. */
+        public void cancel(String reason) {
+            if (resolvedId() != null) return;
+            ctx.cancelled.put(seq, ctx.cancelled.size() + 1);
+            Map<String, Object> cmd = new LinkedHashMap<>();
+            cmd.put("type", "cancel_step");
+            cmd.put("step_name", name);
+            cmd.put("sequence", (long) seq);
+            if (reason != null && !reason.isEmpty()) cmd.put("reason", reason);
+            ctx.pending.add(cmd);
+        }
+
+        /** The recorded step if it has a result: not started, in flight or retrying is null. */
+        Map<String, Object> recorded() {
+            Map<String, Object> rec = ctx.step(seq);
+            if (rec == null) return null;
+            String status = str(rec.get("status"));
+            return "COMPLETED".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status) ? rec : null;
+        }
+
+        /**
+         * Orders this step's result for waitAny: its event id, or for a step this replay cancelled,
+         * a place after every recorded result (the cancel is recorded next). Null without one.
+         */
+        Long resolvedId() {
+            Map<String, Object> rec = recorded();
+            if (rec != null) {
+                Object id = rec.get("resolved_event_id");
+                return id instanceof Number ? ((Number) id).longValue() : 0L;
+            }
+            Integer n = ctx.cancelled.get(seq);
+            return n == null ? null : Long.MAX_VALUE / 2 + n;
+        }
+
+        private Map<String, Object> result() {
+            Map<String, Object> rec = recorded();
+            if (rec == null) {
+                if (ctx.cancelled.containsKey(seq)) throw new CancelledFailure(name, "cancelled");
+                throw new Suspend(); // not started yet, in flight or being retried
+            }
+            String status = str(rec.get("status"));
+            String err = str(rec.get("error"));
+            if ("CANCELLED".equals(status)) throw new CancelledFailure(name, err.isEmpty() ? "cancelled" : err);
+            ctx.observe(seq);
+            if ("FAILED".equals(status)) {
+                throw new ActivityFailure(name, err.isEmpty() ? "activity failed" : err,
+                        str(rec.get("error_type")), Boolean.TRUE.equals(rec.get("non_retryable")));
+            }
+            return rec;
+        }
+    }
+
+    /** The outcome of one replay: the commands to send (none: blocked), or a replay error. */
     static final class Decision {
-        final Map<String, Object> command;
+        final List<Map<String, Object>> commands;
         final String replayError;
-        Decision(Map<String, Object> command, String replayError) {
-            this.command = command;
+        Decision(List<Map<String, Object>> commands, String replayError) {
+            this.commands = commands;
             this.replayError = replayError;
         }
     }
@@ -426,9 +669,9 @@ public final class Workflowd {
             Map<String, Object> cmd = new LinkedHashMap<>();
             cmd.put("type", "complete_workflow");
             cmd.put("output", output == null ? "" : output);
-            return new Decision(cmd, null);
+            return new Decision(withLast(ctx.pending, cmd), null);
         } catch (Suspend s) {
-            return new Decision(s.command, null);
+            return new Decision(new ArrayList<>(ctx.pending), null);
         } catch (NonDeterminism e) {
             return new Decision(null, e.getMessage());
         } catch (Throwable t) {
@@ -437,8 +680,35 @@ public final class Workflowd {
             cmd.put("type", "fail_workflow");
             String m = t.getMessage();
             cmd.put("error", m == null ? t.toString() : m);
-            return new Decision(cmd, null);
+            return new Decision(withLast(ctx.pending, cmd), null);
         }
+    }
+
+    private static List<Map<String, Object>> withLast(List<Map<String, Object>> pending, Map<String, Object> last) {
+        List<Map<String, Object>> out = new ArrayList<>(pending);
+        out.add(last);
+        return out;
+    }
+
+    /** An RFC 3339 time from the engine, or null. */
+    static Instant instant(Object v) {
+        String s = str(v);
+        if (s.isEmpty()) return null;
+        try {
+            return Instant.parse(s);
+        } catch (java.time.format.DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    /** FNV-1a over the string's UTF-8 bytes: a seed that is the same on every JVM. */
+    static long seed(String s) {
+        long h = 0xcbf29ce484222325L;
+        for (byte b : s.getBytes(StandardCharsets.UTF_8)) {
+            h ^= b & 0xff;
+            h *= 0x100000001b3L;
+        }
+        return h;
     }
 
     /**
@@ -455,7 +725,7 @@ public final class Workflowd {
         private final String authToken;
         private final HttpClient http;
         private final Map<String, WorkflowFunction> workflows = new ConcurrentHashMap<>();
-        private final Map<String, BytesActivityFunction> activities = new ConcurrentHashMap<>();
+        private final Map<String, ActivityRunner> activities = new ConcurrentHashMap<>();
         private final AtomicBoolean stopped = new AtomicBoolean(false);
         private final java.util.concurrent.ScheduledExecutorService beats =
                 java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
@@ -499,15 +769,23 @@ public final class Workflowd {
         }
 
         public Worker activity(String name, ActivityFunction fn) {
-            activities.put(name, input -> {
-                String out = fn.run(new String(input, StandardCharsets.UTF_8));
-                return out == null ? new byte[0] : out.getBytes(StandardCharsets.UTF_8);
-            });
-            return this;
+            return activityWithContext(name, (input, ctx) -> fn.run(input));
         }
 
         public Worker activityBytes(String name, BytesActivityFunction fn) {
-            activities.put(name, fn);
+            activities.put(name, (input, ctx) -> fn.run(input));
+            return this;
+        }
+
+        /**
+         * Register an activity that gets its task's {@link ActivityContext}: an idempotency key,
+         * the attempt, and whether to stop (lease lost, start-to-close timeout, cancelled).
+         */
+        public Worker activityWithContext(String name, ContextActivityFunction fn) {
+            activities.put(name, (input, ctx) -> {
+                String out = fn.run(new String(input, StandardCharsets.UTF_8), ctx);
+                return out == null ? new byte[0] : out.getBytes(StandardCharsets.UTF_8);
+            });
             return this;
         }
 
@@ -578,16 +856,22 @@ public final class Workflowd {
                     }
                     continue;
                 }
-                if (res.statusCode() >= 400) throw new HttpError(res.statusCode(), msg);
+                if (res.statusCode() >= 400) {
+                    boolean cancelled = parsed instanceof Map && Boolean.TRUE.equals(((Map<?, ?>) parsed).get("cancelled"));
+                    throw new HttpError(res.statusCode(), msg, cancelled);
+                }
                 return parsed;
             }
         }
 
         static final class HttpError extends IOException {
             final int status;
-            HttpError(int status, String message) {
+            final boolean cancelled; // a 409 saying the work is no longer wanted
+            HttpError(int status, String message) { this(status, message, false); }
+            HttpError(int status, String message, boolean cancelled) {
                 super("HTTP " + status + ": " + message);
                 this.status = status;
+                this.cancelled = cancelled;
             }
         }
 
@@ -642,6 +926,15 @@ public final class Workflowd {
             request("POST", "/api/workflows/" + enc(workflowId) + "/cancel", body);
         }
 
+        /** A workflow's current state, as the engine's JSON API describes it. */
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> describe(String workflowId) throws IOException, InterruptedException {
+            return (Map<String, Object>) request("GET", "/api/workflows/" + enc(workflowId), null);
+        }
+
+        /** The base URL of the node currently in use. */
+        public String address() { return base(); }
+
         /**
          * Send an external signal to a running workflow. It is recorded once even if the
          * request is retried: every attempt carries the same idempotency key.
@@ -680,7 +973,11 @@ public final class Workflowd {
                 Map<String, Object> body = new LinkedHashMap<>();
                 body.put("workflow_id", str(task.get("workflow_id")));
                 body.put("task_token", str(task.get("task_token")));
-                body.put("command", decision.command);
+                List<Map<String, Object>> cmds = new ArrayList<>();
+                if (decision.commands != null) cmds.addAll(decision.commands);
+                // One command travels in the field every engine version understands.
+                if (cmds.size() > 1) body.put("commands", new ArrayList<Object>(cmds));
+                else body.put("command", cmds.isEmpty() ? null : cmds.get(0));
                 body.put("replay_error", decision.replayError == null ? "" : decision.replayError);
                 try {
                     request("POST", "/api/workflow-tasks/complete", body, 3);
@@ -714,16 +1011,22 @@ public final class Workflowd {
 
         private void execute(Map<String, Object> task) {
             String step = str(task.get("step_name"));
-            BytesActivityFunction fn = activities.get(step);
+            ActivityRunner fn = activities.get(step);
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("workflow_id", str(task.get("workflow_id")));
             body.put("step_name", step);
             body.put("sequence", task.get("sequence"));
             body.put("lease_token", str(task.get("lease_token")));
-            java.util.concurrent.ScheduledFuture<?> beat = heartbeat(task);
+            ActivityContext actx = new ActivityContext(task);
+            java.util.concurrent.ScheduledFuture<?> beat = heartbeat(task, actx);
+            // The engine fails the attempt at its start-to-close timeout: tell the activity too.
+            Object limit = task.get("start_to_close_timeout_ms");
+            java.util.concurrent.ScheduledFuture<?> stopBy = limit instanceof Number && ((Number) limit).longValue() > 0
+                    ? beats.schedule(() -> { actx.leaseLost = true; }, ((Number) limit).longValue(), java.util.concurrent.TimeUnit.MILLISECONDS)
+                    : null;
             try {
                 if (fn == null) throw new IllegalStateException("no activity registered for step \"" + step + "\"");
-                putBytes(body, "output", fn.run(bytes(task, "input")));
+                putBytes(body, "output", fn.run(bytes(task, "input"), actx));
             } catch (Exception e) {
                 body.put("error", e.getMessage() == null ? e.toString() : e.getMessage());
                 String type = e.getClass().getSimpleName();
@@ -735,6 +1038,7 @@ public final class Workflowd {
                 body.put("error_type", type);
             } finally {
                 if (beat != null) beat.cancel(false);
+                if (stopBy != null) stopBy.cancel(false);
             }
             try {
                 try {
@@ -754,8 +1058,11 @@ public final class Workflowd {
             }
         }
 
-        /** Extend the task's lease every third of its duration while the activity runs. */
-        private java.util.concurrent.ScheduledFuture<?> heartbeat(Map<String, Object> task) {
+        /**
+         * Extend the task's lease every third of its duration while the activity runs. A 409
+         * means the lease is gone; it says whether the work was cancelled.
+         */
+        private java.util.concurrent.ScheduledFuture<?> heartbeat(Map<String, Object> task, ActivityContext actx) {
             Object d = task.get("lease_duration_ms");
             long every = d instanceof Number ? ((Number) d).longValue() / 3 : 0;
             if (every <= 0) return null;
@@ -766,14 +1073,26 @@ public final class Workflowd {
             return beats.scheduleAtFixedRate(() -> {
                 try {
                     request("POST", "/api/activity-tasks/heartbeat", body, 2);
+                } catch (HttpError e) {
+                    if (e.status == 409) {
+                        actx.cancelled = actx.cancelled || e.cancelled;
+                        actx.leaseLost = true;
+                    }
                 } catch (Exception e) {
-                    // A 409 means the lease is gone; the result will be rejected too.
+                    // Unreachable for now: the next beat tries again.
                 }
             }, every, every, java.util.concurrent.TimeUnit.MILLISECONDS);
         }
 
         /** Register, then serve workflow decisions and activities until stop(). */
         public void run() throws IOException, InterruptedException {
+            start();
+            while (!stopped.get()) Thread.sleep(200);
+        }
+
+        /** Register, then serve on background (daemon) threads until stop(); returns at once. */
+        public void start() throws IOException, InterruptedException {
+            stopped.set(false);
             List<Thread> threads = new ArrayList<>();
             if (!workflows.isEmpty()) {
                 try {
@@ -793,7 +1112,6 @@ public final class Workflowd {
                 t.setDaemon(true);
                 t.start();
             }
-            while (!stopped.get()) Thread.sleep(200);
         }
     }
 

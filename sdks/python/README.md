@@ -48,6 +48,12 @@ worker.start_workflow("Order", order, f"order-{order['id']}", execution_timeout=
 if ctx.get_version("fraud-check", DEFAULT_VERSION, 1) == 1:
     ctx.activity("fraud-check", receipt)
 order_id = ctx.side_effect("id", lambda: str(uuid.uuid4()))
+
+# A deterministic clock and random numbers (the same on every replay); wait with a timeout.
+deadline = ctx.now() + timedelta(days=2)
+ctx.sleep_until("reminder", deadline)
+jitter = ctx.random()
+reply = ctx.wait_for_signal("reply", "approved", timeout=3600)  # None if none arrives in time
 ```
 
 A cluster: `Worker(addresses=["http://n1:8233", "http://n2:8233", "http://n3:8233"])` follows
@@ -57,7 +63,8 @@ second `info` argument can check `info["lease_lost"]`.
 For an engine with auth and TLS: `Worker(address="https://…:8233", token=..., ca_file=...)`
 (`ca_file` only for a private CA).
 
-Workflow code must be deterministic: no clocks, randomness or I/O except through `ctx`.
+Workflow code must be deterministic: no clocks, randomness or I/O except through `ctx`
+(`ctx.now()`, `ctx.random()`).
 How replay works, and the protocol, are in the
 [SDK guide](https://github.com/Olayanju-1234/durable-workflow-engine/tree/main/sdks#readme).
 Pre-alpha: the API may change. Apache-2.0.

@@ -32,11 +32,34 @@ worker.activity("reserve", input -> "reserved(" + input + ")");
 worker.run();
 ```
 
+More of the API:
+
+```java
+// Run activities in parallel; race a signal against a deadline and cancel the loser.
+List<String> parts = ctx.waitAll(ctx.activityAsync("stock", sku), ctx.activityAsync("price", sku));
+Workflowd.Future reply = ctx.waitForSignalAsync("reply", "approved");
+Workflowd.Future sla = ctx.sleepAsync("sla", Duration.ofHours(1));
+boolean late = ctx.waitAny(true, reply, sla) == 1;
+
+// Or the same in one call: null if no signal arrives in time.
+String answer = ctx.waitForSignal("answer", "approved", Duration.ofHours(1));
+
+// A deterministic clock and random numbers: the same on every replay.
+ctx.sleepUntil("reminder", ctx.now().plus(Duration.ofDays(2)));
+double jitter = ctx.random();
+
+// An activity that learns when to stop (lease lost, timeout, cancelled).
+worker.activityWithContext("provision", (input, actx) -> {
+    while (!actx.isLeaseLost()) { /* a chunk of work */ }
+    return "stopped";
+});
+```
+
 For an engine with auth and TLS:
 `new Workflowd.Worker("https://…:8233", "worker-1", token, Workflowd.trustPem(Path.of("ca.pem")))`
 (pass `null` for the SSLContext with a public CA).
 
 Without Maven, `Workflowd.java` is one file: copy it into your source tree. A runnable
-example is [`Example.java`](Example.java). Workflow code must be deterministic; how replay
+example is [`Example.java`](Example.java). Workflow code must be deterministic (use `ctx.now()` and `ctx.random()`); how replay
 works is in the [SDK guide](https://github.com/Olayanju-1234/durable-workflow-engine/tree/main/sdks#readme).
 Pre-alpha: the API may change. Apache-2.0.
