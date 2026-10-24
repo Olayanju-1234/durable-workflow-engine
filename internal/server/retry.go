@@ -16,24 +16,24 @@ type RetryPolicy = state.RetryPolicy
 // noRetry is the default: run once, surface any failure to the workflow immediately.
 var noRetry = RetryPolicy{MaxAttempts: 1}
 
-// SetRetryPolicy registers a retry policy for an activity by step name. Call before
-// serving. A policy the workflow code sets on the call itself (recorded with the
-// step) takes precedence.
+// SetRetryPolicy registers a retry policy for an activity by step name, in
+// the default namespace. Call before serving. A policy the workflow code sets
+// on the call itself (recorded with the step) takes precedence.
 func (e *Engine) SetRetryPolicy(stepName string, p RetryPolicy) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.policies[stepName] = p
+	e.policies[nsName{DefaultNamespace, stepName}] = p
 }
 
 // retryPolicy is the policy that governs a step: the one recorded with it,
-// else the engine's for its name, else no retries.
-func (e *Engine) retryPolicy(step *state.Step) RetryPolicy {
+// else the engine's for its name in its namespace, else no retries.
+func (e *Engine) retryPolicy(ns string, step *state.Step) RetryPolicy {
 	if step.Retry != nil {
 		return *step.Retry
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if p, ok := e.policies[step.Name]; ok {
+	if p, ok := e.policies[nsName{ns, step.Name}]; ok {
 		return p
 	}
 	return noRetry
@@ -54,8 +54,8 @@ const (
 // policy lists its error type; and a retry must start before the step's
 // schedule-to-close deadline: one that could not is pointless, so the failure
 // is final at once.
-func (e *Engine) retryAfter(step *state.Step, now time.Time) (time.Duration, bool) {
-	p := e.retryPolicy(step)
+func (e *Engine) retryAfter(ns string, step *state.Step, now time.Time) (time.Duration, bool) {
+	p := e.retryPolicy(ns, step)
 	if step.Attempts >= p.MaxAttempts || step.NonRetryable || !p.Retries(step.ErrorType) {
 		return 0, false
 	}

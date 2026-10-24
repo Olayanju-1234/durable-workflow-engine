@@ -718,10 +718,17 @@ class _Connection:
     is unreachable, it moves to the next address. ``epoch`` counts those moves
     so the worker registers again: every new engine starts with none."""
 
-    def __init__(self, addresses: List[str], token: Optional[str] = None, ssl_context: Optional[ssl.SSLContext] = None):
+    def __init__(
+        self,
+        addresses: List[str],
+        token: Optional[str] = None,
+        ssl_context: Optional[ssl.SSLContext] = None,
+        namespace: Optional[str] = None,
+    ):
         if not addresses:
             raise ValueError("workflowd: at least one address is required")
         self.token = token
+        self.namespace = namespace
         self._ssl = ssl_context
         self.addrs = [a.rstrip("/") for a in addresses]
         self.current = 0
@@ -756,6 +763,8 @@ class _Connection:
             headers = {"Content-Type": "application/json"}
             if self.token:
                 headers["Authorization"] = f"Bearer {self.token}"
+            if self.namespace:
+                headers["X-Workflowd-Namespace"] = self.namespace
             req = urllib.request.Request(frm + path, data=data, method=method, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=timeout, context=self._ssl) as res:
@@ -800,13 +809,16 @@ class Worker:
         addresses: Optional[List[str]] = None,
         activity_concurrency: int = 4,
         workflow_concurrency: int = 2,
+        namespace: Optional[str] = None,
     ):
         """``token`` is sent as ``Authorization: Bearer <token>`` for an engine
-        started with --auth-token-file. ``ca_file`` trusts a private CA for an
-        https address; without it the system trust store is used. ``addresses``
-        lists every cluster node (it replaces ``address``)."""
+        started with --auth-token-file, or a namespace's token. ``namespace``
+        names the namespace every call works in (the default, or a namespace
+        token's own, when unset). ``ca_file`` trusts a private CA for an https
+        address; without it the system trust store is used. ``addresses`` lists
+        every cluster node (it replaces ``address``)."""
         ctx = ssl.create_default_context(cafile=ca_file) if ca_file else None
-        self.conn = _Connection(addresses or [address], token, ctx)
+        self.conn = _Connection(addresses or [address], token, ctx, namespace)
         self.worker_id = worker_id or f"py-worker-{random.randrange(16**8):08x}"
         self.sdk = sdk
         self.workflows: Dict[str, Callable[[Context], Any]] = {}

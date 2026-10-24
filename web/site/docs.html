@@ -67,6 +67,7 @@
     <h4>Reference</h4>
     <a href="#cli">CLI flags</a>
     <a href="#security">Auth &amp; TLS</a>
+    <a href="#namespaces">Namespaces</a>
     <a href="#api">gRPC API</a>
     <a href="#http-api">HTTP / JSON API</a>
     <a href="#metrics">Metrics</a>
@@ -962,6 +963,7 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--demo</code></td><td><code>false</code></td><td>Drive a sample workflow to completion against a real store, then exit.</td></tr>
         <tr><td><code>--auth-token-file</code></td><td><code>$WORKFLOWD_AUTH_TOKEN</code></td><td>Require the bearer token in this file on every JSON API route and every gRPC call. Unset (and no env var) leaves both open. <code>/api/health</code> and the dashboard's static assets stay open. See <a href="#security">Auth &amp; TLS</a>.</td></tr>
         <tr><td><code>--auth-token</code></td><td>empty</td><td>The same token on the command line. It shows up in <code>ps</code>; prefer the file or the env var.</td></tr>
+        <tr><td><code>--namespaces</code></td><td>empty</td><td>A JSON file of <a href="#namespaces">namespaces</a>: each one's tokens and retention. The <code>default</code> namespace always exists.</td></tr>
         <tr><td><code>--auth-public-reads</code></td><td><code>false</code></td><td>With a token set, let anyone list and describe workflows (HTTP <code>GET /api/workflows[/{id}]</code>, gRPC <code>ListWorkflows</code>/<code>GetWorkflow</code>). Starting, signalling, terminating and every worker call still need the token.</td></tr>
         <tr><td><code>--metrics-auth-token-file</code></td><td><code>$WORKFLOWD_METRICS_AUTH_TOKEN</code></td><td>Require a separate bearer token on <code>/metrics</code>, so Prometheus never holds the API token. Unset leaves <code>/metrics</code> open.</td></tr>
         <tr><td><code>--tls-cert</code>, <code>--tls-key</code></td><td>empty</td><td>Serve TLS on the gRPC, dashboard/API and metrics listeners with this PEM certificate and key. Re-read when the files change, so a renewed certificate needs no restart. Unset: plaintext.</td></tr>
@@ -1014,9 +1016,42 @@ new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORK
        token=os.environ["WORKFLOWD_AUTH_TOKEN"], ca_file="/path/ca.pem")  # ca_file only for a private CA</code></pre>
     <pre data-lang="java"><code>new Workflowd.Worker("https://workflowd.internal:8233", "worker-1",
         System.getenv("WORKFLOWD_AUTH_TOKEN"), Workflowd.trustPem(Path.of("/path/ca.pem")));</code></pre>
-    <p>What this does not give you yet: there is one shared API token, so no per-user identities or roles; client
+    <p>What this does not give you yet: tokens are per namespace (below), not per user, so there are no roles; client
       certificates are only checked on the Raft port; and any certificate the cluster CA signed can speak for any member,
       so give the Raft CA to cluster nodes only.</p>
+
+    <h2 id="namespaces">Namespaces</h2>
+    <p>A namespace is a tenant inside one engine: its own workflows, schedules, workflow types, workers and retention,
+      reached with its own token. Two apps can share an engine without seeing each other's work, and the same workflow
+      id or activity name in two namespaces never collides. The <code>default</code> namespace always exists and is
+      everything an engine held before namespaces: with none configured nothing changes.</p>
+    <pre data-lang="json"><code>{"namespaces": [
+  {"name": "liftoff", "token_file": "/etc/workflowd/liftoff.token", "retention": "720h"},
+  {"name": "reports", "token_sha256": ["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"]},
+  {"name": "default", "retention": "168h"}
+]}</code></pre>
+    <pre data-lang="sh"><code>workflowd --serve --namespaces /etc/workflowd/namespaces.json --auth-token-file /etc/workflowd/token</code></pre>
+    <p>Names are 1–63 lowercase letters, digits and hyphens. <code>token_file</code> is read at startup (a relative path is
+      relative to the JSON file); <code>token_sha256</code> lists tokens by their SHA-256, so the file holds no secret.
+      <code>retention</code> overrides <code>--retention</code> for the namespace (<code>"0"</code> keeps its workflows
+      forever). Change the file and restart to add a namespace or rotate a token.</p>
+    <table>
+      <thead><tr><th>Caller</th><th>Reaches</th></tr></thead>
+      <tbody>
+        <tr><td>The engine token (<code>--auth-token-file</code>)</td><td>Every namespace; it picks one per call (default: <code>default</code>).</td></tr>
+        <tr><td>A namespace's token</td><td>That namespace only, which is also where a call naming none goes. Naming another answers <code>403</code> (gRPC <code>PERMISSION_DENIED</code>).</td></tr>
+        <tr><td>No token</td><td>Only <code>default</code>, and only when it is open: no engine token and no default token set (or, with <code>--auth-public-reads</code>, for reads). Any other namespace answers <code>401</code>.</td></tr>
+      </tbody>
+    </table>
+    <p>A call names its namespace with the <code>X-Workflowd-Namespace</code> header or <code>?namespace=</code> on HTTP,
+      and the <code>workflowd-namespace</code> metadata key on gRPC. The clients do it for you:</p>
+    <pre data-lang="go"><code>c, _ := client.Dial(client.Options{Addrs: addrs, AuthToken: token, Namespace: "liftoff"})</code></pre>
+    <pre data-lang="js"><code>new Worker({ address, token, namespace: 'liftoff' });   // Python: Worker(..., namespace="liftoff"); Java: .namespace("liftoff")</code></pre>
+    <p>A worker started with a namespace's token needs no namespace option. The dashboard shows a namespace picker
+      when the token can use more than one, and <code>/?namespace=liftoff</code> links straight to one.
+      <code>GET /api/namespaces</code> lists the namespaces a caller can use. On disk a namespace's histories live in
+      <code>namespaces/&lt;name&gt;/</code> under the data directory, which needs history format 6 (see
+      <a href="#upgrading">Upgrading</a>). Namespaces share one process, so a busy one can slow the others.</p>
 
     <h2 id="api">gRPC API</h2>
     <p>
@@ -1152,6 +1187,12 @@ DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
 {"reason":"customer cancelled the order"}
 → 200 {"status":"cancelled"}</code></pre>
     <p>A finished workflow returns <code>409</code>. See <a href="#cancellation">Cancellation</a>.</p>
+
+    <h3>Namespaces</h3>
+    <pre data-lang="sh"><code>curl -H "Authorization: Bearer $TOKEN" localhost:8233/api/namespaces
+# {"namespaces":["default","liftoff"],"current":"default","admin":true}</code></pre>
+    <p>Every other route works in the namespace the token and the <code>X-Workflowd-Namespace</code> header (or
+      <code>?namespace=</code>) select: see <a href="#namespaces">Namespaces</a>.</p>
 
     <h3>Health</h3>
     <pre data-lang="sh"><code>GET /api/health → 200 {"status":"ok","version":"...","uptime_seconds":1234,
@@ -1327,9 +1368,9 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
         on the leader, so a cluster adds availability, not write throughput; and a single-node data
         directory can't be moved into a cluster. A single node's data directory is its single point
         of failure; back it up.</li>
-      <li><strong>Auth is one shared token.</strong> TLS and the token are opt-in and cover every
-        port (<a href="#security">Auth &amp; TLS</a>), but there are no per-user identities or roles,
-        and with nothing set every port is open plaintext.</li>
+      <li><strong>Auth is per namespace, not per user.</strong> TLS and tokens are opt-in and cover every
+        port (<a href="#security">Auth &amp; TLS</a>); each <a href="#namespaces">namespace</a> has its own
+        tokens, but there are no per-user identities or roles, and with nothing set every port is open plaintext.</li>
       <li><strong>At-least-once</strong> activity execution: make activities idempotent. (Signals
         are exactly-once; each carries an idempotency key.)</li>
       <li><strong>Not load-tested.</strong> Workflows run in parallel, each under its own lock with

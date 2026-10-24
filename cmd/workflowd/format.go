@@ -61,6 +61,10 @@ func scanFormat(dir string) (*formatReport, error) {
 			continue
 		}
 		r.needed = max(r.needed, f.Format())
+		if history.Namespaced(id) {
+			// A binary before 0.4.0 would not see this history at all.
+			r.needed = max(r.needed, history.FormatNamespaces)
+		}
 	}
 	return r, nil
 }

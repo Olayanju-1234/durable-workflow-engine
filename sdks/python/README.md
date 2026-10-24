@@ -71,7 +71,8 @@ the leader. Activities longer than the lease heartbeat automatically; an activit
 second `info` argument can check `info["lease_lost"]`.
 
 For an engine with auth and TLS: `Worker(address="https://…:8233", token=..., ca_file=...)`
-(`ca_file` only for a private CA).
+(`ca_file` only for a private CA). With a namespace's token the worker works in that namespace;
+with the engine's token, pick one with `namespace="acme"` (engine 0.4.0+).
 
 Workflow code must be deterministic: no clocks, randomness or I/O except through `ctx`
 (`ctx.now()`, `ctx.random()`).

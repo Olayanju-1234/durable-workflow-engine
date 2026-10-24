@@ -23,10 +23,11 @@ type visibilityIndex struct {
 }
 
 // reservedPrefix marks history files the engine keeps for itself (schedules),
-// which are not workflows: recovery, listing and retention skip them.
+// which are not workflows: recovery, listing and retention skip them. It is
+// checked on the id within the namespace, so each namespace has its own.
 const reservedPrefix = "__workflowd"
 
-func isReservedID(id string) bool { return strings.HasPrefix(id, reservedPrefix) }
+func isReservedID(key string) bool { return strings.HasPrefix(localID(key), reservedPrefix) }
 
 // indexLocked records w's current summary. The caller holds w.mu.
 func (e *Engine) indexLocked(w *wfState) {

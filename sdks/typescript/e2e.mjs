@@ -322,6 +322,29 @@ for (let i = 0; ; i++) {
   await new Promise((r) => setTimeout(r, 50));
 }
 
+// Namespaces: a worker holding the e2e namespace's token works there, under
+// the same type and id the default namespace uses, and sees nothing else.
+const nsWorker = new Worker({ addresses: [follower], workerId: 'ts-e2e-ns', token: 'e2e-token' });
+nsWorker.workflow('TsE2E', async (ctx) => `in e2e: ${await ctx.activity('ts-shout', ctx.input)}`);
+nsWorker.activity('ts-shout', async (s) => s.toUpperCase());
+await nsWorker.register();
+nsWorker.run().catch((err) => fail(`namespace worker: ${err.message}`));
+await nsWorker.startWorkflow('TsE2E', 'hello', id);
+let nsDone;
+for (let i = 0; ; i++) {
+  nsDone = await nsWorker.describe(id);
+  if (nsDone.status === 'COMPLETED') break;
+  if (i > 100) fail(`namespace: ${nsDone.status} ${nsDone.error}`);
+  await new Promise((r) => setTimeout(r, 50));
+}
+const defaultSide = await worker.describe(id);
+const elsewhere = await new Worker({ addresses: [follower], token: 'e2e-token', namespace: 'default' })
+  .describe(id).catch((err) => err.status);
+if (nsDone.output !== 'in e2e: HELLO' || defaultSide.output === nsDone.output || elsewhere !== 403) {
+  fail(`namespace: output ${nsDone.output}, default's ${defaultSide.output}, token outside its namespace ${elsewhere}`);
+}
+nsWorker.stop();
+
 // A restarted engine has forgotten every registration: the worker must notice
 // and register again before this workflow can be dispatched.
 console.log('RESTART');

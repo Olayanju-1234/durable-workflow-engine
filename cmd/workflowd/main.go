@@ -146,6 +146,25 @@ type serveConfig struct {
 	limits                      server.Limits
 }
 
+// shortestRetention is the shortest retention any namespace has (the
+// engine's own, or a namespace's override), zero if none purges.
+func (cfg serveConfig) shortestRetention() time.Duration {
+	shortest := time.Duration(0)
+	consider := func(d time.Duration) {
+		if d > 0 && (shortest == 0 || d < shortest) {
+			shortest = d
+		}
+	}
+	for _, name := range cfg.sec.namespaces.Names() {
+		if ns := cfg.sec.namespaces.Get(name); ns != nil && ns.Retention != nil {
+			consider(*ns.Retention)
+		} else {
+			consider(cfg.retention)
+		}
+	}
+	return shortest
+}
+
 // grpcServerOptions are the client-facing gRPC server's options: TLS and
 // auth, and a message size that fits the largest request the limits allow.
 func (cfg serveConfig) grpcServerOptions() []grpc.ServerOption {
@@ -163,7 +182,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 	if cfg.retention < 0 {
 		return fmt.Errorf("--retention must not be negative, got %s", cfg.retention)
 	}
-	engine := server.NewEngine(store, logger, server.WithLimits(cfg.limits))
+	engine := server.NewEngine(store, logger, server.WithLimits(cfg.limits), server.WithNamespaces(cfg.sec.namespaces))
 	defer engine.Close()
 	registerDemoTypes(engine)
 
@@ -242,14 +261,14 @@ func startEngineServices(ctx context.Context, bg *sync.WaitGroup, engine *server
 		}()
 		logger.Info("demo worker running", "steps", demoSteps, "concurrency", demoWorkerConcurrency)
 	}
-	if cfg.retention > 0 {
-		interval := min(max(cfg.retention/10, time.Minute), time.Hour)
+	if shortest := cfg.shortestRetention(); shortest > 0 {
+		interval := min(max(shortest/10, time.Minute), time.Hour)
 		bg.Add(1)
 		go func() {
 			defer bg.Done()
 			engine.RunRetention(ctx, cfg.retention, interval)
 		}()
-		logger.Info("retention enabled", "keep", cfg.retention, "interval", interval)
+		logger.Info("retention enabled", "keep", cfg.retention, "shortest", shortest, "interval", interval)
 	}
 }
 

@@ -43,12 +43,12 @@ func NewGRPCServerFrom(src EngineSource, logger *slog.Logger) *GRPCServer {
 	return &GRPCServer{src: src, log: logger}
 }
 
-func (s *GRPCServer) engine(ctx context.Context) (*Engine, error) {
+func (s *GRPCServer) engine(ctx context.Context) (*Scope, error) {
 	e, err := s.src.Engine()
 	if err != nil {
 		return nil, s.notLeader(ctx, err)
 	}
-	return e, nil
+	return e.In(grantFrom(ctx).Namespace), nil
 }
 
 // notLeader turns a call away as Unavailable, the conventional "try another
@@ -108,7 +108,7 @@ func (s *GRPCServer) CompleteTask(ctx context.Context, req *CompleteTaskRequest)
 	}
 	switch r := req.GetResult().(type) {
 	case *CompleteTaskRequest_Output:
-		err = e.CompleteTask(req.GetWorkflowId(), req.GetStepName(), req.GetSequence(), req.GetLeaseToken(), r.Output, "", false)
+		err = e.CompleteTask(req.GetWorkflowId(), req.GetStepName(), req.GetSequence(), req.GetLeaseToken(), r.Output)
 	case *CompleteTaskRequest_Error:
 		err = e.FailTask(req.GetWorkflowId(), req.GetStepName(), req.GetSequence(), req.GetLeaseToken(), TaskFailure{
 			Message: r.Error, Type: req.GetErrorType(), NonRetryable: req.GetNonRetryable(),
@@ -269,16 +269,16 @@ func (s *GRPCServer) GetWorkflow(ctx context.Context, req *GetWorkflowRequest) (
 }
 
 func (s *GRPCServer) TerminateWorkflow(ctx context.Context, req *TerminateWorkflowRequest) (*TerminateWorkflowResponse, error) {
-	if err := s.endWorkflow(ctx, req.GetWorkflowId(), req.GetReason(), (*Engine).TerminateWorkflow); err != nil {
+	if err := s.endWorkflow(ctx, req.GetWorkflowId(), req.GetReason(), (*Scope).TerminateWorkflow); err != nil {
 		return nil, err
 	}
 	return &TerminateWorkflowResponse{}, nil
 }
 
 func (s *GRPCServer) CancelWorkflow(ctx context.Context, req *CancelWorkflowRequest) (*CancelWorkflowResponse, error) {
-	end := (*Engine).CancelWorkflow
+	end := (*Scope).CancelWorkflow
 	if req.GetGraceful() {
-		end = (*Engine).RequestCancelWorkflow
+		end = (*Scope).RequestCancelWorkflow
 	}
 	if err := s.endWorkflow(ctx, req.GetWorkflowId(), req.GetReason(), end); err != nil {
 		return nil, err
@@ -286,7 +286,7 @@ func (s *GRPCServer) CancelWorkflow(ctx context.Context, req *CancelWorkflowRequ
 	return &CancelWorkflowResponse{}, nil
 }
 
-func (s *GRPCServer) endWorkflow(ctx context.Context, id, reason string, end func(*Engine, string, string) error) error {
+func (s *GRPCServer) endWorkflow(ctx context.Context, id, reason string, end func(*Scope, string, string) error) error {
 	e, err := s.engine(ctx)
 	if err != nil {
 		return err

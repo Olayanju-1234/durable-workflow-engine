@@ -31,12 +31,17 @@ const maxWorkflowIDBytes = 190
 
 func newRunID() string { return fmt.Sprintf("%016x", rand.Uint64()) }
 
-func archiveID(workflowID, runID string, closedAt int64) string {
-	return fmt.Sprintf("%s%016x~%s~%s", archivePrefix, closedAt, runID, workflowID)
+// archiveID is the store key an archived run of a workflow (by store key)
+// is kept under, in the workflow's namespace.
+func archiveID(workflowKey, runID string, closedAt int64) string {
+	ns, id := history.SplitKey(workflowKey)
+	return history.Key(ns, fmt.Sprintf("%s%016x~%s~%s", archivePrefix, closedAt, runID, id))
 }
 
-// parseArchiveID splits an archived run's name; ok is false for any other id.
-func parseArchiveID(id string) (workflowID, runID string, closedAt int64, ok bool) {
+// parseArchiveID splits an archived run's store key; workflowKey is the store
+// key of the workflow it belongs to, and ok is false for any other key.
+func parseArchiveID(key string) (workflowKey, runID string, closedAt int64, ok bool) {
+	ns, id := history.SplitKey(key)
 	rest, found := strings.CutPrefix(id, archivePrefix)
 	if !found {
 		return "", "", 0, false
@@ -49,7 +54,7 @@ func parseArchiveID(id string) (workflowID, runID string, closedAt int64, ok boo
 	if err != nil {
 		return "", "", 0, false
 	}
-	return parts[2], parts[1], int64(at), true
+	return history.Key(ns, parts[2]), parts[1], int64(at), true
 }
 
 // Started is what a start did.
@@ -151,7 +156,7 @@ func (e *Engine) startNextRunLocked(w *wfState) error {
 	next := st.ContinuedAsNew
 	first := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
 		WorkflowStarted: &history.WorkflowStartedEvent{
-			WorkflowId: w.id, WorkflowType: next.GetWorkflowType(), Input: next.GetInput(),
+			WorkflowId: localID(w.id), WorkflowType: next.GetWorkflowType(), Input: next.GetInput(),
 			ExecutionTimeoutMs: next.GetExecutionTimeoutMs(),
 			RunId:              next.GetRunId(), ContinuedFromRunId: st.RunID,
 		},
@@ -256,8 +261,9 @@ func (e *Engine) archivedRunHistory(workflowID, runID string) ([]*history.Histor
 	return nil, fmt.Errorf("%w: %q has no run %q", ErrNotFound, workflowID, runID)
 }
 
-// purgeArchivedRuns deletes archived runs that closed before cutoff.
-func (e *Engine) purgeArchivedRuns(cutoff time.Time) (int, error) {
+// purgeArchivedRuns deletes archived runs that closed before their
+// namespace's cutoff.
+func (e *Engine) purgeArchivedRuns(cutoffOf cutoffFunc) (int, error) {
 	ids, err := e.store.ListWorkflows()
 	if err != nil {
 		return 0, err
@@ -265,7 +271,10 @@ func (e *Engine) purgeArchivedRuns(cutoff time.Time) (int, error) {
 	purged := 0
 	for _, id := range ids {
 		wf, run, closedAt, ok := parseArchiveID(id)
-		if !ok || closedAt > cutoff.UnixNano() {
+		if !ok {
+			continue
+		}
+		if cutoff, keep := cutoffOf(nsOf(id)); !keep || closedAt > cutoff.UnixNano() {
 			continue
 		}
 		if err := e.hlog.Delete(id); err != nil {

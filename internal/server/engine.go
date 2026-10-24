@@ -99,9 +99,11 @@ type Engine struct {
 	closeOnce sync.Once
 	done      chan struct{} // closed by Close; ends long polls
 
+	namespaces *NamespaceSet // immutable after NewEngine; nil: only default
+
 	mu               sync.Mutex
-	planners         map[string]Planner       // workflow type -> planner
-	policies         map[string]RetryPolicy   // activity step name -> retry policy
+	planners         map[nsName]Planner       // workflow type -> planner
+	policies         map[nsName]RetryPolicy   // activity step name -> retry policy
 	leases           map[leaseKey]*lease      // in-flight step -> its task lease
 	leaseTokens      map[string]*lease        // lease token -> lease, for heartbeats
 	tombstones       map[string]string        // lease token -> why it was taken away (cancellation)
@@ -124,6 +126,13 @@ func WithLeaseDuration(d time.Duration) Option {
 // store. A cluster passes its Raft-backed log here.
 func WithHistoryLog(l HistoryLog) Option {
 	return func(e *Engine) { e.hlog = l }
+}
+
+// WithNamespaces gives the engine its configured namespaces: their retention
+// overrides apply to their workflows. Namespaces need no configuration to be
+// used; the API layers decide who may use which.
+func WithNamespaces(set *NamespaceSet) Option {
+	return func(e *Engine) { e.namespaces = set }
 }
 
 // WithDecisionTimeout sets how long an SDK worker may hold a workflow task
@@ -155,8 +164,8 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 		wfs:           make(map[string]*wfState),
 		idle:          list.New(),
 
-		planners:         make(map[string]Planner),
-		policies:         make(map[string]RetryPolicy),
+		planners:         make(map[nsName]Planner),
+		policies:         make(map[nsName]RetryPolicy),
 		leases:           make(map[leaseKey]*lease),
 		leaseTokens:      make(map[string]*lease),
 		tombstones:       make(map[string]string),
@@ -213,19 +222,24 @@ func (e *Engine) Register(def state.WorkflowDefinition) {
 	e.RegisterWorkflow(def.Type, def)
 }
 
-// RegisterWorkflow makes any planner runnable under a workflow type — a
-// state.WorkflowDefinition, or a replay-engine workflow over real Go code
-// (package sdk). Call before serving traffic.
+// RegisterWorkflow makes any planner runnable under a workflow type in the
+// default namespace — a state.WorkflowDefinition, or a replay-engine workflow
+// over real Go code (package sdk). Call before serving traffic.
 func (e *Engine) RegisterWorkflow(workflowType string, planner Planner) {
+	e.registerWorkflow(DefaultNamespace, workflowType, planner)
+}
+
+func (e *Engine) registerWorkflow(ns, workflowType string, planner Planner) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.planners[workflowType] = planner
+	e.planners[nsName{ns, workflowType}] = planner
 }
 
 // StartOption customises StartWorkflow.
 type StartOption func(*startOptions)
 
 type startOptions struct {
+	namespace        string
 	executionTimeout time.Duration
 	reuse            IdReusePolicy
 	conflict         IdConflictPolicy
@@ -242,6 +256,11 @@ func WithIDReusePolicy(p IdReusePolicy) StartOption {
 // (the default), or return the run that holds it (USE_EXISTING).
 func WithIDConflictPolicy(p IdConflictPolicy) StartOption {
 	return func(o *startOptions) { o.conflict = p }
+}
+
+// inNamespace starts the workflow in ns (Scope.Start).
+func inNamespace(ns string) StartOption {
+	return func(o *startOptions) { o.namespace = ns }
 }
 
 // WithExecutionTimeout ends the workflow as TIMED_OUT if it has not finished d
@@ -268,8 +287,19 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 	if so.executionTimeout < 0 {
 		return Started{}, fmt.Errorf("%w: execution timeout must not be negative", ErrInvalidArgument)
 	}
-	if _, ok := e.planner(workflowType); !ok {
-		return Started{}, fmt.Errorf("%w: %q is not registered on this node", ErrUnknownType, workflowType)
+	ns := so.namespace
+	if ns == "" {
+		ns = DefaultNamespace
+	}
+	if err := checkNamespace(ns); err != nil {
+		return Started{}, err
+	}
+	if _, ok := e.planner(ns, workflowType); !ok {
+		where := "on this node"
+		if ns != DefaultNamespace {
+			where = fmt.Sprintf("in namespace %q on this node", ns)
+		}
+		return Started{}, fmt.Errorf("%w: %q is not registered %s", ErrUnknownType, workflowType, where)
 	}
 	if err := e.checkPayload("workflow input", input); err != nil {
 		return Started{}, err
@@ -279,12 +309,14 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 		// calls; the random suffix makes a generated id effectively unique.
 		workflowID = fmt.Sprintf("%s-%d-%08x", workflowType, time.Now().UnixNano(), rand.Uint32())
 	}
-	if err := validateID(workflowID); err != nil {
+	if err := validateLocalID(workflowID); err != nil {
 		return Started{}, err
 	}
 	if len(workflowID) > maxWorkflowIDBytes {
 		return Started{}, fmt.Errorf("%w: workflow id is %d bytes, over the %d-byte limit", ErrInvalidArgument, len(workflowID), maxWorkflowIDBytes)
 	}
+	localWorkflowID := workflowID
+	workflowID = history.Key(ns, workflowID)
 	w := e.lockWorkflow(workflowID)
 	defer e.unlockWorkflow(w)
 	// The id is checked and the run started under the workflow's lock, so of
@@ -296,7 +328,7 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 	runID := newRunID()
 	started := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
 		WorkflowStarted: &history.WorkflowStartedEvent{
-			WorkflowId: workflowID, WorkflowType: workflowType, Input: input,
+			WorkflowId: localWorkflowID, WorkflowType: workflowType, Input: input,
 			ExecutionTimeoutMs: so.executionTimeout.Milliseconds(), RunId: runID,
 		},
 	}}
@@ -307,10 +339,10 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 	} else {
 		taken := idTaken(st, so.reuse)
 		if taken != "" && so.conflict == IdConflictPolicy_ID_CONFLICT_POLICY_USE_EXISTING {
-			return Started{WorkflowID: workflowID, RunID: st.RunID, Existing: true}, nil
+			return Started{WorkflowID: localWorkflowID, RunID: st.RunID, Existing: true}, nil
 		}
 		if taken != "" {
-			return Started{}, fmt.Errorf("%w: %q %s", ErrAlreadyExists, workflowID, taken)
+			return Started{}, fmt.Errorf("%w: %q %s", ErrAlreadyExists, localWorkflowID, taken)
 		}
 		if err := e.newRunLocked(w, started); err != nil {
 			return Started{}, err
@@ -320,7 +352,7 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 	if err := e.startRunLocked(w); err != nil {
 		return Started{}, err
 	}
-	return Started{WorkflowID: workflowID, RunID: runID}, nil
+	return Started{WorkflowID: localWorkflowID, RunID: runID}, nil
 }
 
 // idTaken says why a start may not begin a new run under an id whose current
@@ -385,6 +417,9 @@ func (e *Engine) recoverWorkflows() (err error) {
 		err := e.recoverLocked(w, &c)
 		if w.loaded && w.fold != nil {
 			format = max(format, w.fold.Format())
+		}
+		if history.Namespaced(id) {
+			format = max(format, history.FormatNamespaces)
 		}
 		e.indexLocked(w)
 		e.unlockWorkflow(w)
@@ -465,7 +500,7 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	// policy allows one, rather than let the workflow see it.
 	if tail := st.Tail(); st.Status == state.StatusRunning && tail != nil && tail.Status == state.StepFailed &&
 		!tail.Retrying && tail.Kind == state.KindActivity {
-		if _, retry := e.retryAfter(tail, time.Now()); retry {
+		if _, retry := e.retryAfter(nsOf(id), tail, time.Now()); retry {
 			e.scheduleRetryLocked(id, st.RunID, tail, 0)
 			c.rearmed++
 			return nil
@@ -480,7 +515,7 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	if !delivered && !st.OwesDecision() {
 		return nil // waiting on steps in flight; their results will advance it
 	}
-	planner, ok := e.planner(st.WorkflowType)
+	planner, ok := e.planner(nsOf(id), st.WorkflowType)
 	if !ok {
 		// Registering the type later resumes it (resumeType).
 		e.log.Warn("recovery: workflow type not registered yet; waiting for a worker",
@@ -574,7 +609,7 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 		// Retry transparently if attempts remain: the workflow sees the error
 		// only once the policy is exhausted, so the failure says which it is.
 		attempt.ErrorType, attempt.NonRetryable = failure.Type, failure.NonRetryable
-		delay, willRetry := e.retryAfter(&attempt, time.Now())
+		delay, willRetry := e.retryAfter(nsOf(workflowID), &attempt, time.Now())
 		stepErr := failure.Message
 		failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 			StepFailed: &history.StepFailedEvent{
@@ -620,9 +655,15 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 // token that CompleteTask and Heartbeat must present, and a deadline after
 // which the engine assumes the worker died and reassigns the work.
 func (e *Engine) PollTask(ctx context.Context, workerID string, stepNames ...string) (*Task, error) {
+	return e.pollTask(ctx, DefaultNamespace, workerID, stepNames)
+}
+
+// pollTask is PollTask for a namespace: only its tasks are handed out, and
+// the task names the workflow by its store key.
+func (e *Engine) pollTask(ctx context.Context, ns, workerID string, stepNames []string) (*Task, error) {
 	ctx, cancel := e.pollContext(ctx)
 	defer cancel()
-	t, err := e.queue.poll(ctx, stepNames)
+	t, err := e.queue.poll(ctx, ns, stepNames)
 	if err != nil {
 		return nil, e.pollError(err)
 	}
@@ -858,7 +899,7 @@ func (e *Engine) advanceLocked(w *wfState, planner Planner) error {
 // this engine. If not, the workflow stays RUNNING with its latest result
 // recorded, and registering the type resumes it. The caller must hold w.mu.
 func (e *Engine) advanceIfRegisteredLocked(w *wfState, workflowType string) error {
-	planner, ok := e.planner(workflowType)
+	planner, ok := e.planner(nsOf(w.id), workflowType)
 	if !ok {
 		e.log.Warn("workflow type not registered; waiting for a worker to register it",
 			"workflow_id", w.id, "type", workflowType)
@@ -867,11 +908,11 @@ func (e *Engine) advanceIfRegisteredLocked(w *wfState, workflowType string) erro
 	return e.advanceLocked(w, planner)
 }
 
-// planner looks up the planner registered for a workflow type.
-func (e *Engine) planner(workflowType string) (Planner, bool) {
+// planner looks up the planner registered for a workflow type in a namespace.
+func (e *Engine) planner(ns, workflowType string) (Planner, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	p, ok := e.planners[workflowType]
+	p, ok := e.planners[nsName{ns, workflowType}]
 	return p, ok
 }
 
@@ -1157,7 +1198,7 @@ func (e *Engine) onAdvanceRetry(tm timer.Timer) {
 	if st.Status != state.StatusRunning {
 		return // moved on (or terminal); nothing to decide
 	}
-	planner, ok := e.planner(st.WorkflowType)
+	planner, ok := e.planner(nsOf(tm.WorkflowID), st.WorkflowType)
 	if !ok {
 		e.log.Warn("advance retry for unregistered type", "workflow_id", tm.WorkflowID, "type", st.WorkflowType)
 		return
@@ -1189,9 +1230,22 @@ func (e *Engine) Stats() EngineStats {
 	}
 }
 
-// validateID turns a malformed workflow id into an invalid-argument error
-// before it can name a lock or a file.
-func validateID(workflowID string) error {
+// validateID turns a malformed store key into an invalid-argument error
+// before it can name a lock or a file: a workflow id, or "<namespace>/<id>".
+func validateID(key string) error {
+	if history.Namespaced(key) {
+		ns, id := history.SplitKey(key)
+		if ns == DefaultNamespace || !history.ValidNamespace(ns) {
+			return fmt.Errorf("%w: invalid workflow id %q", ErrInvalidArgument, key)
+		}
+		return validateLocalID(id)
+	}
+	return validateLocalID(key)
+}
+
+// validateLocalID checks a workflow id as a client names it, within its
+// namespace: it can never carry a namespace of its own.
+func validateLocalID(workflowID string) error {
 	if workflowID == "" || workflowID == "." || workflowID == ".." || strings.ContainsAny(workflowID, `/\`) {
 		return fmt.Errorf("%w: invalid workflow id %q", ErrInvalidArgument, workflowID)
 	}

@@ -28,6 +28,9 @@ import (
 // idempotent: a fire repeated after a restart or a leader change finds the run
 // already there. Recover catches up the latest fire missed within
 // scheduleCatchUp while no engine was running.
+//
+// Each namespace keeps its own schedule history, under the same reserved id
+// in its directory; the scheduler names a schedule by its store key.
 const (
 	scheduleLogID   = reservedPrefix + "-schedules"
 	scheduleLogType = reservedPrefix + "/schedules"
@@ -38,6 +41,7 @@ const (
 )
 
 type scheduleEntry struct {
+	ns        string
 	spec      *Schedule
 	createdAt time.Time
 	cron      cron.Schedule
@@ -47,65 +51,80 @@ type scheduleEntry struct {
 type scheduler struct {
 	mu      sync.Mutex
 	loaded  bool
-	entries map[string]*scheduleEntry
+	entries map[string]*scheduleEntry // by history.Key(namespace, schedule id)
 	timers  *timer.Service
 	retry   time.Duration // wait before retrying a fire that could not start
 }
 
 const defaultScheduleRetry = 10 * time.Second
 
-// CreateSchedule records a schedule (replacing one with the same id) and arms
-// its next fire. The workflow type need not be registered yet: a fire waits
-// for it.
+// CreateSchedule records a schedule in the default namespace (replacing one
+// with the same id) and arms its next fire. The workflow type need not be
+// registered yet: a fire waits for it.
 func (e *Engine) CreateSchedule(spec *Schedule) error {
-	ent, err := newScheduleEntry(proto.Clone(spec).(*Schedule), time.Now())
+	return e.createSchedule(DefaultNamespace, spec)
+}
+
+func (e *Engine) createSchedule(ns string, spec *Schedule) error {
+	ent, err := newScheduleEntry(ns, proto.Clone(spec).(*Schedule), time.Now())
 	if err != nil {
 		return err
 	}
+	key := history.Key(ns, spec.GetScheduleId())
 	e.sched.mu.Lock()
 	defer e.sched.mu.Unlock()
 	if err := e.loadSchedulesLocked(); err != nil {
 		return err
 	}
-	if cur, ok := e.sched.entries[spec.GetScheduleId()]; ok && proto.Equal(cur.spec, ent.spec) {
+	if cur, ok := e.sched.entries[key]; ok && proto.Equal(cur.spec, ent.spec) {
 		return nil // the same schedule again: a retried create
 	}
 	data, err := proto.Marshal(ent.spec)
 	if err != nil {
 		return fmt.Errorf("server: encode schedule: %w", err)
 	}
-	at, err := e.appendScheduleChange(signalUpsert, data)
+	at, err := e.appendScheduleChange(ns, signalUpsert, data)
 	if err != nil {
 		return err
 	}
 	ent.createdAt = at
-	e.sched.entries[ent.spec.GetScheduleId()] = ent
+	e.sched.entries[key] = ent
 	e.armScheduleLocked(ent, ent.cron.Next(time.Now()))
-	e.log.Info("schedule created", "schedule_id", ent.spec.GetScheduleId(), "cron", ent.spec.GetCron(),
+	e.log.Info("schedule created", "namespace", ns, "schedule_id", ent.spec.GetScheduleId(), "cron", ent.spec.GetCron(),
 		"workflow_type", ent.spec.GetWorkflowType(), "next_fire_at", ent.next)
 	return nil
 }
 
-// DeleteSchedule stops a schedule. Runs it already started are unaffected.
+// DeleteSchedule stops a schedule in the default namespace. Runs it already
+// started are unaffected.
 func (e *Engine) DeleteSchedule(scheduleID string) error {
+	return e.deleteSchedule(DefaultNamespace, scheduleID)
+}
+
+func (e *Engine) deleteSchedule(ns, scheduleID string) error {
+	key := history.Key(ns, scheduleID)
 	e.sched.mu.Lock()
 	defer e.sched.mu.Unlock()
 	if err := e.loadSchedulesLocked(); err != nil {
 		return err
 	}
-	if _, ok := e.sched.entries[scheduleID]; !ok {
+	if _, ok := e.sched.entries[key]; !ok || validateID(key) != nil {
 		return fmt.Errorf("%w: schedule %q", ErrNotFound, scheduleID)
 	}
-	if _, err := e.appendScheduleChange(signalDelete, []byte(scheduleID)); err != nil {
+	if _, err := e.appendScheduleChange(ns, signalDelete, []byte(scheduleID)); err != nil {
 		return err
 	}
-	delete(e.sched.entries, scheduleID)
-	e.log.Info("schedule deleted", "schedule_id", scheduleID)
+	delete(e.sched.entries, key)
+	e.log.Info("schedule deleted", "namespace", ns, "schedule_id", scheduleID)
 	return nil
 }
 
-// ListSchedules returns every schedule, sorted by id.
+// ListSchedules returns every schedule in the default namespace, sorted by id.
 func (e *Engine) ListSchedules() ([]*ScheduleInfo, error) {
+	return e.listSchedules(DefaultNamespace)
+}
+
+func (e *Engine) listSchedules(ns string) ([]*ScheduleInfo, error) {
 	e.sched.mu.Lock()
 	defer e.sched.mu.Unlock()
 	if err := e.loadSchedulesLocked(); err != nil {
@@ -113,6 +132,9 @@ func (e *Engine) ListSchedules() ([]*ScheduleInfo, error) {
 	}
 	out := make([]*ScheduleInfo, 0, len(e.sched.entries))
 	for _, ent := range e.sched.entries {
+		if ent.ns != ns {
+			continue
+		}
 		info := &ScheduleInfo{Schedule: proto.Clone(ent.spec).(*Schedule), CreatedAt: ent.createdAt.UnixNano()}
 		if !ent.next.IsZero() {
 			info.NextFireAt = ent.next.UnixNano()
@@ -125,9 +147,9 @@ func (e *Engine) ListSchedules() ([]*ScheduleInfo, error) {
 	return out, nil
 }
 
-func newScheduleEntry(spec *Schedule, now time.Time) (*scheduleEntry, error) {
+func newScheduleEntry(ns string, spec *Schedule, now time.Time) (*scheduleEntry, error) {
 	id := spec.GetScheduleId()
-	if err := validateID(id); err != nil || strings.ContainsAny(id, " \t\n") {
+	if err := validateLocalID(id); err != nil || strings.ContainsAny(id, " \t\n") {
 		return nil, fmt.Errorf("%w: invalid schedule id %q", ErrInvalidArgument, id)
 	}
 	if spec.GetWorkflowType() == "" {
@@ -144,13 +166,16 @@ func newScheduleEntry(spec *Schedule, now time.Time) (*scheduleEntry, error) {
 	if c.Next(now).IsZero() {
 		return nil, fmt.Errorf("%w: schedule %q: %q never fires", ErrInvalidArgument, id, spec.GetCron())
 	}
-	return &scheduleEntry{spec: spec, cron: c}, nil
+	return &scheduleEntry{ns: ns, spec: spec, cron: c}, nil
 }
 
-// appendScheduleChange records one change in the schedule history and returns
-// its timestamp. The caller holds e.sched.mu.
-func (e *Engine) appendScheduleChange(signal string, payload []byte) (time.Time, error) {
-	w := e.lockWorkflow(scheduleLogID)
+// key is the entry's store key: its namespace and schedule id.
+func (ent *scheduleEntry) key() string { return history.Key(ent.ns, ent.spec.GetScheduleId()) }
+
+// appendScheduleChange records one change in a namespace's schedule history
+// and returns its timestamp. The caller holds e.sched.mu.
+func (e *Engine) appendScheduleChange(ns, signal string, payload []byte) (time.Time, error) {
+	w := e.lockWorkflow(history.Key(ns, scheduleLogID))
 	defer e.unlockWorkflow(w)
 	events, _, err := e.historyLocked(w)
 	if err != nil {
@@ -173,19 +198,37 @@ func (e *Engine) appendScheduleChange(signal string, payload []byte) (time.Time,
 	return time.Unix(0, ev.GetTimestamp()), nil
 }
 
-// loadSchedulesLocked reads the schedule history once. The caller holds
-// e.sched.mu.
+// loadSchedulesLocked reads every namespace's schedule history once. The
+// caller holds e.sched.mu.
 func (e *Engine) loadSchedulesLocked() error {
 	if e.sched.loaded {
 		return nil
 	}
-	w := e.lockWorkflow(scheduleLogID)
+	keys, err := e.store.ListWorkflows()
+	if err != nil {
+		return fmt.Errorf("server: load schedules: %w", err)
+	}
+	entries := make(map[string]*scheduleEntry)
+	for _, key := range keys {
+		if localID(key) == scheduleLogID {
+			if err := e.loadScheduleLog(key, entries); err != nil {
+				return err
+			}
+		}
+	}
+	e.sched.entries, e.sched.loaded = entries, true
+	return nil
+}
+
+// loadScheduleLog folds one namespace's schedule history into entries.
+func (e *Engine) loadScheduleLog(logKey string, entries map[string]*scheduleEntry) error {
+	ns := nsOf(logKey)
+	w := e.lockWorkflow(logKey)
 	events, _, err := e.historyLocked(w)
 	e.unlockWorkflow(w)
 	if err != nil {
 		return fmt.Errorf("server: load schedules: %w", err)
 	}
-	entries := make(map[string]*scheduleEntry)
 	for _, ev := range events {
 		sig := ev.GetSignalReceived()
 		switch sig.GetSignalName() {
@@ -194,21 +237,20 @@ func (e *Engine) loadSchedulesLocked() error {
 			if err := proto.Unmarshal(sig.GetPayload(), spec); err != nil {
 				return fmt.Errorf("server: load schedules: event %d: %w", ev.GetEventId(), err)
 			}
-			ent, err := newScheduleEntry(spec, time.Now())
+			ent, err := newScheduleEntry(ns, spec, time.Now())
 			if err != nil {
 				// A schedule that was valid when created but no longer parses
 				// (say, a time zone this machine lacks) must not hide the rest.
-				e.log.Error("schedule cannot be loaded; it will not fire", "schedule_id", spec.GetScheduleId(), "err", err)
-				delete(entries, spec.GetScheduleId())
+				e.log.Error("schedule cannot be loaded; it will not fire", "namespace", ns, "schedule_id", spec.GetScheduleId(), "err", err)
+				delete(entries, history.Key(ns, spec.GetScheduleId()))
 				continue
 			}
 			ent.createdAt = time.Unix(0, ev.GetTimestamp())
-			entries[spec.GetScheduleId()] = ent
+			entries[ent.key()] = ent
 		case signalDelete:
-			delete(entries, string(sig.GetPayload()))
+			delete(entries, history.Key(ns, string(sig.GetPayload())))
 		}
 	}
-	e.sched.entries, e.sched.loaded = entries, true
 	return nil
 }
 
@@ -258,12 +300,12 @@ func (e *Engine) armScheduleLocked(ent *scheduleEntry, at time.Time) {
 	if at.IsZero() {
 		return
 	}
-	e.sched.timers.Add(timer.Timer{WorkflowID: ent.spec.GetScheduleId(), Sequence: at.UnixNano(), FireAt: at})
+	e.sched.timers.Add(timer.Timer{WorkflowID: ent.key(), Sequence: at.UnixNano(), FireAt: at})
 }
 
 func (e *Engine) armRetryLocked(ent *scheduleEntry, fire time.Time) {
 	ent.next = fire
-	e.sched.timers.Add(timer.Timer{WorkflowID: ent.spec.GetScheduleId(), Sequence: fire.UnixNano(), FireAt: time.Now().Add(e.sched.retry)})
+	e.sched.timers.Add(timer.Timer{WorkflowID: ent.key(), Sequence: fire.UnixNano(), FireAt: time.Now().Add(e.sched.retry)})
 }
 
 func (e *Engine) onScheduleDue(tm timer.Timer) {
@@ -293,17 +335,18 @@ func (e *Engine) fireLocked(ent *scheduleEntry, at time.Time) (retry bool) {
 	runID := fmt.Sprintf("%s-%s", spec.GetScheduleId(), at.UTC().Format(runIDTimeFormat))
 	if spec.GetSkipIfRunning() {
 		live, err := e.indexed(func(s *WorkflowSummary) bool {
-			return strings.HasPrefix(s.GetWorkflowId(), spec.GetScheduleId()+"-") && s.GetWorkflowId() != runID &&
+			ns, id := history.SplitKey(s.GetWorkflowId())
+			return ns == ent.ns && strings.HasPrefix(id, spec.GetScheduleId()+"-") && id != runID &&
 				!isTerminalStatus(s.GetStatus()) && s.GetStatus() != WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED
 		})
 		if err == nil && len(live) > 0 {
 			e.metrics.schedulesSkipped.Inc()
-			e.log.Info("schedule fire skipped: an earlier run is still running", "schedule_id", spec.GetScheduleId(),
-				"fire_at", at, "running", live[0].GetWorkflowId())
+			e.log.Info("schedule fire skipped: an earlier run is still running", "namespace", ent.ns, "schedule_id", spec.GetScheduleId(),
+				"fire_at", at, "running", localID(live[0].GetWorkflowId()))
 			return false
 		}
 	}
-	_, err := e.StartWorkflow(spec.GetWorkflowType(), spec.GetInput(), runID)
+	_, err := e.StartWorkflow(spec.GetWorkflowType(), spec.GetInput(), runID, inNamespace(ent.ns))
 	switch {
 	case err == nil:
 		e.metrics.schedulesFired.Inc()

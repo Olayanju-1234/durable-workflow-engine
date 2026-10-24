@@ -959,6 +959,7 @@ public final class Workflowd {
         private volatile long registeredEpoch = -1;
         private final String workerId;
         private final String authToken;
+        private volatile String namespace;
         private final HttpClient http;
         private final Map<String, WorkflowFunction> workflows = new ConcurrentHashMap<>();
         private final Map<String, ActivityRunner> activities = new ConcurrentHashMap<>();
@@ -997,6 +998,15 @@ public final class Workflowd {
             HttpClient.Builder http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10));
             if (sslContext != null) http.sslContext(sslContext);
             this.http = http.build();
+        }
+
+        /**
+         * The namespace every call works in. Unset, it is the default namespace, or the one a
+         * namespace token grants. Set it before {@link #start} or {@link #run}.
+         */
+        public Worker namespace(String namespace) {
+            this.namespace = namespace;
+            return this;
         }
 
         public Worker workflow(String type, WorkflowFunction fn) {
@@ -1069,6 +1079,8 @@ public final class Workflowd {
                         .timeout(Duration.ofSeconds(40))
                         .method(method, pub);
                 if (authToken != null && !authToken.isEmpty()) req.header("Authorization", "Bearer " + authToken);
+                String ns = namespace;
+                if (ns != null && !ns.isEmpty()) req.header("X-Workflowd-Namespace", ns);
                 HttpResponse<String> res;
                 try {
                     res = http.send(req.build(), HttpResponse.BodyHandlers.ofString());

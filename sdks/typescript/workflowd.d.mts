@@ -235,10 +235,13 @@ export interface WorkerOptions {
   workerId?: string;
   sdk?: string;
   /**
-   * Sent as `Authorization: Bearer <token>` for an engine started with --auth-token-file.
-   * For a private CA over https, start Node with NODE_EXTRA_CA_CERTS=/path/ca.pem.
+   * Sent as `Authorization: Bearer <token>` for an engine started with --auth-token-file,
+   * or a namespace's token. For a private CA over https, start Node with
+   * NODE_EXTRA_CA_CERTS=/path/ca.pem.
    */
   token?: string;
+  /** The namespace every call works in. Unset: the default, or a namespace token's own. */
+  namespace?: string;
   /** Activities run at once. Default 4. */
   activityConcurrency?: number;
   /** Workflow tasks decided at once. Default 2. */

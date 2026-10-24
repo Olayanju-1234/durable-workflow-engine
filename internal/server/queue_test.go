@@ -36,7 +36,7 @@ func TestQueueNoDuplicateDispatch(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				task, err := q.poll(ctx, nil)
+				task, err := q.poll(ctx, DefaultNamespace, nil)
 				if err != nil {
 					return // drained: ctx cancelled once all tasks are out
 				}
@@ -71,7 +71,7 @@ func TestQueuePollBlocksUntilCancel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := q.poll(ctx, nil)
+		_, err := q.poll(ctx, DefaultNamespace, nil)
 		done <- err
 	}()
 
@@ -104,11 +104,11 @@ func TestQueueRoutesByStepName(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	got, err := q.poll(ctx, []string{"ship", "release"})
+	got, err := q.poll(ctx, DefaultNamespace, []string{"ship", "release"})
 	if err != nil || got.GetWorkflowId() != "b" {
 		t.Fatalf("filtered poll = %v, %v; want task b", got, err)
 	}
-	got, err = q.poll(ctx, nil)
+	got, err = q.poll(ctx, DefaultNamespace, nil)
 	if err != nil || got.GetWorkflowId() != "a" {
 		t.Fatalf("unfiltered poll = %v, %v; want task a (FIFO)", got, err)
 	}
@@ -116,14 +116,14 @@ func TestQueueRoutesByStepName(t *testing.T) {
 	// No matching task: a filtered poller parks even though "c" is pending.
 	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancelShort()
-	if got, err := q.poll(short, []string{"ship"}); !errors.Is(err, context.DeadlineExceeded) {
+	if got, err := q.poll(short, DefaultNamespace, []string{"ship"}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("poll for absent step = %v, %v; want DeadlineExceeded", got, err)
 	}
 
 	// A matching enqueue wakes a parked filtered poller.
 	done := make(chan *Task, 1)
 	go func() {
-		task, _ := q.poll(ctx, []string{"ship"})
+		task, _ := q.poll(ctx, DefaultNamespace, []string{"ship"})
 		done <- task
 	}()
 	q.enqueue(&Task{WorkflowId: "d", StepName: "ship"})

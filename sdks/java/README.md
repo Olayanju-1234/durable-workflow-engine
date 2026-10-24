@@ -68,7 +68,8 @@ rethrowing it ends the workflow `CANCELLED`; `ctx.cancelRequested()` says it was
 
 For an engine with auth and TLS:
 `new Workflowd.Worker("https://…:8233", "worker-1", token, Workflowd.trustPem(Path.of("ca.pem")))`
-(pass `null` for the SSLContext with a public CA).
+(pass `null` for the SSLContext with a public CA). With a namespace's token the worker works in
+that namespace; with the engine's token, pick one with `.namespace("acme")` (engine 0.4.0+).
 
 Without Maven, `Workflowd.java` is one file: copy it into your source tree. A runnable
 example is [`Example.java`](Example.java). Workflow code must be deterministic (use `ctx.now()` and `ctx.random()`); how replay

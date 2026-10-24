@@ -2,6 +2,7 @@ package history
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -30,7 +31,7 @@ func TestStoreRefusesDirectoryInNewerFormat(t *testing.T) {
 	if !errors.Is(err, ErrFormatTooNew) {
 		t.Fatalf("open: err = %v, want ErrFormatTooNew", err)
 	}
-	for _, want := range []string{"needs history format 6", "reads up to format 5", "docs/UPGRADING.md"} {
+	for _, want := range []string{fmt.Sprintf("needs history format %d", FormatVersion+1), fmt.Sprintf("reads up to format %d", FormatVersion), "docs/UPGRADING.md"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}

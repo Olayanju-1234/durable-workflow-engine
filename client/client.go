@@ -37,7 +37,9 @@ var (
 	ErrInvalid         = errors.New("client: invalid request")
 	ErrUnavailable     = errors.New("client: no workflowd node is serving")
 	ErrUnauthenticated = errors.New("client: missing or invalid auth token")
-	ErrWorkflowFailed  = errors.New("client: workflow did not complete")
+	// ErrForbidden: the token is valid but not for this namespace.
+	ErrForbidden      = errors.New("client: token not allowed in this namespace")
+	ErrWorkflowFailed = errors.New("client: workflow did not complete")
 )
 
 func init() {
@@ -57,8 +59,11 @@ type Options struct {
 	// whose RootCAs hold your CA). Nil dials plaintext.
 	TLS *tls.Config
 	// AuthToken is sent as "authorization: Bearer <token>" on every call, for
-	// an engine started with --auth-token-file.
+	// an engine started with --auth-token-file, or a namespace's token.
 	AuthToken string
+	// Namespace is the namespace every call works in. Empty means the one the
+	// token grants: the default namespace, or a namespace token's own.
+	Namespace string
 	// DialOptions are added after the ones TLS and AuthToken produce, so a
 	// transport credential here wins.
 	DialOptions []grpc.DialOption
@@ -89,6 +94,9 @@ func Dial(opts Options) (*Client, error) {
 	if opts.AuthToken != "" {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerToken(opts.AuthToken)))
 	}
+	if opts.Namespace != "" {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(namespaceMetadata(opts.Namespace)))
+	}
 	dialOpts = append(dialOpts, opts.DialOptions...)
 	conn, err := rpc.New(opts.Addrs, dialOpts, logger)
 	if err != nil {
@@ -106,6 +114,15 @@ func (t bearerToken) GetRequestMetadata(context.Context, ...string) (map[string]
 }
 
 func (bearerToken) RequireTransportSecurity() bool { return false }
+
+// namespaceMetadata names the namespace on every call.
+type namespaceMetadata string
+
+func (n namespaceMetadata) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{server.MetadataNamespace: string(n)}, nil
+}
+
+func (namespaceMetadata) RequireTransportSecurity() bool { return false }
 
 // Close releases the client's connections.
 func (c *Client) Close() error { return c.conn.Close() }
@@ -395,6 +412,8 @@ func wrap(op string, err error) error {
 		kind = ErrUnavailable
 	case codes.Unauthenticated:
 		kind = ErrUnauthenticated
+	case codes.PermissionDenied:
+		kind = ErrForbidden
 	default:
 		return fmt.Errorf("client: %s: %w", op, err)
 	}
