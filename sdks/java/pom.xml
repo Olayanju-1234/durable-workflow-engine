@@ -6,7 +6,7 @@
 
   <groupId>io.github.olayanju-1234</groupId>
   <artifactId>workflowd</artifactId>
-  <version>0.3.0</version>
+  <version>0.4.0</version>
   <packaging>jar</packaging>
 
   <name>workflowd Java SDK</name>

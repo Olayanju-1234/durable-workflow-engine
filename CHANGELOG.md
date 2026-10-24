@@ -7,6 +7,15 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-24
+
+Running several apps on one engine: namespaces with their own tokens, named task queues, an
+operator's command line, guardrails so an engine protects itself, archiving before retention
+deletes, and schedule controls. The SDKs gain `namespace` and `taskQueue` options; everything
+that existed lives on in the `default` namespace and the default task queue, unchanged, and older
+SDKs keep working. Using a namespace, a named queue, or a paused, jittered or buffered schedule
+raises the data directory to history format 6: see `docs/UPGRADING.md` before rolling back.
+
 ### Added
 - **Namespaces** (ADR-0015): logical tenants inside one engine, each with its own workflows,
   schedules, workflow types, task routing and retention. `--namespaces FILE` (JSON) configures

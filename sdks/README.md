@@ -48,6 +48,28 @@ A certificate from a public CA needs nothing beyond the `https://` address. The
 examples read `WORKFLOWD_AUTH_TOKEN` and `WORKFLOWD_CA_FILE`, and CI runs every SDK
 over TLS with a required token (`E2E_SECURE=1 ./scripts/sdk-e2e.sh <sdk>`).
 
+## Namespaces and task queues (engine 0.4.0+)
+
+A **namespace** (ADR-0015) is a tenant inside one engine. Every call carries one: the
+`X-Workflowd-Namespace` header (gRPC metadata `workflowd-namespace`), or none, which means the
+default namespace or, with a namespace's token, that namespace. A namespace token used
+anywhere else is refused with 403. A **task queue** (ADR-0016) routes work inside a namespace:
+workers poll one queue, starts name the queue a workflow runs on, and its activities run there
+unless the code names another.
+
+| SDK | Namespace | Worker's task queue | One activity elsewhere |
+|---|---|---|---|
+| Go | `client.Options{Namespace: "acme"}` | `worker.Options{TaskQueue: "billing"}` | `workflow.WithTaskQueue("email")` |
+| TypeScript | `new Worker({ namespace: 'acme' })` | `new Worker({ taskQueue: 'billing' })` | `ctx.activity(name, x, { taskQueue: 'email' })` |
+| Python | `Worker(namespace="acme")` | `Worker(task_queue="billing")` | `ctx.activity(name, x, task_queue="email")` |
+| Java | `worker.namespace("acme")` | `worker.taskQueue("billing")` | `new ActivityOptions().withTaskQueue("email")` |
+
+The SDK workers start workflows on their own queue unless `start()` names another. On the
+wire: polls take `&task_queue=` (absent: the default queue), starts and `schedule_activity` /
+`continue_as_new` commands take `"task_queue"`; send it only when it is not the default, since an
+engine before 0.4.0 refuses the field. A worker refused with 429 (rate limited) on registration
+should retry, as for 503.
+
 ## How it works
 
 The engine never runs your workflow code. Instead it asks a question:
