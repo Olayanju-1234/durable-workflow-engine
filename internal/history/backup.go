@@ -235,3 +235,24 @@ func dirExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.IsDir()
 }
+
+// DecodeRaw reads events from a history file's bytes (ReadRaw, a backup or
+// an archive). A torn tail is an error here: such bytes are always whole.
+func DecodeRaw(data []byte) ([]*HistoryEvent, error) {
+	var events []*HistoryEvent
+	end, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), func(payload []byte) error {
+		ev := &HistoryEvent{}
+		if err := proto.Unmarshal(payload, ev); err != nil {
+			return fmt.Errorf("history: unmarshal record %d: %w", len(events), err)
+		}
+		events = append(events, ev)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if end != int64(len(data)) {
+		return nil, fmt.Errorf("history: %d of %d bytes are whole records", end, len(data))
+	}
+	return events, nil
+}

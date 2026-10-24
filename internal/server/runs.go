@@ -282,6 +282,10 @@ func (e *Engine) purgeArchivedRuns(cutoffOf cutoffFunc) (int, error) {
 		if cutoff, keep := cutoffOf(nsOf(id)); !keep || closedAt > cutoff.UnixNano() {
 			continue
 		}
+		if err := e.archiveRun(id, wf, run, closedAt); err != nil {
+			e.log.Warn("retention: kept archived run", "workflow_id", wf, "run_id", run, "err", err)
+			continue
+		}
 		if err := e.hlog.Delete(id); err != nil {
 			e.log.Warn("retention: skipped archived run", "workflow_id", wf, "run_id", run, "err", err)
 			continue

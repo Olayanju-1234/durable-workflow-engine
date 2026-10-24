@@ -78,6 +78,10 @@ func (e *Engine) purgeIfExpired(workflowID string, cutoff time.Time) (bool, erro
 		time.Unix(0, events[len(events)-1].GetTimestamp()).After(cutoff) {
 		return false, nil
 	}
+	// Archived first: deleted only once the archive has it.
+	if err := e.archiveRun(workflowID, workflowID, st.RunID, events[len(events)-1].GetTimestamp()); err != nil {
+		return false, err
+	}
 	w.forget()
 	if err := e.hlog.Delete(workflowID); err != nil {
 		e.indexLocked(w) // the delete may or may not have happened

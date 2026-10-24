@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/olayanju-1234/durable-workflow-engine/internal/archive"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/metrics"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
@@ -102,6 +103,7 @@ type Engine struct {
 	namespaces *NamespaceSet // immutable after NewEngine; nil: only default
 	guardrails Policy        // immutable after NewEngine: default quotas
 	quota      quotas
+	archive    archive.Store // immutable after NewEngine; nil: retention deletes outright
 
 	mu               sync.Mutex
 	planners         map[nsName]Planner       // workflow type -> planner
@@ -1246,6 +1248,8 @@ type EngineStats struct {
 	WorkflowTaskQueueDepth int
 	// HistoryFormat is the format recorded for the data directory (0: none yet).
 	HistoryFormat uint32
+	// Archive says where finished runs are archived ("": nowhere).
+	Archive string
 }
 
 // Stats returns the current gauge values. Cheap: atomic, channel-length and
@@ -1256,6 +1260,7 @@ func (e *Engine) Stats() EngineStats {
 		TaskQueueDepth:         e.queue.depth(),
 		WorkflowTaskQueueDepth: e.workflowQueue.depth(),
 		HistoryFormat:          e.store.Format(),
+		Archive:                archiveName(e.archive),
 	}
 }
 

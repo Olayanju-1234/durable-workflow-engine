@@ -34,6 +34,9 @@ func commands() map[string]command {
 		{"schedule delete", "<schedule-id>", "Delete a schedule (its runs carry on).", setupScheduleDelete},
 		{"backup", "<file.tar.gz | ->", "Back up every history: from the engine (engine token), or a data directory (--data-dir).", setupBackup},
 		{"restore", "<file.tar.gz | ->", "Restore a backup into a new data directory (--data-dir), with the engine stopped.", setupRestore},
+		{"archive list", "", "List archived runs (finished histories retention exported).", setupArchiveList},
+		{"archive describe", "<workflow-id>", "Show an archived run (the latest, or --run-id).", setupArchiveDescribe},
+		{"archive history", "<workflow-id>", "Print an archived run's events.", setupArchiveHistory},
 	}
 	m := make(map[string]command, len(cmds))
 	for _, c := range cmds {
@@ -202,7 +205,16 @@ type workflowDetail struct {
 }
 
 func setupDescribe(fs *flag.FlagSet) func(*cli, []string) error {
-	runID := fs.String("run-id", "", "describe this earlier run instead of the current one")
+	return describeAt(fs, "/api/workflows/", "describe this earlier run instead of the current one")
+}
+
+func setupArchiveDescribe(fs *flag.FlagSet) func(*cli, []string) error {
+	return describeAt(fs, "/api/archive/workflows/", "describe this archived run instead of the latest")
+}
+
+// describeAt shows a workflow run read from base + id: live or archived.
+func describeAt(fs *flag.FlagSet, base, runHelp string) func(*cli, []string) error {
+	runID := fs.String("run-id", "", runHelp)
 	return func(c *cli, pos []string) error {
 		if err := wantArgs(pos, "<workflow-id>"); err != nil {
 			return err
@@ -212,7 +224,7 @@ func setupDescribe(fs *flag.FlagSet) func(*cli, []string) error {
 			q.Set("run_id", *runID)
 		}
 		var w workflowDetail
-		if printed, err := c.getJSON("/api/workflows/"+url.PathEscape(pos[0]), q, &w); printed || err != nil {
+		if printed, err := c.getJSON(base+url.PathEscape(pos[0]), q, &w); printed || err != nil {
 			return err
 		}
 		t := newTable(c.out)
@@ -274,7 +286,15 @@ func setupDescribe(fs *flag.FlagSet) func(*cli, []string) error {
 }
 
 func setupHistory(fs *flag.FlagSet) func(*cli, []string) error {
-	runID := fs.String("run-id", "", "print this earlier run instead of the current one")
+	return historyAt(fs, "/api/workflows/", "print this earlier run instead of the current one")
+}
+
+func setupArchiveHistory(fs *flag.FlagSet) func(*cli, []string) error {
+	return historyAt(fs, "/api/archive/workflows/", "print this archived run instead of the latest")
+}
+
+func historyAt(fs *flag.FlagSet, base, runHelp string) func(*cli, []string) error {
+	runID := fs.String("run-id", "", runHelp)
 	return func(c *cli, pos []string) error {
 		if err := wantArgs(pos, "<workflow-id>"); err != nil {
 			return err
@@ -286,10 +306,40 @@ func setupHistory(fs *flag.FlagSet) func(*cli, []string) error {
 		var r struct {
 			Events []jsonRaw `json:"events"`
 		}
-		if printed, err := c.getJSON("/api/workflows/"+url.PathEscape(pos[0])+"/history", q, &r); printed || err != nil {
+		if printed, err := c.getJSON(base+url.PathEscape(pos[0])+"/history", q, &r); printed || err != nil {
 			return err
 		}
 		return printEvents(c.out, r.Events)
+	}
+}
+
+func setupArchiveList(fs *flag.FlagSet) func(*cli, []string) error {
+	prefix := fs.String("prefix", "", "only workflow ids that start with this")
+	limit := fs.Int("limit", 200, "show at most this many runs")
+	return func(c *cli, pos []string) error {
+		if err := wantArgs(pos); err != nil {
+			return err
+		}
+		q := url.Values{"limit": {strconv.Itoa(*limit)}}
+		if *prefix != "" {
+			q.Set("prefix", *prefix)
+		}
+		var r struct {
+			Runs []struct {
+				WorkflowID string `json:"workflow_id"`
+				RunID      string `json:"run_id"`
+				ClosedAt   string `json:"closed_at"`
+			} `json:"runs"`
+		}
+		if printed, err := c.getJSON("/api/archive/workflows", q, &r); printed || err != nil {
+			return err
+		}
+		t := newTable(c.out)
+		t.row("WORKFLOW ID", "RUN ID", "CLOSED")
+		for _, run := range r.Runs {
+			t.row(run.WorkflowID, run.RunID, when(run.ClosedAt))
+		}
+		return t.flush()
 	}
 }
 

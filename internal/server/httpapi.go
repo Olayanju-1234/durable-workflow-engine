@@ -182,6 +182,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
 	a.registerScheduleRoutes(mux)
+	a.registerArchiveRoutes(mux)
 	// Without this, unmatched /api paths would fall through to the dashboard's
 	// catch-all and answer 200 with HTML, which confuses API clients.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
@@ -375,6 +376,7 @@ func (a *HTTPAPI) health(w http.ResponseWriter, _ *http.Request) {
 		"task_queue_depth":          st.TaskQueueDepth,
 		"workflow_task_queue_depth": st.WorkflowTaskQueueDepth,
 		"demo_worker":               a.demoWorker,
+		"archiving":                 st.Archive != "",
 		// The data directory's history format, and the newest this binary reads.
 		"history_format":       st.HistoryFormat,
 		"reads_history_format": history.FormatVersion,
@@ -465,7 +467,11 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, toWorkflowDTO(resp))
+}
 
+// toWorkflowDTO is one workflow run as the API presents it.
+func toWorkflowDTO(resp *GetWorkflowResponse) *workflowDTO {
 	steps := make([]*stepDTO, 0, len(resp.GetSteps()))
 	for _, s := range resp.GetSteps() {
 		steps = append(steps, &stepDTO{
@@ -484,7 +490,7 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 			TaskQueue:    s.GetTaskQueue(),
 		})
 	}
-	writeJSON(w, http.StatusOK, &workflowDTO{
+	return &workflowDTO{
 		summaryDTO:   *toSummaryDTO(resp.GetSummary()),
 		Input:        string(resp.GetInput()),
 		InputBase64:  base64Twin(resp.GetInput()),
@@ -496,7 +502,7 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		ContinuedAsNewRunID: resp.GetContinuedAsNewRunId(),
 		CancelRequested:     resp.GetCancelRequested(),
 		CancelReason:        resp.GetCancelReason(),
-	})
+	}
 }
 
 // runDTO is one run of a workflow id.
@@ -549,6 +555,11 @@ func (a *HTTPAPI) workflowHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	writeEvents(w, r.PathValue("id"), "", events)
+}
+
+// writeEvents answers with events in the protobuf JSON mapping.
+func writeEvents(w http.ResponseWriter, workflowID, runID string, events []*history.HistoryEvent) {
 	out := make([]json.RawMessage, 0, len(events))
 	for _, ev := range events {
 		b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(ev)
@@ -558,7 +569,11 @@ func (a *HTTPAPI) workflowHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, b)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workflow_id": r.PathValue("id"), "events": out})
+	body := map[string]any{"workflow_id": workflowID, "events": out}
+	if runID != "" {
+		body["run_id"] = runID
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // backup streams a backup of the whole engine (every namespace), so it needs

@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/olayanju-1234/durable-workflow-engine/internal/archive"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/ctl"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/raft"
@@ -48,6 +49,8 @@ func main() {
 		maxEvents   = flag.Int("max-history-events", server.DefaultMaxHistoryEvents, "events a workflow run's history may hold; at 80% the engine warns and suggests continue-as-new, at the limit the workflow fails (0: no limit)")
 		maxBytes    = flag.Int64("max-history-bytes", server.DefaultMaxHistoryBytes, "bytes a workflow run's history may hold, like --max-history-events (0: no limit)")
 		maxPayload  = flag.Int("max-payload-bytes", server.DefaultMaxPayloadBytes, "the largest input, output, signal payload or marker value, on HTTP and gRPC alike (0: no limit)")
+		archiveSpec = flag.String("archive", "", "before retention deletes a finished history, export it here: a directory, file:///dir, or s3://bucket/prefix?endpoint=https://...&region=... (S3, R2); a history that cannot be exported is kept")
+		archiveCred = flag.String("archive-credentials-file", "", "S3 credentials for --archive: lines access_key_id=... and secret_access_key=... (default: $WORKFLOWD_ARCHIVE_ACCESS_KEY_ID and $WORKFLOWD_ARCHIVE_SECRET_ACCESS_KEY, else $AWS_ACCESS_KEY_ID and $AWS_SECRET_ACCESS_KEY)")
 		checkFmt    = flag.Bool("check-format", false, "report the data directory's history format and whether this binary can serve it, then exit (run with the engine stopped)")
 		rescanFmt   = flag.Bool("rescan-format", false, "like --check-format, then record the format the histories need now (lowers it once newer histories are gone)")
 
@@ -116,6 +119,16 @@ func main() {
 			logger.Error("invalid limits", "err", err)
 			os.Exit(2)
 		}
+		if *archiveSpec != "" {
+			creds, err := archiveCredentials(*archiveCred, os.Getenv)
+			if err == nil {
+				cfg.archive, err = archive.Open(*archiveSpec, creds)
+			}
+			if err != nil {
+				logger.Error("invalid --archive", "err", err)
+				os.Exit(2)
+			}
+		}
 		if clustered {
 			if err := runCluster(logger, store, *dataDir, cfg, clusterCfg); err != nil {
 				logger.Error("cluster node stopped", "err", err)
@@ -148,6 +161,7 @@ type serveConfig struct {
 	sec                         security
 	demoWorker                  bool
 	retention                   time.Duration
+	archive                     archive.Store // nil: retention deletes outright
 	limits                      server.Limits
 }
 
@@ -188,7 +202,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 		return fmt.Errorf("--retention must not be negative, got %s", cfg.retention)
 	}
 	engine := server.NewEngine(store, logger, server.WithLimits(cfg.limits), server.WithNamespaces(cfg.sec.namespaces),
-		server.WithGuardrails(cfg.sec.guardrails))
+		server.WithGuardrails(cfg.sec.guardrails), server.WithArchive(cfg.archive))
 	defer engine.Close()
 	cfg.sec.guard = server.NewGuard(cfg.sec.namespaces, cfg.sec.guardrails, cfg.sec.trusted, engine.Metrics())
 	registerDemoTypes(engine)
@@ -276,6 +290,11 @@ func startEngineServices(ctx context.Context, bg *sync.WaitGroup, engine *server
 			engine.RunRetention(ctx, cfg.retention, interval)
 		}()
 		logger.Info("retention enabled", "keep", cfg.retention, "shortest", shortest, "interval", interval)
+		if cfg.archive != nil {
+			logger.Info("finished histories are archived before retention deletes them", "archive", cfg.archive.String())
+		}
+	} else if cfg.archive != nil {
+		logger.Warn("--archive is set but no retention is: nothing is deleted, so nothing is archived", "hint", "set --retention")
 	}
 }
 

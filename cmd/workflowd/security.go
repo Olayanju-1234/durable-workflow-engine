@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	"github.com/olayanju-1234/durable-workflow-engine/internal/archive"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/tlsconfig"
 )
@@ -150,6 +151,39 @@ func readSecretFile(fileFlag, path string, logger *slog.Logger) (string, error) 
 // authorizer decides every call's namespace and token, on both transports.
 func (s security) authorizer() *server.Authorizer {
 	return server.NewAuthorizer(s.authToken, s.publicReads, s.namespaces)
+}
+
+// archiveCredentials reads S3 credentials for --archive: from the file, else
+// the environment. Like every secret here, never from a flag's value.
+func archiveCredentials(file string, getenv func(string) string) (archive.Credentials, error) {
+	var c archive.Credentials
+	if file == "" {
+		c.AccessKeyID, c.SecretAccessKey = getenv("WORKFLOWD_ARCHIVE_ACCESS_KEY_ID"), getenv("WORKFLOWD_ARCHIVE_SECRET_ACCESS_KEY")
+		if c.AccessKeyID == "" && c.SecretAccessKey == "" {
+			c.AccessKeyID, c.SecretAccessKey = getenv("AWS_ACCESS_KEY_ID"), getenv("AWS_SECRET_ACCESS_KEY")
+		}
+		return c, nil
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return c, fmt.Errorf("--archive-credentials-file: %w", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		switch strings.TrimSpace(k) {
+		case "access_key_id":
+			c.AccessKeyID = strings.TrimSpace(v)
+		case "secret_access_key":
+			c.SecretAccessKey = strings.TrimSpace(v)
+		}
+	}
+	if c.AccessKeyID == "" || c.SecretAccessKey == "" {
+		return c, fmt.Errorf("--archive-credentials-file: %s needs access_key_id= and secret_access_key= lines", file)
+	}
+	return c, nil
 }
 
 // grpcServerOptions are the TLS and auth options for the client-facing gRPC server.
