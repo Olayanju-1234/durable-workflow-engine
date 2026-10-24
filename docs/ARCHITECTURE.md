@@ -81,6 +81,11 @@ Records are appended and fsync'd one at a time:
   and events grow optional fields (`retry_policy`, `will_retry`, a signal's `request_id`).
   An older binary cannot read a history that contains a newer event type, or one with
   several steps in flight.
+- **History formats** ([ADR-0011](adr/0011-history-format-contract.md)) make that explicit:
+  each event an older binary would misread carries `min_reader_format`, the data directory
+  records its format in `FORMAT` (raised before the first event that needs it), and a binary
+  refuses to open a directory, or recover a history, in a newer format than it reads.
+  `docs/UPGRADING.md` is the operator's table.
 - **Staying on files** was revisited with measurements in
   [ADR-0006](adr/0006-keep-file-per-workflow-store.md): no LSM engine.
 - **Torn-tail truncation on open** → the append handle is cached per workflow, and opening it

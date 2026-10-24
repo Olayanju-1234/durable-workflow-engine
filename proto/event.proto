@@ -17,6 +17,10 @@ message HistoryEvent {
   // node re-apply its log after a restart without writing an event twice.
   // Zero in single-node mode. Older binaries ignore it.
   uint64 raft_index = 3;
+  // The oldest history format that reads this event correctly (see
+  // docs/UPGRADING.md); unset means the base format, which every binary reads.
+  // A binary whose format is lower refuses to start rather than misread it.
+  uint32 min_reader_format = 4;
 
   // Exactly one attributes message is set per event; the field that is present
   // determines the event type. New event types get new oneof fields, which is

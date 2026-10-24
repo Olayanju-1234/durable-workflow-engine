@@ -313,19 +313,27 @@ func (e *Engine) recoverWorkflows() (err error) {
 	}
 
 	var c recoveryCounts
+	format := history.FormatBase
 	for _, id := range ids {
 		if isReservedID(id) {
 			continue
 		}
 		w := e.lockWorkflow(id)
 		err := e.recoverLocked(w, &c)
+		if w.loaded && w.fold != nil {
+			format = max(format, w.fold.Format())
+		}
 		e.indexLocked(w)
 		e.unlockWorkflow(w)
 		if err != nil {
 			return err
 		}
 	}
-	e.log.Info("recovery complete", "workflows", len(ids),
+	// Directories written before formats were recorded learn theirs here.
+	if err := e.store.RequireFormat(format); err != nil {
+		return fmt.Errorf("server: record history format: %w", err)
+	}
+	e.log.Info("recovery complete", "workflows", len(ids), "history_format", e.store.Format(),
 		"requeued", c.requeued, "rearmed", c.rearmed, "advanced", c.advanced)
 	return nil
 }
@@ -936,6 +944,12 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 	}
 	ev.EventId = eventID
 	ev.Timestamp = time.Now().UnixNano()
+	if w.fold != nil {
+		// Stamped so a binary that predates what the event uses refuses it.
+		if need := w.fold.FormatOf(ev); need > history.FormatBase {
+			ev.MinReaderFormat = need
+		}
+	}
 	if err := e.hlog.Append(workflowID, ev); err != nil {
 		// The event may or may not have reached the log; read it back next time.
 		w.forget()
@@ -1048,14 +1062,18 @@ type EngineStats struct {
 	ActiveWorkflows        int64
 	TaskQueueDepth         int
 	WorkflowTaskQueueDepth int
+	// HistoryFormat is the format recorded for the data directory (0: none yet).
+	HistoryFormat uint32
 }
 
-// Stats returns the current gauge values. Cheap: all three are atomic/channel-len reads.
+// Stats returns the current gauge values. Cheap: atomic, channel-length and
+// in-memory reads.
 func (e *Engine) Stats() EngineStats {
 	return EngineStats{
 		ActiveWorkflows:        e.metrics.workflowsActive.Value(),
 		TaskQueueDepth:         e.queue.depth(),
 		WorkflowTaskQueueDepth: e.workflowQueue.depth(),
+		HistoryFormat:          e.store.Format(),
 	}
 }
 

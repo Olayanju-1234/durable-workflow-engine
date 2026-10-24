@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
 )
 
@@ -254,6 +255,9 @@ func (a *HTTPAPI) health(w http.ResponseWriter, _ *http.Request) {
 		"task_queue_depth":          st.TaskQueueDepth,
 		"workflow_task_queue_depth": st.WorkflowTaskQueueDepth,
 		"demo_worker":               a.demoWorker,
+		// The data directory's history format, and the newest this binary reads.
+		"history_format":       st.HistoryFormat,
+		"reads_history_format": history.FormatVersion,
 	}
 	if a.clusterStatus != nil {
 		body["cluster"] = a.clusterStatus()

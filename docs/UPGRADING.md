@@ -1,0 +1,102 @@
+# Upgrading and rolling back
+
+workflowd keeps all its state in history files (`--data-dir`). Upgrading the binary is
+always safe for them. Rolling back is safe until the new binary writes something the old one
+cannot read, and from 0.3.0 on the binary checks that for you (ADR-0011).
+
+## The contract
+
+1. **Every binary reads every history an older binary wrote.** Upgrading never needs a
+   migration step.
+2. **History has numbered formats.** A format names a change an older binary would refuse or
+   misread. A binary reads every format up to its own (`workflowd --version` prints it).
+3. **A data directory's format rises only when a feature that needs it is used,** the first
+   time it is used. Upgrading and changing nothing else keeps the old format, so the rollback
+   stays open.
+4. **From 0.3.0, a binary refuses to start on a directory in a newer format** than it reads,
+   before it reads a single history, and says which binary it needs. It refuses a single
+   history in a newer format the same way during recovery, naming the workflow.
+
+The directory's format is recorded in `<data-dir>/FORMAT`, raised before the first event that
+needs it is written. Binaries before 0.3.0 neither write nor read that file.
+
+## Formats
+
+| Format | What a history can hold | First binary that reads it | What an older binary does |
+|-------:|-------------------------|----------------------------|---------------------------|
+| 1 | Activities, timers, signals, retries, terminate (Phases 1–4) | every binary | — |
+| 2 | Version and side-effect markers (`GetVersion`, `SideEffect`, `getVersion`, `sideEffect`) | 0.1.0 (any build from `14a1fa0`) | refuses the history (unknown event) |
+| 3 | Two steps in flight at once (parallel activities, `waitAny` races) | 0.1.0 (any build from `f7c18c1`) | refuses the history |
+| 4 | A cancelled step, or a step closed between retries by a timeout or a cancel | 0.2.0 | refuses a history with a step closed between retries; reads a cancelled step as failed |
+| 5 | Continue-as-new and graceful cancellation | 0.3.0 | reads a run that continued as new as completed (the chain stops); ignores a cancel request |
+
+Statuses added as flags (`TIMED_OUT`, `CANCELLED`, `TERMINATED`) need no format: an older
+binary shows them as `FAILED`, which is harmless.
+
+## Before you upgrade
+
+1. Take a backup of the data directory (or of the VPS's `workflowd-backup` service). It is the
+   only way back from a format you cannot roll back across.
+2. Check the SDK table below: new SDK features need a new engine, never the other way round.
+3. In a cluster, upgrade every node before any workflow uses a new feature. A node too old for
+   an event stops instead of diverging.
+
+## Rolling back
+
+With the engine stopped, ask the **new** binary what the directory needs:
+
+```sh
+workflowd --check-format --data-dir /opt/durable/data
+```
+
+```
+data directory:   /opt/durable/data
+recorded format:  4 (needs workflowd 0.2.0 or later)
+histories need:   4 (needs workflowd 0.2.0 or later; 12 histories scanned)
+this binary:      reads up to format 5
+OK: this binary can serve this data directory.
+```
+
+Then compare *histories need* with the table:
+
+- **The target binary is 0.3.0 or later:** just install it. If it cannot read the directory it
+  will not start, and its log says why; nothing is touched.
+- **The target binary is older than 0.3.0:** it does not check. Roll back only if the format
+  the histories need is one it reads (the table's third column).
+- **It needs a newer format than the target reads:** either restore the backup you took before
+  the upgrade (losing what ran since), or wait until the workflows that use the new feature
+  have finished and retention has purged them, then run `--rescan-format` (below) and check
+  again.
+
+`--rescan-format` records the format the histories need now, which lowers it once the
+histories that needed more are gone. Run it with the engine stopped.
+
+`/api/health` reports `history_format` (the directory's) and `reads_history_format` (the
+binary's), so a deploy can be checked from outside.
+
+## SDKs and engines
+
+An SDK works with every engine from the release that introduced the features it uses. Older
+SDKs keep working against newer engines.
+
+| SDK | Needs an engine from | Notes |
+|-----|----------------------|-------|
+| 0.1.x | 0.1.0 | |
+| 0.2.0 | 0.2.0 for timeouts, cancellation, error types, `ctx.now()` | TS `ctx.now()` needs `started_at` on workflow tasks |
+| 0.3.0 | 0.3.0 for continue-as-new, id reuse policies, graceful cancellation | |
+
+When an SDK sends a field an older engine does not know, the engine refuses the request
+(`400 unknown field`). SDKs fall back where the result would otherwise be lost (activity error
+types); otherwise the feature is simply unavailable until the engine is upgraded.
+
+## Release notes on rollback
+
+- **0.3.0:** adds formats (this document). A workflow that continues as new raises the
+  directory to format 5 and moves its finished runs to `__workflowd-run~...` history files,
+  which older binaries ignore.
+- **0.2.0** (format 4): older binaries read timed-out and cancelled workflows as `FAILED`,
+  ignore timeouts and non-retryable flags, and refuse a history where a step between retries
+  was closed by a deadline or a cancel.
+- **Parallel steps** (`f7c18c1`, format 3): older binaries refuse a history with two steps in
+  flight.
+- **Markers** (`14a1fa0`, format 2): older binaries refuse a history with a marker.

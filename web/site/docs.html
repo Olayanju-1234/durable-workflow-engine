@@ -74,6 +74,7 @@
     <a href="#recovery">Crash recovery</a>
     <a href="#leases">Leases &amp; dead workers</a>
     <a href="#cluster">Running a cluster</a>
+    <a href="#upgrading">Upgrading &amp; rolling back</a>
     <a href="#limitations">Limitations</a>
     <a href="#faq">FAQ</a>
   </aside>
@@ -838,7 +839,9 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--tls-cert</code>, <code>--tls-key</code></td><td>empty</td><td>Serve TLS on the gRPC, dashboard/API and metrics listeners with this PEM certificate and key. Re-read when the files change, so a renewed certificate needs no restart. Unset: plaintext.</td></tr>
         <tr><td><code>--demo-worker</code></td><td><code>false</code></td><td>Run an in-process worker for the built-in demo activities (<code>reserve</code>, <code>charge</code>, <code>ship</code>, <code>release</code>), so <code>OrderSaga</code> and <code>OrderWorkflow</code> run with no separate worker. An input containing <code>decline</code> makes <code>charge</code> fail for good, which shows the saga compensating.</td></tr>
         <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated) this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
-        <tr><td><code>--version</code></td><td>—</td><td>Print version and exit.</td></tr>
+        <tr><td><code>--version</code></td><td>—</td><td>Print the version and the newest history format this binary reads, and exit.</td></tr>
+        <tr><td><code>--check-format</code></td><td>—</td><td>With the engine stopped: report the data directory's recorded history format, what its histories need, and whether this binary can serve it, then exit (non-zero if not). See <a href="#upgrading">Upgrading &amp; rolling back</a>.</td></tr>
+        <tr><td><code>--rescan-format</code></td><td>—</td><td>Like <code>--check-format</code>, then record the format the histories need now: how the format comes back down once workflows that needed a newer one are purged.</td></tr>
         <tr><td><code>--peers</code></td><td>empty</td><td>Every cluster member as <code>id=host:port</code> of its Raft listener, comma-separated. Setting it turns on <a href="#cluster">cluster mode</a>; without it the engine is a single node.</td></tr>
         <tr><td><code>--node-id</code></td><td>empty</td><td>This node's id in <code>--peers</code>.</td></tr>
         <tr><td><code>--raft-addr</code></td><td>this node's <code>--peers</code> entry</td><td>Listen address for Raft traffic between nodes. Keep it on a private network.</td></tr>
@@ -1009,7 +1012,8 @@ DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
     <h3>Health</h3>
     <pre data-lang="sh"><code>GET /api/health → 200 {"status":"ok","version":"...","uptime_seconds":1234,
                         "workflows_active":2,"task_queue_depth":0,
-                        "workflow_task_queue_depth":0}</code></pre>
+                        "workflow_task_queue_depth":0,
+                        "history_format":4,"reads_history_format":5}</code></pre>
     <p><code>/api/health</code> never requires the auth token, so liveness probes work unconfigured.</p>
 
     <h3>Errors</h3>
@@ -1140,6 +1144,35 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
       with the same <code>workflow_id</code>: a duplicate start returns <code>AlreadyExists</code>.
     </div>
 
+    <h2 id="upgrading">Upgrading &amp; rolling back</h2>
+    <p>The history files are the database, and every release can read every history an older one
+      wrote: upgrading needs no migration. Rolling back is the risky direction, so history has numbered
+      <strong>formats</strong>. A format names a change an older binary would refuse or misread, and a
+      data directory's format rises only the first time a feature that needs it is used. Upgrading
+      and changing nothing else keeps the rollback open.</p>
+    <table>
+      <thead><tr><th>Format</th><th>What a history can hold</th><th>First binary that reads it</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Activities, timers, signals, retries, terminate</td><td>every binary</td></tr>
+        <tr><td>2</td><td>Version and side-effect markers</td><td>0.1.0</td></tr>
+        <tr><td>3</td><td>Two steps in flight at once</td><td>0.1.0</td></tr>
+        <tr><td>4</td><td>A cancelled step, or a step closed between retries</td><td>0.2.0</td></tr>
+        <tr><td>5</td><td>Continue-as-new, graceful cancellation</td><td>0.3.0</td></tr>
+      </tbody>
+    </table>
+    <p>The directory records its format in <code>&lt;data-dir&gt;/FORMAT</code>, and from 0.3.0 a binary
+      refuses to start on a directory in a newer format than it reads, before it reads a single history,
+      naming the release it needs. To decide on a rollback, stop the engine and ask the new binary:</p>
+    <pre data-lang="sh"><code>workflowd --check-format --data-dir /var/lib/workflowd
+# recorded format:  4 (needs workflowd 0.2.0 or later)
+# histories need:   4 (needs workflowd 0.2.0 or later; 12 histories scanned)
+# this binary:      reads up to format 5
+# OK: this binary can serve this data directory.</code></pre>
+    <p>A binary from 0.3.0 on checks for itself. One older than 0.3.0 does not: roll back to it only if it
+      reads the format the histories need. <code>/api/health</code> reports <code>history_format</code> and
+      <code>reads_history_format</code>. The full procedure, and which SDK needs which engine, is in
+      <a href="https://github.com/Olayanju-1234/durable-workflow-engine/blob/main/docs/UPGRADING.md">docs/UPGRADING.md</a>.</p>
+
     <h2 id="limitations">Limitations</h2>
     <p>Known and deliberate, as of the end of the 17-week roadmap:</p>
     <ul>
@@ -1158,8 +1191,9 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
       <li><strong>Not load-tested.</strong> Workflows run in parallel, each under its own lock with
         its state cached, and listing reads an in-memory index; the main remaining cost is one fsync
         per event (<a href="https://github.com/Olayanju-1234/durable-workflow-engine/blob/main/docs/adr/0006-keep-file-per-workflow-store.md">ADR-0006</a>).</li>
-      <li><strong>Rollback</strong>: binaries from before parallel steps can't read a history that
-        ran some.</li>
+      <li><strong>Rollback</strong> to a binary older than the data directory's history format
+        is refused from 0.3.0 on; a binary before 0.3.0 does not check, so use
+        <code>--check-format</code> first (<a href="#upgrading">Upgrading &amp; rolling back</a>).</li>
     </ul>
 
     <h2 id="faq">FAQ</h2>
