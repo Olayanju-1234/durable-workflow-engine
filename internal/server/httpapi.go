@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
 )
@@ -34,7 +36,9 @@ import (
 //	POST /api/workflows/{id}/terminate       {"reason"}
 //	POST /api/workflows/{id}/cancel          {"reason"}
 //	POST /api/workflows/{id}/signal          {"name","payload"}
+//	GET  /api/workflows/{id}/history[?run_id=]   the run's events, as protobuf JSON
 //	GET  /api/namespaces
+//	GET  /api/admin/backup                   a tar.gz of every history (engine token only)
 //
 // Every route but health works in one namespace: the one the caller's token
 // grants, or the one named by the X-Workflowd-Namespace header or the
@@ -163,6 +167,8 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/workflows", a.startWorkflow)
 	mux.HandleFunc("GET /api/workflows/{id}", a.getWorkflow)
 	mux.HandleFunc("GET /api/workflows/{id}/runs", a.listWorkflowRuns)
+	mux.HandleFunc("GET /api/workflows/{id}/history", a.workflowHistory)
+	mux.HandleFunc("GET /api/admin/backup", a.backup)
 	mux.HandleFunc("POST /api/workflows/{id}/terminate", a.terminateWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", a.cancelWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
@@ -395,6 +401,7 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	wantType := r.URL.Query().Get("type")
 
 	e := a.scope(w, r)
 	if e == nil {
@@ -409,6 +416,9 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	matched := make([]*summaryDTO, 0, len(summaries))
 	for _, s := range summaries {
 		if q != "" && !strings.Contains(strings.ToLower(s.GetWorkflowId()+" "+s.GetWorkflowType()), q) {
+			continue
+		}
+		if wantType != "" && s.GetWorkflowType() != wantType {
 			continue
 		}
 		matched = append(matched, toSummaryDTO(s))
@@ -508,6 +518,54 @@ func (a *HTTPAPI) listWorkflowRuns(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": out})
+}
+
+// workflowHistory returns a run's events exactly as recorded, each in the
+// protobuf JSON mapping (proto field names; 64-bit numbers and bytes as
+// strings), for tools that want more than describe's replayed view.
+func (a *HTTPAPI) workflowHistory(w http.ResponseWriter, r *http.Request) {
+	e := a.scope(w, r)
+	if e == nil {
+		return
+	}
+	events, err := e.History(r.PathValue("id"), r.URL.Query().Get("run_id"))
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeError(w, http.StatusNotFound, err)
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]json.RawMessage, 0, len(events))
+	for _, ev := range events {
+		b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(ev)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		out = append(out, b)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workflow_id": r.PathValue("id"), "events": out})
+}
+
+// backup streams a backup of the whole engine (every namespace), so it needs
+// the engine's own token.
+func (a *HTTPAPI) backup(w http.ResponseWriter, r *http.Request) {
+	if !grantOf(r).Admin {
+		writeError(w, http.StatusForbidden, fmt.Errorf("%w: a backup holds every namespace; it needs the engine's token (--auth-token-file)", ErrForbidden))
+		return
+	}
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="workflowd-backup-%s.tar.gz"`, time.Now().UTC().Format("20060102T150405Z")))
+	if err := e.Backup(w); err != nil {
+		// The status is sent; a truncated archive fails to unpack, which is the signal.
+		a.log.Error("backup failed", "err", err)
+	}
 }
 
 func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {

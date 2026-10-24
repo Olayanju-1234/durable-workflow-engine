@@ -67,6 +67,7 @@
 
     <h4>Reference</h4>
     <a href="#cli">CLI flags</a>
+    <a href="#ctl">workflowd ctl</a>
     <a href="#security">Auth &amp; TLS</a>
     <a href="#namespaces">Namespaces</a>
     <a href="#api">gRPC API</a>
@@ -1004,6 +1005,47 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
       <a href="#security">Auth &amp; TLS</a>, or bind everything to localhost and put a TLS proxy in front.
     </div>
 
+    <h2 id="ctl">Command line: <code>workflowd ctl</code></h2>
+    <p>The operator's command line is a subcommand of the same binary. It talks to a running engine over the
+      <a href="#http-api">HTTP API</a>, so it works from any machine that can reach it, and against a cluster (it
+      follows the leader). Settings come from flags or the environment; there is no token flag, so a token never
+      lands in shell history.</p>
+    <table>
+      <thead><tr><th>Flag</th><th>Environment</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>--addr</code></td><td><code>WORKFLOWD_ADDR</code></td><td>The engine's HTTP address (default <code>http://localhost:8233</code>).</td></tr>
+        <tr><td><code>--token-file</code></td><td><code>WORKFLOWD_TOKEN_FILE</code>, else <code>WORKFLOWD_TOKEN</code></td><td>The bearer token: the engine's, or a namespace's.</td></tr>
+        <tr><td><code>--namespace</code>, <code>-n</code></td><td><code>WORKFLOWD_NAMESPACE</code></td><td>The <a href="#namespaces">namespace</a> to work in (default: the token's).</td></tr>
+        <tr><td><code>--ca-file</code></td><td><code>WORKFLOWD_CA_FILE</code></td><td>Trust a private CA for an https address.</td></tr>
+        <tr><td><code>--json</code></td><td></td><td>Print the engine's JSON instead of a table.</td></tr>
+      </tbody>
+    </table>
+    <pre data-lang="sh"><code>workflowd ctl list --status waiting --type OrderSaga
+workflowd ctl describe order-42             # status, input, output, every step
+workflowd ctl history order-42              # the events exactly as recorded
+workflowd ctl runs order-42                 # current and earlier runs
+workflowd ctl start OrderSaga --id order-43 --input order-43 --task-queue billing
+workflowd ctl signal order-43 approved --payload yes
+workflowd ctl cancel order-43 --graceful --reason "customer left"
+workflowd ctl terminate order-43 --reason stuck
+workflowd ctl schedule create nightly --cron "0 3 * * *" --timezone Europe/London --type Report
+workflowd ctl schedule list
+workflowd ctl health
+workflowd ctl namespaces</code></pre>
+    <p>Flags may come before or after the arguments; <code>workflowd ctl &lt;command&gt; --help</code> lists a command's
+      flags. Exit status: <code>0</code> done, <code>1</code> the engine refused or failed (its message is printed),
+      <code>2</code> a usage mistake.</p>
+    <h3>Backup and restore</h3>
+    <pre data-lang="sh"><code>workflowd ctl backup /var/backups/workflowd.tar.gz           # from the engine: needs the engine token
+workflowd ctl backup --data-dir /opt/durable/data backup.tar.gz  # straight from a data directory
+workflowd ctl restore --data-dir /opt/durable/data-restored backup.tar.gz</code></pre>
+    <p>A backup is a gzipped tar of every history (every namespace) and the <code>FORMAT</code> record, laid out as in the
+      data directory, so <code>tar xzf</code> restores one by hand too. Taking one through the API needs the engine token;
+      a namespace token is refused. It can be taken while the engine runs: histories are append-only, so each is copied up
+      to its last whole event. <code>restore</code> works offline, with the engine stopped, and only into a directory that
+      does not exist or is empty: it checks every history and file name, writes everything to a sibling directory, and
+      renames it into place. Then start workflowd with <code>--data-dir</code> pointing at it.</p>
+
     <h2 id="security">Auth &amp; TLS</h2>
     <p>Each piece is opt-in and independent, so a deployment that sets none of them behaves exactly as before.</p>
     <table>
@@ -1113,8 +1155,8 @@ new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORK
 
     <h3>List workflows</h3>
     <p>
-      Supports a status filter, a case-insensitive substring search over workflow id and
-      type (<code>q</code>), and offset/limit pagination. The response carries
+      Supports a status filter, an exact workflow <code>type</code>, a case-insensitive substring
+      search over workflow id and type (<code>q</code>), and offset/limit pagination. The response carries
       <code>total</code> (matches after status+q filtering, before pagination) so clients
       can page through.
     </p>
@@ -1162,6 +1204,17 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
     <p>Without <code>run_id</code> it is the current run; with one, an earlier run of the id. A run that
       continued as new carries <code>continued_as_new_run_id</code>, and the run after it
       <code>continued_from_run_id</code>.</p>
+
+    <h3>A run's history</h3>
+    <pre data-lang="sh"><code>GET /api/workflows/order-42/history[?run_id=9f3c0a51e2d47b68]
+→ {"workflow_id":"order-42","events":[{"event_id":"1","timestamp":"1729…","workflow_started":{"workflow_type":"OrderSaga",…}},…]}</code></pre>
+    <p>The events exactly as recorded, in the protobuf JSON mapping: proto field names, 64-bit numbers and bytes
+      (base64) as strings. <code>describe</code> is the replayed view; this is the raw one.</p>
+
+    <h3>Backup</h3>
+    <pre data-lang="sh"><code>curl -H "Authorization: Bearer $ENGINE_TOKEN" -o backup.tar.gz localhost:8233/api/admin/backup</code></pre>
+    <p>A tar.gz of every history; the engine token only (<code>403</code> otherwise). See
+      <a href="#ctl">Backup and restore</a>.</p>
 
     <h3>List a workflow's runs</h3>
     <pre data-lang="sh"><code>GET /api/workflows/{id}/runs

@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
@@ -85,6 +86,29 @@ func (e *Engine) GetWorkflowRun(workflowID, runID string) (*GetWorkflowResponse,
 		bytes += eventSize(ev)
 	}
 	return describeRun(workflowID, events, st, bytes)
+}
+
+// runHistory is one run's events: the current run when runID is empty or
+// names it, else an archived one.
+func (e *Engine) runHistory(workflowID, runID string) ([]*history.HistoryEvent, error) {
+	w := e.lockWorkflow(workflowID)
+	events, st, err := e.historyLocked(w)
+	current := err == nil && len(events) > 0 && (runID == "" || runID == st.RunID)
+	e.unlockWorkflow(w)
+	switch {
+	case current:
+		return events, nil
+	case err != nil && events == nil:
+		return nil, err
+	case runID == "":
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, localID(workflowID))
+	}
+	return e.archivedRunHistory(workflowID, runID)
+}
+
+// Backup writes a backup of every history to w (history.HistoryStore.Backup).
+func (e *Engine) Backup(w io.Writer) error {
+	return e.store.Backup(w)
 }
 
 func describeRun(workflowID string, events []*history.HistoryEvent, st *state.State, bytes int64) (*GetWorkflowResponse, error) {

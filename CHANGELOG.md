@@ -28,6 +28,16 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   existing worker and start uses. Schedules name theirs. Describe, the dashboard and tasks show
   `task_queue`. A named queue needs history format 6.
 
+- **`workflowd ctl`** (ADR-0017): the operator's command line, a subcommand of the same binary over
+  the JSON API. `health`, `namespaces`, `list` (status, type, text, paging), `describe`, `history`,
+  `runs`, `start`, `signal`, `cancel` (`--graceful`), `terminate`, `schedule list|create|delete`,
+  `backup` (from the engine with its token, or a data directory) and `restore` (offline, into a
+  new directory only). Address, token file, namespace and CA from flags or `WORKFLOWD_*`; tables,
+  or `--json`.
+- `GET /api/workflows/{id}/history[?run_id=]`: a run's events as recorded (protobuf JSON).
+  `GET /api/admin/backup`: a tar.gz of every history, engine token only. `GET /api/workflows`
+  takes `type=` (exact workflow type).
+
 ### Changed
 - The SDK examples run on their own task queues (`ts-orders`, `py-orders`, `java-orders`), so
   they no longer share the demo worker's `reserve`/`charge`/`ship`/`release`.
