@@ -74,6 +74,10 @@ attempt, a ready-made idempotency key.
 ESM and CommonJS both work (`import` or `require`, Node 18+), and both load the same module,
 so `instanceof ActivityFailure` holds wherever the error came from.
 
+Cancel gracefully with `worker.cancel(id, reason, { graceful: true })`: what the workflow awaits
+rejects with `CancelledFailure`, steps it starts afterwards run normally (compensate there), and
+rethrowing the failure ends it `CANCELLED`; `ctx.cancelRequested` says it was told.
+
 Cancel a whole workflow with `worker.cancel(id, reason)`: it ends as `CANCELLED` and the
 activities it was running get their `task.signal` aborted with a `CancelledFailure`.
 

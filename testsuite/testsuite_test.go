@@ -256,3 +256,27 @@ func TestContinueAsNewInVirtualTime(t *testing.T) {
 		t.Fatalf("%d runs, output %q", env.Runs(), out)
 	}
 }
+
+// A graceful cancel in virtual time: the code is told at its wait, its
+// compensation runs, and the workflow ends cancelled.
+func TestGracefulCancelInVirtualTime(t *testing.T) {
+	env := testsuite.NewEnv()
+	released := false
+	env.RegisterActivity("reserve", func(context.Context, []byte) ([]byte, error) { return []byte("r"), nil })
+	env.RegisterActivity("release", func(context.Context, []byte) ([]byte, error) { released = true; return nil, nil })
+	env.RequestCancelAfter(time.Hour, "customer left")
+	_, err := env.ExecuteWorkflow(func(ctx workflow.Context, in []byte) ([]byte, error) {
+		reserved, err := ctx.ExecuteActivity("reserve", in)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := ctx.NewTimer("settle", 24*time.Hour).Get(); err != nil {
+			ctx.ExecuteActivity("release", reserved)
+			return nil, err
+		}
+		return reserved, nil
+	}, nil)
+	if !errors.Is(err, testsuite.ErrWorkflowCancelled) || !released || env.Elapsed() != time.Hour {
+		t.Fatalf("err %v, released %v, elapsed %s", err, released, env.Elapsed())
+	}
+}

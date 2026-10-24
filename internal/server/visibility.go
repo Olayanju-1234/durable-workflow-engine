@@ -112,6 +112,8 @@ func describeRun(workflowID string, events []*history.HistoryEvent, st *state.St
 		Output:              st.Output,
 		ContinuedFromRunId:  st.ContinuedFromRunID,
 		ContinuedAsNewRunId: st.ContinuedAsNew.GetRunId(),
+		CancelRequested:     st.CancelRequestedEventID > 0,
+		CancelReason:        st.CancelReason,
 	}, nil
 }
 

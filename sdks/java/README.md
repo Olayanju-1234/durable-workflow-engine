@@ -62,6 +62,10 @@ Idempotent starts: `worker.start(type, input, id, new Workflowd.StartOptions().w
 returns the run already holding the id (`started` false) instead of failing with a 409;
 `withIdReusePolicy(Workflowd.IdReusePolicy.ALLOW_DUPLICATE)` lets a finished id start again.
 
+Cancel gracefully with `worker.cancel(id, reason, true)`: the step the workflow waits on throws
+`Workflowd.CancelledFailure`, steps it starts afterwards run normally (compensate there), and
+rethrowing it ends the workflow `CANCELLED`; `ctx.cancelRequested()` says it was told.
+
 For an engine with auth and TLS:
 `new Workflowd.Worker("https://…:8233", "worker-1", token, Workflowd.trustPem(Path.of("ca.pem")))`
 (pass `null` for the SSLContext with a public CA).

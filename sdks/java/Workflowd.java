@@ -364,6 +364,18 @@ public final class Workflowd {
         private int next = 0;
         private long observedEventId; // the newest step result the code has received
 
+        // Graceful cancellation: told at the first point the code waits. The decision that
+        // tells it records a cancel marker with the history length it saw; a replay hides later
+        // results until it reaches the marker, so the code is told at the same point every time.
+        private final long cancelAt;
+        private final Instant cancelTime;
+        private final String cancelReason;
+        private final long historyLength;
+        private long cutoff;
+        private int cutoffSeq;
+        private boolean delivered;
+        private final java.util.Set<Integer> interrupted = new java.util.HashSet<>();
+
         @SuppressWarnings("unchecked")
         Context(Map<String, Object> task) {
             this.task = task;
@@ -371,7 +383,30 @@ public final class Workflowd {
             Object s = task.get("steps");
             this.steps = s instanceof List ? (List<Object>) s : new ArrayList<>();
             this.now = instant(task.get("started_at"));
+            this.cancelAt = number(task.get("cancel_requested_event_id"));
+            this.cancelTime = instant(task.get("cancel_requested_at"));
+            this.cancelReason = str(task.get("cancel_reason"));
+            this.historyLength = number(task.get("history_length"));
+            for (Object o : steps) {
+                Map<String, Object> rec = (Map<String, Object>) o;
+                if ("MARKER".equals(str(rec.get("kind"))) && "cancel".equals(str(rec.get("marker")))) {
+                    cutoffSeq = (int) number(rec.get("sequence"));
+                    try {
+                        cutoff = Long.parseLong(text(rec, "output"));
+                    } catch (NumberFormatException e) {
+                        cutoff = -1;
+                    }
+                    break;
+                }
+            }
         }
+
+        private static long number(Object o) {
+            return o instanceof Number ? ((Number) o).longValue() : 0;
+        }
+
+        /** True once a graceful cancel has reached this workflow's code. */
+        public boolean cancelRequested() { return delivered; }
 
         public String input() { return text(task, "input"); }
         public byte[] inputBytes() { return bytes(task, "input"); }
@@ -566,6 +601,10 @@ public final class Workflowd {
                     bestId = id;
                 }
             }
+            if (best < 0 && cancelPending()) {
+                deliverCancel();
+                throw cancelFailure("");
+            }
             if (best < 0) throw new Suspend();
             if (cancelRest) {
                 for (int i = 0; i < futures.length; i++) {
@@ -664,6 +703,89 @@ public final class Workflowd {
             return seq >= 1 && seq <= steps.size() ? (Map<String, Object>) steps.get(seq - 1) : null;
         }
 
+        private boolean hasResult(int seq) {
+            Map<String, Object> rec = step(seq);
+            if (rec == null) return false;
+            String status = str(rec.get("status"));
+            return "COMPLETED".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status);
+        }
+
+        /**
+         * A step's recorded result as the code may see it now, or null. Before a replay reaches
+         * its cancel marker, results past the cutoff stay hidden: the decision that told the code
+         * had not seen them. Markers are always there.
+         */
+        private Map<String, Object> visible(int seq) {
+            if (!hasResult(seq)) return null;
+            Map<String, Object> rec = step(seq);
+            if (cutoff != 0 && !delivered && !"MARKER".equals(str(rec.get("kind")))
+                    && number(rec.get("resolved_event_id")) > cutoff) {
+                return null;
+            }
+            return rec;
+        }
+
+        private boolean cancelPending() { return cancelAt > 0 && !delivered; }
+
+        private CancelledFailure cancelFailure(String stepName) {
+            String why = "the workflow is being cancelled";
+            return new CancelledFailure(stepName, cancelReason.isEmpty() ? why : why + " (" + cancelReason + ")");
+        }
+
+        /** The name and kind of the step at seq, recorded or started in this replay. */
+        private String[] stepAt(int seq) {
+            Map<String, Object> rec = step(seq);
+            if (rec != null) return new String[] {str(rec.get("step_name")), str(rec.get("kind"))};
+            for (Map<String, Object> c : pending) {
+                if (number(c.get("sequence")) == seq && !"cancel_step".equals(str(c.get("type")))) {
+                    String type = str(c.get("type"));
+                    String kind = "schedule_activity".equals(type) ? "ACTIVITY" : "start_timer".equals(type) ? "TIMER"
+                            : "await_signal".equals(type) ? "SIGNAL" : "MARKER";
+                    return new String[] {str(c.get("step_name")), kind};
+                }
+            }
+            return new String[] {"", "MARKER"};
+        }
+
+        /**
+         * Tell the code it is being cancelled, where it waits: every step it started with no
+         * result it can see is interrupted (get() throws CancelledFailure) and, if still open,
+         * cancelled; the clock moves to the request. Steps it starts afterwards run normally.
+         */
+        private void deliverCancel() {
+            int seq = next + 1;
+            if (cutoffSeq == 0) {
+                Map<String, Object> cmd = new LinkedHashMap<>();
+                cmd.put("type", "record_marker");
+                cmd.put("step_name", "cancellation");
+                cmd.put("sequence", (long) seq);
+                cmd.put("marker", "cancel");
+                cmd.put("data", Long.toString(historyLength));
+                pending.add(cmd);
+            } else if (cutoff < 0) {
+                throw new NonDeterminism("cancel marker at step " + cutoffSeq + " is unreadable");
+            } else if (seq != cutoffSeq) {
+                throw new NonDeterminism("non-determinism: the cancellation reached the code at step " + seq
+                        + ", but history has it at step " + cutoffSeq);
+            }
+            next = seq;
+            for (int s = 1; s < seq; s++) {
+                String[] at = stepAt(s);
+                if ("MARKER".equals(at[1]) || visible(s) != null || cancelled.containsKey(s)) continue;
+                interrupted.add(s);
+                if (!hasResult(s)) {
+                    Map<String, Object> cmd = new LinkedHashMap<>();
+                    cmd.put("type", "cancel_step");
+                    cmd.put("step_name", at[0]);
+                    cmd.put("sequence", (long) s);
+                    cmd.put("reason", "the workflow is being cancelled");
+                    pending.add(cmd);
+                }
+            }
+            delivered = true;
+            if (cancelTime != null && (now == null || cancelTime.isAfter(now))) now = cancelTime;
+        }
+
         /** Move the clock to a step's result as the code receives it (not markers or cancels). */
         private void observe(int seq) {
             Map<String, Object> rec = step(seq);
@@ -712,15 +834,13 @@ public final class Workflowd {
             cmd.put("step_name", name);
             cmd.put("sequence", (long) seq);
             if (reason != null && !reason.isEmpty()) cmd.put("reason", reason);
-            ctx.pending.add(cmd);
+            // A replay may hide a cancel history already has (past its cutoff): don't send it again.
+            if (!ctx.hasResult(seq)) ctx.pending.add(cmd);
         }
 
-        /** The recorded step if it has a result: not started, in flight or retrying is null. */
+        /** The recorded result as the code may see it: not started, in flight, retrying or hidden is null. */
         Map<String, Object> recorded() {
-            Map<String, Object> rec = ctx.step(seq);
-            if (rec == null) return null;
-            String status = str(rec.get("status"));
-            return "COMPLETED".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status) ? rec : null;
+            return ctx.visible(seq);
         }
 
         /**
@@ -733,14 +853,20 @@ public final class Workflowd {
                 Object id = rec.get("resolved_event_id");
                 return id instanceof Number ? ((Number) id).longValue() : 0L;
             }
+            if (ctx.interrupted.contains(seq)) return ctx.cancelAt;
             Integer n = ctx.cancelled.get(seq);
             return n == null ? null : Long.MAX_VALUE / 2 + n;
         }
 
         private Map<String, Object> result() {
+            if (ctx.interrupted.contains(seq)) throw ctx.cancelFailure(name);
             Map<String, Object> rec = recorded();
             if (rec == null) {
                 if (ctx.cancelled.containsKey(seq)) throw new CancelledFailure(name, "cancelled");
+                if (ctx.cancelPending()) {
+                    ctx.deliverCancel();
+                    if (ctx.interrupted.contains(seq)) throw ctx.cancelFailure(name);
+                }
                 throw new Suspend(); // not started yet, in flight or being retried
             }
             String status = str(rec.get("status"));
@@ -781,11 +907,15 @@ public final class Workflowd {
         } catch (NonDeterminism e) {
             return new Decision(null, e.getMessage());
         } catch (Throwable t) {
-            // WorkflowFailure, an uncaught ActivityFailure, or a bug: fail the workflow.
+            // WorkflowFailure, an uncaught ActivityFailure, or a bug: fail the workflow. A
+            // CancelledFailure after a graceful cancel ends it CANCELLED.
             Map<String, Object> cmd = new LinkedHashMap<>();
             cmd.put("type", "fail_workflow");
             String m = t.getMessage();
             cmd.put("error", m == null ? t.toString() : m);
+            if (ctx.delivered && (t instanceof CancelledFailure || t.getCause() instanceof CancelledFailure)) {
+                cmd.put("cancelled", Boolean.TRUE);
+            }
             return new Decision(withLast(ctx.pending, cmd), null);
         }
     }
@@ -1046,8 +1176,17 @@ public final class Workflowd {
          * activities are turned away at their next heartbeat or completion.
          */
         public void cancel(String workflowId, String reason) throws IOException, InterruptedException {
+            cancel(workflowId, reason, false);
+        }
+
+        /**
+         * With {@code graceful}, tell the workflow code instead of ending it at once: the step it
+         * waits on throws {@link CancelledFailure}, and it may compensate before rethrowing it.
+         */
+        public void cancel(String workflowId, String reason, boolean graceful) throws IOException, InterruptedException {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("reason", reason == null ? "" : reason);
+            if (graceful) body.put("graceful", Boolean.TRUE);
             request("POST", "/api/workflows/" + enc(workflowId) + "/cancel", body);
         }
 

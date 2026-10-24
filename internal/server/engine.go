@@ -683,6 +683,9 @@ func (e *Engine) SignalWorkflowOnce(workflowID, signalName, requestID string, pa
 	if signalName == "" {
 		return fmt.Errorf("%w: signal name must not be empty", ErrInvalidArgument)
 	}
+	if isReservedID(signalName) {
+		return fmt.Errorf("%w: signal names starting with %q are reserved", ErrInvalidArgument, reservedPrefix)
+	}
 	if err := validateID(workflowID); err != nil {
 		return err
 	}
@@ -976,15 +979,22 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 			return e.continueAsNewLocked(w, decision)
 
 		case state.DecideFailWorkflow:
+			// Cancelled only if one was asked for: code that ends itself with a
+			// step's cancellation, unasked, has failed.
+			cancelled := decision.Cancelled && w.fold.State().CancelRequestedEventID > 0
 			failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowFailed{
-				WorkflowFailed: &history.WorkflowFailedEvent{Error: e.clip(decision.Error)},
+				WorkflowFailed: &history.WorkflowFailedEvent{Error: e.clip(decision.Error), Cancelled: cancelled},
 			}}
 			if err := e.appendLocked(w, failedEv, nextID); err != nil {
 				return err
 			}
-			e.metrics.workflowsFinished.With("failed").Inc()
+			how := "failed"
+			if cancelled {
+				how = "cancelled"
+			}
+			e.metrics.workflowsFinished.With(how).Inc()
 			e.metrics.workflowsActive.Dec()
-			e.log.Warn("workflow failed", "workflow_id", workflowID, "error", decision.Error)
+			e.log.Warn("workflow "+how, "workflow_id", workflowID, "error", decision.Error)
 			return nil
 
 		case state.DecideCancelStep:

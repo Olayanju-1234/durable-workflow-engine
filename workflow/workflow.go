@@ -32,12 +32,20 @@ package workflow
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
 
 // ErrCancelled is what Future.Get returns for a step that was cancelled.
 var ErrCancelled = errors.New("workflow: step cancelled")
+
+// ErrWorkflowCancelled is what Future.Get returns for the steps a workflow was
+// waiting on when a graceful cancel was requested (client.CancelWorkflow with
+// client.Graceful). It matches ErrCancelled too. The code may compensate (new
+// steps run normally) and then return an error matching it to end CANCELLED;
+// returning normally ends it COMPLETED.
+var ErrWorkflowCancelled = fmt.Errorf("%w: the workflow is being cancelled", ErrCancelled)
 
 // ContinueAsNewError, returned by a workflow function, ends this run and
 // starts a fresh one under the same workflow id, with an empty history and
@@ -190,6 +198,19 @@ type Context interface {
 	// Then return ContinueAsNew: a history that reaches its limit fails the
 	// workflow.
 	ContinueAsNewSuggested() bool
+
+	// CancelRequested reports whether a graceful cancel has reached the code:
+	// the steps it was waiting on then failed with ErrWorkflowCancelled. Sleep
+	// and WaitForSignal return no error, so check it after them:
+	//
+	//	ctx.Sleep("settle", time.Hour)
+	//	if ctx.CancelRequested() {
+	//		ctx.ExecuteActivity("release", reserved) // compensate
+	//		return nil, workflow.ErrWorkflowCancelled
+	//	}
+	//
+	// It turns true at the same point of the code on every replay.
+	CancelRequested() bool
 }
 
 // Future is the result of a durable call started without waiting for it. Get

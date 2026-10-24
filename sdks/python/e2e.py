@@ -205,6 +205,30 @@ def py_loop(ctx):
     return ctx.continue_as_new(str(total))
 
 
+# Graceful cancellation: the code is told at its wait, compensates, and lets
+# the cancellation end the workflow CANCELLED.
+released = [0]
+
+
+@worker.workflow("PyGraceful")
+def py_graceful(ctx):
+    reserved = ctx.activity("py-tick")
+    try:
+        ctx.sleep("settle", 3600)
+    except CancelledFailure:
+        if not ctx.cancel_requested:
+            raise RuntimeError("cancelled without a request")
+        ctx.activity("py-release", reserved)
+        raise
+    return "shipped"
+
+
+@worker.activity("py-release")
+def py_release(_payload):
+    released[0] += 1
+    return "released"
+
+
 @worker.workflow("PyAfterRestart")
 def py_after_restart(ctx):
     return ctx.activity("py-flaky", {"n": 41}, decode="json")
@@ -355,6 +379,32 @@ if same != {"workflow_id": "py-reuse", "run_id": first["run_id"], "started": Fal
     [r["run_id"] for r in worker.runs("py-reuse")] != [again["run_id"], first["run_id"]]
 ):
     fail(f"reuse: first {first}, same {same}, again {again}")
+
+graceful_id = worker.start_workflow("PyGraceful")
+for _ in range(100):
+    if any(s["step_name"] == "settle" for s in worker.describe(graceful_id)["steps"]):
+        break
+    time.sleep(0.05)
+else:
+    fail("graceful: never reached its sleep")
+worker.cancel(graceful_id, "customer left", graceful=True)
+for _ in range(100):
+    graceful = worker.describe(graceful_id)
+    if graceful["status"] == "CANCELLED":
+        break
+    if graceful["status"] not in ("RUNNING", "WAITING"):
+        fail(f"graceful: {graceful['status']} {graceful.get('error')}")
+    time.sleep(0.05)
+else:
+    fail("graceful: never ended")
+graceful_steps = " ".join(f"{s['step_name']}={s['status']}" for s in graceful["steps"])
+if (
+    graceful_steps != "py-tick=COMPLETED settle=CANCELLED cancellation=COMPLETED py-release=COMPLETED"
+    or released[0] != 1
+    or not graceful.get("cancel_requested")
+    or "being cancelled (customer left)" not in graceful.get("error", "")
+):
+    fail(f"graceful: steps {graceful_steps}, released {released[0]}, {graceful}")
 
 forever_id = worker.start_workflow("PyForever", execution_timeout=0.3)
 for _ in range(100):

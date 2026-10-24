@@ -287,6 +287,29 @@ class Context {
     this._suggestAt = task.suggest_continue_as_new_at ?? 0;
     this._observedEventId = 0; // the newest result the code has received
     this._continueAsNew = null;
+    // Graceful cancellation: told at the first point the code waits. The
+    // decision that tells it records a cancel marker with the history length
+    // it saw; a replay hides later results until it reaches the marker, so the
+    // code is told at the same point every time.
+    this._cancelAt = task.cancel_requested_event_id ?? 0;
+    this._cancelTime = millis(task.cancel_requested_at);
+    this._cancelReason = task.cancel_reason ?? '';
+    this._historyLength = task.history_length ?? 0;
+    this._cutoff = 0;
+    this._cutoffSeq = 0;
+    const marker = this._steps.find((s) => s.kind === 'MARKER' && s.marker === 'cancel');
+    if (marker) {
+      this._cutoffSeq = marker.sequence;
+      this._cutoff = Number.parseInt(readPayload(marker, 'output'), 10) || -1;
+    }
+    this._delivered = false;
+    this._interrupted = new Set(); // steps the code was waiting on when told
+    this._waiters = new Set(); // rejects of waitAny calls blocked until then
+  }
+
+  /** True once a graceful cancel has been delivered to this workflow's code. */
+  get cancelRequested() {
+    return this._delivered;
   }
 
   /**
@@ -436,6 +459,12 @@ class Context {
         bestId = id;
       }
     });
+    if (best < 0 && this._cancelPending()) {
+      // Rejected with CancelledFailure if the code is told while it waits here.
+      const p = new Promise((_resolve, reject) => this._waiters.add(reject));
+      p.catch(() => {});
+      return p;
+    }
     if (best < 0) return FOREVER();
     if (opts.cancelRest) promises.forEach((p, i) => i !== best && this.cancel(p, 'lost a waitAny race'));
     const winner = promises[best]._seq;
@@ -457,7 +486,8 @@ class Context {
     this._cancelled.set(seq, this._cancelled.size + 1);
     const command = { type: 'cancel_step', step_name: open?.name ?? this._steps[seq - 1]?.step_name, sequence: seq };
     if (reason) command.reason = reason;
-    this._pending.push(command);
+    // A replay may hide a cancel history already has (past its cutoff): don't send it again.
+    if (!this._hasResult(seq)) this._pending.push(command);
     open?.reject(new CancelledFailure(command.step_name, 'cancelled'));
   }
 
@@ -467,12 +497,75 @@ class Context {
    * next). null while it has no result.
    */
   _resolvedId(seq) {
-    const rec = this._steps[seq - 1];
-    if (rec && (rec.status === 'COMPLETED' || rec.status === 'FAILED' || rec.status === 'CANCELLED')) {
-      return rec.resolved_event_id ?? 0;
-    }
+    const rec = this._visible(seq);
+    if (rec) return rec.resolved_event_id ?? 0;
+    if (this._interrupted.has(seq)) return this._cancelAt;
     const n = this._cancelled.get(seq);
     return n === undefined ? null : Number.MAX_SAFE_INTEGER / 2 + n;
+  }
+
+  _hasResult(seq) {
+    const rec = this._steps[seq - 1];
+    return !!rec && (rec.status === 'COMPLETED' || rec.status === 'FAILED' || rec.status === 'CANCELLED');
+  }
+
+  /**
+   * A step's recorded result as the code may see it now, or null. Before a
+   * replay reaches its cancel marker, results past the cutoff stay hidden: the
+   * decision that told the code had not seen them. Markers are always there.
+   */
+  _visible(seq) {
+    if (!this._hasResult(seq)) return null;
+    const rec = this._steps[seq - 1];
+    if (this._cutoff !== 0 && !this._delivered && rec.kind !== 'MARKER' && (rec.resolved_event_id ?? 0) > this._cutoff) return null;
+    return rec;
+  }
+
+  _cancelPending() {
+    return this._cancelAt > 0 && !this._delivered;
+  }
+
+  _kindAt(seq) {
+    const rec = this._steps[seq - 1];
+    if (rec) return { name: rec.step_name, kind: rec.kind };
+    const cmd = this._pending.find((c) => c.sequence === seq && c.type !== 'cancel_step');
+    const kinds = { schedule_activity: 'ACTIVITY', start_timer: 'TIMER', await_signal: 'SIGNAL', record_marker: 'MARKER' };
+    return cmd ? { name: cmd.step_name, kind: kinds[cmd.type] } : { name: '', kind: 'MARKER' };
+  }
+
+  /**
+   * Tell the code it is being cancelled, where it waits: every step it started
+   * with no result it can see is interrupted (awaiting it rejects with
+   * CancelledFailure) and, if still open, cancelled; the clock moves to the
+   * request. Steps it starts afterwards (compensation) run normally.
+   */
+  _deliverCancel() {
+    const seq = this._next + 1;
+    if (this._cutoffSeq === 0) {
+      this._pending.push({ type: 'record_marker', step_name: 'cancellation', sequence: seq, marker: 'cancel', data: String(this._historyLength) });
+    } else if (this._cutoff < 0) {
+      this._replayError ??= `cancel marker at step ${this._cutoffSeq} is unreadable`;
+      return;
+    } else if (seq !== this._cutoffSeq) {
+      this._replayError ??= `non-determinism: the cancellation reached the code at step ${seq}, but history has it at step ${this._cutoffSeq}`;
+      return;
+    }
+    this._next = seq;
+    const why = `the workflow is being cancelled${this._cancelReason ? ` (${this._cancelReason})` : ''}`;
+    const toReject = [];
+    for (let s = 1; s < seq; s++) {
+      const { name, kind } = this._kindAt(s);
+      if (kind === 'MARKER' || this._visible(s) || this._cancelled.has(s)) continue;
+      this._interrupted.add(s);
+      if (!this._hasResult(s)) this._pending.push({ type: 'cancel_step', step_name: name, sequence: s, reason: 'the workflow is being cancelled' });
+      const open = this._open.get(s);
+      if (open) toReject.push(() => open.reject(new CancelledFailure(name, why)));
+    }
+    this._delivered = true;
+    if (this._cancelTime !== null && (this._now === null || this._cancelTime > this._now)) this._now = this._cancelTime;
+    for (const reject of toReject) reject();
+    for (const reject of this._waiters) reject(new CancelledFailure('', why));
+    this._waiters.clear();
   }
 
   /**
@@ -573,6 +666,7 @@ class Context {
       );
     }
     const seen = () => this._observe(seq);
+    if (!this._visible(seq)) return this._unresolved(seq, name); // in flight, retrying, or past the cutoff
     if (recorded.status === 'COMPLETED') {
       let value;
       try {
@@ -632,14 +726,20 @@ async function decide(fn, task) {
     },
     (err) => {
       // WorkflowFailure, an uncaught ActivityFailure, or a plain bug: all fail
-      // the workflow, exactly like returning an error from a Go workflow.
+      // the workflow, exactly like returning an error from a Go workflow. A
+      // CancelledFailure after a graceful cancel ends it CANCELLED.
       settled = { type: 'fail_workflow', error: err?.message ?? String(err) };
+      if (ctx._delivered && (err instanceof CancelledFailure || err?.cause instanceof CancelledFailure)) settled.cancelled = true;
     },
   );
   // Recorded results are settled promises, so the code runs as far as it can
   // in microtasks; by the next turn of the event loop it has finished or is
   // waiting on steps with no result.
   await nextTurn();
+  if (!settled && !ctx._replayError && !ctx._continueAsNew && ctx._cancelPending()) {
+    ctx._deliverCancel(); // it waits: tell it, and let it compensate
+    await nextTurn();
+  }
   if (ctx._replayError) return { replayError: ctx._replayError };
   if (ctx._continueAsNew) {
     // Steps started after the call never ran from the code's point of view.
@@ -862,12 +962,13 @@ class Worker {
   /**
    * Cancel a running workflow: it ends as CANCELLED, and workers running its
    * activities are told to stop (their task.signal aborts with CancelledFailure).
+   * With opts.graceful the workflow code is told instead: what it awaits rejects
+   * with CancelledFailure, and it may compensate before rethrowing it.
    */
-  async cancel(workflowId, reason = '') {
-    await this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}/cancel`, {
-      method: 'POST',
-      body: { reason },
-    });
+  async cancel(workflowId, reason = '', opts = {}) {
+    const body = { reason };
+    if (opts.graceful) body.graceful = true;
+    await this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}/cancel`, { method: 'POST', body });
   }
 
   /** Fetch a workflow's current state, or with opts.runId an earlier run's. */

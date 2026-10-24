@@ -3,7 +3,7 @@
 // The worker is given only the follower, so everything below also proves it
 // follows the leader hint. Prints PASS on success.
 import { createInterface } from 'node:readline';
-import { Worker, DEFAULT_VERSION, NonRetryableError } from './workflowd.mjs';
+import { Worker, DEFAULT_VERSION, NonRetryableError, CancelledFailure } from './workflowd.mjs';
 
 const [follower, leader] = process.argv.slice(2);
 const fail = (msg) => {
@@ -165,6 +165,25 @@ worker.workflow('TsLoop', async (ctx) => {
 });
 worker.activity('ts-tick', async () => 'tick');
 
+// Graceful cancellation: the code is told at its wait, compensates, and lets
+// the cancellation end the workflow CANCELLED.
+let released = 0;
+worker.workflow('TsGraceful', async (ctx) => {
+  const reserved = await ctx.activity('ts-tick', 'reserve');
+  try {
+    await ctx.sleep('settle', 3_600_000);
+  } catch (err) {
+    if (!(err instanceof CancelledFailure) || !ctx.cancelRequested) throw new Error(`unexpected: ${err}`);
+    await ctx.activity('ts-release', reserved);
+    throw err;
+  }
+  return 'shipped';
+});
+worker.activity('ts-release', async () => {
+  released++;
+  return 'released';
+});
+
 // Registered before anything starts, so the first start can't race it.
 await worker.register();
 worker.run().catch((err) => fail(`worker: ${err.message}`));
@@ -272,6 +291,27 @@ const reuseRuns = (await worker.runs('ts-reuse')).runs.map((r) => r.run_id).join
 if (refused !== 409 || same.started || same.runId !== first.runId || !again.started ||
     reuseRuns !== `${again.runId},${first.runId}`) {
   fail(`reuse: refused ${refused}, same ${JSON.stringify(same)}, again ${JSON.stringify(again)}, runs ${reuseRuns}`);
+}
+
+const gracefulId = await worker.startWorkflow('TsGraceful');
+for (let i = 0; ; i++) {
+  const wf = await worker.describe(gracefulId);
+  if (wf.steps.some((s) => s.step_name === 'settle')) break;
+  if (i > 100) fail('graceful: never reached its sleep');
+  await new Promise((r) => setTimeout(r, 50));
+}
+await worker.cancel(gracefulId, 'customer left', { graceful: true });
+let graceful;
+for (let i = 0; ; i++) {
+  graceful = await worker.describe(gracefulId);
+  if (graceful.status === 'CANCELLED') break;
+  if (i > 100 || (graceful.status !== 'RUNNING' && graceful.status !== 'WAITING')) fail(`graceful: status ${graceful.status} ${graceful.error}`);
+  await new Promise((r) => setTimeout(r, 50));
+}
+const gracefulSteps = graceful.steps.map((s) => `${s.step_name}=${s.status}`).join(' ');
+if (gracefulSteps !== 'ts-tick=COMPLETED settle=CANCELLED cancellation=COMPLETED ts-release=COMPLETED' || released !== 1 ||
+    !graceful.cancel_requested || graceful.cancel_reason !== 'customer left' || !/being cancelled \(customer left\)/.test(graceful.error)) {
+  fail(`graceful: steps ${gracefulSteps}, released ${released}, ${JSON.stringify(graceful)}`);
 }
 
 const foreverId = await worker.startWorkflow('TsForever', '', '', { executionTimeoutMs: 300 });

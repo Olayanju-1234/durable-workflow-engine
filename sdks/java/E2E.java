@@ -148,6 +148,25 @@ public final class E2E {
             return ctx.continueAsNew(String.valueOf(total));
         });
 
+        // Graceful cancellation: the code is told at its wait, compensates, and lets the
+        // cancellation end the workflow CANCELLED.
+        java.util.concurrent.atomic.AtomicInteger released = new java.util.concurrent.atomic.AtomicInteger();
+        worker.workflow("JavaGraceful", ctx -> {
+            String reserved = ctx.activity("java-tick", "reserve");
+            try {
+                ctx.sleep("settle", Duration.ofHours(1));
+            } catch (Workflowd.CancelledFailure e) {
+                if (!ctx.cancelRequested()) throw new IllegalStateException("cancelled without a request");
+                ctx.activity("java-release", reserved);
+                throw e;
+            }
+            return "shipped";
+        });
+        worker.activity("java-release", input -> {
+            released.incrementAndGet();
+            return "released";
+        });
+
         worker.workflow("JavaAfterRestart", ctx -> ctx.activity("java-tick", ""));
         worker.start();
 
@@ -182,6 +201,23 @@ public final class E2E {
                 || !"0".equals(earlier.get("input"))
                 || !String.valueOf(runs.get(1).get("run_id")).equals(earlier.get("continued_as_new_run_id"))) {
             fail("continue-as-new: output " + loop.get("output") + ", runs " + runs);
+        }
+
+        String gracefulId = worker.startWorkflow("JavaGraceful", "", "");
+        if (!reached(worker, gracefulId, "settle")) fail("graceful: never reached its sleep");
+        worker.cancel(gracefulId, "customer left", true);
+        Map<String, Object> graceful = null;
+        for (int i = 0; i < 100; i++) {
+            graceful = worker.describe(gracefulId);
+            String status = String.valueOf(graceful.get("status"));
+            if (status.equals("CANCELLED")) break;
+            if (!status.equals("RUNNING") && !status.equals("WAITING")) fail("graceful: " + status + " " + graceful.get("error"));
+            Thread.sleep(50);
+        }
+        if (!"java-tick=COMPLETED settle=CANCELLED cancellation=COMPLETED java-release=COMPLETED".equals(steps(graceful))
+                || released.get() != 1 || !Boolean.TRUE.equals(graceful.get("cancel_requested"))
+                || !String.valueOf(graceful.get("error")).contains("being cancelled (customer left)")) {
+            fail("graceful: steps " + steps(graceful) + ", released " + released.get() + ", " + graceful);
         }
 
         // Workflow id reuse: a finished id is refused by default, returned with USE_EXISTING, and

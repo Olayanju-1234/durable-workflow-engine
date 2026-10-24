@@ -326,16 +326,19 @@ async function terminate() {
   }
 }
 
-async function cancelWorkflow() {
+async function cancelWorkflow(graceful) {
   const id = state.selected;
   if (!id) return;
-  if (!confirm(`Cancel ${id}? It ends as CANCELLED, and workers running its activities are told to stop.`)) return;
+  const ask = graceful
+    ? `Ask ${id} to cancel? Its code is told and may compensate before it ends.`
+    : `Cancel ${id}? It ends as CANCELLED, and workers running its activities are told to stop.`;
+  if (!confirm(ask)) return;
   try {
     await api(`/api/workflows/${encodeURIComponent(id)}/cancel`, {
       method: 'POST',
-      body: JSON.stringify({ reason: $('term-reason').value }),
+      body: JSON.stringify({ reason: $('term-reason').value, graceful }),
     });
-    toast('Workflow cancelled');
+    toast(graceful ? 'Cancel requested — the workflow is winding down' : 'Workflow cancelled');
     $('term-reason').value = '';
     await refresh();
   } catch (err) {
@@ -466,7 +469,8 @@ function init() {
   $('scrim').addEventListener('click', closeDrawer);
   $('signal-form').addEventListener('submit', (e) => { e.preventDefault(); sendSignal(); });
   $('terminate-form').addEventListener('submit', (e) => { e.preventDefault(); terminate(); });
-  $('d-cancel').addEventListener('click', cancelWorkflow);
+  $('d-cancel').addEventListener('click', () => cancelWorkflow(false));
+  $('d-request-cancel').addEventListener('click', () => cancelWorkflow(true));
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;

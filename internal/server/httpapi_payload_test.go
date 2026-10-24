@@ -429,3 +429,47 @@ func TestHTTPIDPolicies(t *testing.T) {
 		t.Fatalf("reuse after it finished: %d %v", code, again)
 	}
 }
+
+// TestHTTPGracefulCancel: "graceful": true records a request and hands the
+// SDK a task saying so; a cancel marker and fail_workflow "cancelled" end it
+// CANCELLED. Without a request, "cancelled" is an ordinary failure.
+func TestHTTPGracefulCancel(t *testing.T) {
+	h := newAPIHarness(t)
+	h.do(t, "POST", "/api/workflow-types", `{"workflow_types":["G"],"worker_id":"w"}`)
+	_, start := h.do(t, "POST", "/api/workflows", `{"type":"G","workflow_id":"g"}`)
+	_, task := h.do(t, "GET", "/api/workflow-tasks?types=G", "")
+	if code, body := h.do(t, "POST", "/api/workflow-tasks/complete", fmt.Sprintf(
+		`{"workflow_id":"g","task_token":%q,"command":{"type":"start_timer","step_name":"wait","sequence":1,"delay_ms":3600000}}`, task["task_token"])); code != http.StatusOK {
+		t.Fatalf("timer: %d %v", code, body)
+	}
+	if code, body := h.do(t, "POST", "/api/workflows/g/terminate", `{"reason":"x","graceful":true}`); code != http.StatusBadRequest {
+		t.Fatalf("graceful terminate: %d %v, want 400", code, body)
+	}
+	code, body := h.do(t, "POST", "/api/workflows/g/cancel", `{"reason":"customer left","graceful":true}`)
+	if code != http.StatusOK || body["status"] != "cancel_requested" {
+		t.Fatalf("request cancel: %d %v", code, body)
+	}
+	_, task = h.do(t, "GET", "/api/workflow-tasks?types=G", "")
+	if task["cancel_requested_event_id"] != float64(3) || task["cancel_reason"] != "customer left" || task["cancel_requested_at"] == nil {
+		t.Fatalf("task = %v", task)
+	}
+	code, body = h.do(t, "POST", "/api/workflow-tasks/complete", fmt.Sprintf(`{"workflow_id":"g","task_token":%q,"commands":[
+		{"type":"record_marker","step_name":"cancellation","sequence":2,"marker":"cancel","data":"3"},
+		{"type":"cancel_step","step_name":"wait","sequence":1},
+		{"type":"fail_workflow","error":"the workflow is being cancelled","cancelled":true}]}`, task["task_token"]))
+	if code != http.StatusOK {
+		t.Fatalf("cancelled ending: %d %v", code, body)
+	}
+	_, wf := h.do(t, "GET", "/api/workflows/g", "")
+	if wf["status"] != "CANCELLED" || wf["cancel_requested"] != true || wf["run_id"] != start["run_id"] {
+		t.Fatalf("workflow = %v", wf)
+	}
+
+	h.do(t, "POST", "/api/workflows", `{"type":"G","workflow_id":"g2"}`)
+	_, task = h.do(t, "GET", "/api/workflow-tasks?types=G", "")
+	h.do(t, "POST", "/api/workflow-tasks/complete", fmt.Sprintf(
+		`{"workflow_id":"g2","task_token":%q,"command":{"type":"fail_workflow","error":"oops","cancelled":true}}`, task["task_token"]))
+	if _, wf := h.do(t, "GET", "/api/workflows/g2", ""); wf["status"] != "FAILED" {
+		t.Fatalf("cancelled without a request: %v, want FAILED", wf["status"])
+	}
+}

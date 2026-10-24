@@ -174,6 +174,12 @@ message SignalReceivedEvent {
   // with the same key (say, after a leader change hid the reply) finds it here
   // and is not recorded again. Older binaries ignore it.
   string request_id = 3;
+  // Set when this is not a signal but a request to cancel the workflow
+  // gracefully: workflow code is told, and may compensate before it ends
+  // CANCELLED. The signal name is reserved (__workflowd.cancel) and the payload
+  // is the reason. Older binaries would read an ordinary signal nobody waits
+  // for, so it needs history format 5.
+  bool cancel_request = 4;
 }
 
 // MarkerRecordedEvent records a value workflow code must see identically on
@@ -186,7 +192,8 @@ message MarkerRecordedEvent {
   // The change id (version markers) or the caller's name (side effects).
   string step_name = 1;
   int64 sequence = 2;
-  // "version" or "side_effect".
+  // "version", "side_effect" or "cancel" (where workflow code received a
+  // graceful cancellation; data is the history length its decision saw).
   string marker = 3;
   // Version markers: the version as a decimal string. Side effects: the result.
   bytes data = 4;

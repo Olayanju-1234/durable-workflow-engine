@@ -66,6 +66,43 @@ func (e *Engine) CancelWorkflow(workflowID, reason string) error {
 		&history.WorkflowFailedEvent{Error: msg, Cancelled: true})
 }
 
+// RequestCancelWorkflow cancels a running workflow gracefully: it records the
+// request and asks the workflow code to decide, which tells it (an error
+// matching workflow.ErrCancelled, a CancelledFailure) at its next wait. The
+// code may compensate; it ends CANCELLED when it lets the cancellation end it.
+// Asking again changes nothing. A workflow whose code does not handle it
+// (an SDK before 0.3.0) carries on; CancelWorkflow then ends it at once.
+func (e *Engine) RequestCancelWorkflow(workflowID, reason string) error {
+	if err := validateID(workflowID); err != nil {
+		return fmt.Errorf("%w: %q", ErrNotFound, workflowID)
+	}
+	w := e.lockWorkflow(workflowID)
+	defer e.unlockWorkflow(w)
+
+	events, st, err := e.historyLocked(w)
+	if err != nil {
+		return err
+	}
+	if len(events) == 0 {
+		return fmt.Errorf("%w: %q", ErrNotFound, workflowID)
+	}
+	if st.Status.IsTerminal() {
+		return fmt.Errorf("%w: %q is %s", ErrAlreadyTerminal, workflowID, st.Status)
+	}
+	if st.CancelRequestedEventID > 0 {
+		return nil
+	}
+	req := &history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
+		SignalReceived: &history.SignalReceivedEvent{SignalName: state.CancelSignal, Payload: []byte(e.clip(reason)), CancelRequest: true},
+	}}
+	if err := e.appendLocked(w, req, int64(len(events)+1)); err != nil {
+		return err
+	}
+	e.metrics.cancelRequests.Inc()
+	e.log.Info("workflow cancel requested", "workflow_id", workflowID, "reason", reason)
+	return e.advanceIfRegisteredLocked(w, st.WorkflowType)
+}
+
 // endWorkflow durably ends a non-terminal workflow with a WorkflowFailed event
 // (cancelled or terminated, as ev says) on a client's request.
 func (e *Engine) endWorkflow(workflowID, how, reason string, ev *history.WorkflowFailedEvent) error {

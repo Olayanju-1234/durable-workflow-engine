@@ -1312,8 +1312,12 @@ func (x *CompleteWorkflowCommand) GetOutput() []byte {
 }
 
 type FailWorkflowCommand struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Error         string                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Error string                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	// The workflow ends because it was cancelled: workflow code received a
+	// graceful cancellation and let it end the workflow. Recorded as CANCELLED
+	// when a cancel was requested, as FAILED otherwise.
+	Cancelled     bool `protobuf:"varint,2,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1353,6 +1357,13 @@ func (x *FailWorkflowCommand) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *FailWorkflowCommand) GetCancelled() bool {
+	if x != nil {
+		return x.Cancelled
+	}
+	return false
 }
 
 // ContinueAsNewCommand ends this run and starts a fresh one under the same
@@ -2918,8 +2929,12 @@ type GetWorkflowResponse struct {
 	// the run that followed it.
 	ContinuedFromRunId  string `protobuf:"bytes,5,opt,name=continued_from_run_id,json=continuedFromRunId,proto3" json:"continued_from_run_id,omitempty"`
 	ContinuedAsNewRunId string `protobuf:"bytes,6,opt,name=continued_as_new_run_id,json=continuedAsNewRunId,proto3" json:"continued_as_new_run_id,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// A graceful cancel was requested (and why): the workflow code has been
+	// told and is ending.
+	CancelRequested bool   `protobuf:"varint,7,opt,name=cancel_requested,json=cancelRequested,proto3" json:"cancel_requested,omitempty"`
+	CancelReason    string `protobuf:"bytes,8,opt,name=cancel_reason,json=cancelReason,proto3" json:"cancel_reason,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *GetWorkflowResponse) Reset() {
@@ -2990,6 +3005,20 @@ func (x *GetWorkflowResponse) GetContinuedFromRunId() string {
 func (x *GetWorkflowResponse) GetContinuedAsNewRunId() string {
 	if x != nil {
 		return x.ContinuedAsNewRunId
+	}
+	return ""
+}
+
+func (x *GetWorkflowResponse) GetCancelRequested() bool {
+	if x != nil {
+		return x.CancelRequested
+	}
+	return false
+}
+
+func (x *GetWorkflowResponse) GetCancelReason() string {
+	if x != nil {
+		return x.CancelReason
 	}
 	return ""
 }
@@ -3254,7 +3283,10 @@ type CancelWorkflowRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	WorkflowId string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
 	// Recorded in the workflow's terminal event.
-	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Graceful: record a cancel request and tell the workflow code, which may
+	// compensate before it ends CANCELLED, instead of ending the workflow now.
+	Graceful      bool `protobuf:"varint,3,opt,name=graceful,proto3" json:"graceful,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3301,6 +3333,13 @@ func (x *CancelWorkflowRequest) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *CancelWorkflowRequest) GetGraceful() bool {
+	if x != nil {
+		return x.Graceful
+	}
+	return false
 }
 
 type CancelWorkflowResponse struct {
@@ -3417,9 +3456,10 @@ const file_service_proto_rawDesc = "" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\"1\n" +
 	"\x17CompleteWorkflowCommand\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\fR\x06output\"+\n" +
+	"\x06output\x18\x01 \x01(\fR\x06output\"I\n" +
 	"\x13FailWorkflowCommand\x12\x14\n" +
-	"\x05error\x18\x01 \x01(\tR\x05error\"\x83\x01\n" +
+	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1c\n" +
+	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"\x83\x01\n" +
 	"\x14ContinueAsNewCommand\x12\x14\n" +
 	"\x05input\x18\x01 \x01(\fR\x05input\x12#\n" +
 	"\rworkflow_type\x18\x02 \x01(\tR\fworkflowType\x120\n" +
@@ -3544,14 +3584,16 @@ const file_service_proto_rawDesc = "" +
 	"\x06marker\x18\n" +
 	" \x01(\tR\x06marker\x12\x1d\n" +
 	"\n" +
-	"error_type\x18\v \x01(\tR\terrorType\"\x91\x02\n" +
+	"error_type\x18\v \x01(\tR\terrorType\"\xe1\x02\n" +
 	"\x13GetWorkflowResponse\x126\n" +
 	"\asummary\x18\x01 \x01(\v2\x1c.workflow.v1.WorkflowSummaryR\asummary\x12+\n" +
 	"\x05steps\x18\x02 \x03(\v2\x15.workflow.v1.StepInfoR\x05steps\x12\x14\n" +
 	"\x05input\x18\x03 \x01(\fR\x05input\x12\x16\n" +
 	"\x06output\x18\x04 \x01(\fR\x06output\x121\n" +
 	"\x15continued_from_run_id\x18\x05 \x01(\tR\x12continuedFromRunId\x124\n" +
-	"\x17continued_as_new_run_id\x18\x06 \x01(\tR\x13continuedAsNewRunId\":\n" +
+	"\x17continued_as_new_run_id\x18\x06 \x01(\tR\x13continuedAsNewRunId\x12)\n" +
+	"\x10cancel_requested\x18\a \x01(\bR\x0fcancelRequested\x12#\n" +
+	"\rcancel_reason\x18\b \x01(\tR\fcancelReason\":\n" +
 	"\x17ListWorkflowRunsRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\"\xab\x01\n" +
@@ -3568,11 +3610,12 @@ const file_service_proto_rawDesc = "" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x1b\n" +
-	"\x19TerminateWorkflowResponse\"P\n" +
+	"\x19TerminateWorkflowResponse\"l\n" +
 	"\x15CancelWorkflowRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x18\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x1a\n" +
+	"\bgraceful\x18\x03 \x01(\bR\bgraceful\"\x18\n" +
 	"\x16CancelWorkflowResponse*\xaa\x02\n" +
 	"\x0eWorkflowStatus\x12\x1f\n" +
 	"\x1bWORKFLOW_STATUS_UNSPECIFIED\x10\x00\x12\x1b\n" +

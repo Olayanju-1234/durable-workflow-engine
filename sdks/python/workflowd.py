@@ -246,10 +246,7 @@ class Future:
         self._ctx, self._seq, self._name, self._decode = ctx, seq, name, decode
 
     def _recorded(self) -> Optional[dict]:
-        rec = self._ctx._steps[self._seq - 1] if self._seq <= len(self._ctx._steps) else None
-        if rec is not None and rec.get("status") in ("COMPLETED", "FAILED", "CANCELLED"):
-            return rec
-        return None  # not started yet, in flight, or being retried
+        return self._ctx._visible(self._seq)  # None: not started yet, in flight, retrying, or past the cutoff
 
     def _resolved_id(self) -> Optional[float]:
         """Orders this step's result for wait_any: its event id, or for a step
@@ -257,6 +254,8 @@ class Future:
         rec = self._recorded()
         if rec is not None:
             return rec.get("resolved_event_id", 0)
+        if self._seq in self._ctx._interrupted:
+            return self._ctx._cancel_at
         n = self._ctx._cancelled.get(self._seq)
         return None if n is None else 2**62 + n
 
@@ -271,13 +270,22 @@ class Future:
         command = {"type": "cancel_step", "step_name": self._name, "sequence": self._seq}
         if reason:
             command["reason"] = reason
-        self._ctx._pending.append(command)
+        # A replay may hide a cancel history already has (past its cutoff): don't send it again.
+        if not self._ctx._has_result(self._seq):
+            self._ctx._pending.append(command)
 
     def result(self) -> Any:
+        ctx = self._ctx
+        if self._seq in ctx._interrupted:
+            raise ctx._cancel_failure(self._name)
         rec = self._recorded()
         if rec is None:
-            if self._seq in self._ctx._cancelled:
+            if self._seq in ctx._cancelled:
                 raise CancelledFailure(self._name)
+            if ctx._cancel_pending():
+                ctx._deliver_cancel()
+                if self._seq in ctx._interrupted:
+                    raise ctx._cancel_failure(self._name)
             raise _Yield()
         if rec.get("status") == "CANCELLED":
             raise CancelledFailure(self._name, rec.get("error") or "cancelled")
@@ -311,6 +319,100 @@ class Context:
         self.run_id: str = task.get("run_id", "")  # a workflow that continues as new gets a new one
         self._suggest_at: int = task.get("suggest_continue_as_new_at") or 0
         self._observed_event_id = 0  # the newest result the code has received
+        # Graceful cancellation: told at the first point the code waits. The
+        # decision that tells it records a cancel marker with the history length
+        # it saw; a replay hides later results until it reaches the marker, so
+        # the code is told at the same point every time.
+        self._cancel_at: int = task.get("cancel_requested_event_id") or 0
+        self._cancel_time = _parse_time(task.get("cancel_requested_at"))
+        self._cancel_reason: str = task.get("cancel_reason") or ""
+        self._history_length: int = task.get("history_length") or 0
+        self._cutoff, self._cutoff_seq = 0, 0
+        for s in self._steps:
+            if s.get("kind") == "MARKER" and s.get("marker") == "cancel":
+                self._cutoff_seq = s.get("sequence", 0)
+                try:
+                    self._cutoff = int(read_payload(s, "output"))
+                except ValueError:
+                    self._cutoff = -1
+                break
+        self._delivered = False
+        self._interrupted: set = set()  # steps the code was waiting on when told
+
+    @property
+    def cancel_requested(self) -> bool:
+        """True once a graceful cancel has reached this workflow's code."""
+        return self._delivered
+
+    def _has_result(self, seq: int) -> bool:
+        rec = self._steps[seq - 1] if seq <= len(self._steps) else None
+        return rec is not None and rec.get("status") in ("COMPLETED", "FAILED", "CANCELLED")
+
+    def _visible(self, seq: int) -> Optional[dict]:
+        """A step's recorded result as the code may see it now, or None. Before
+        a replay reaches its cancel marker, results past the cutoff stay hidden:
+        the decision that told the code had not seen them."""
+        if not self._has_result(seq):
+            return None
+        rec = self._steps[seq - 1]
+        if self._cutoff and not self._delivered and rec.get("kind") != "MARKER":
+            if (rec.get("resolved_event_id") or 0) > self._cutoff:
+                return None
+        return rec
+
+    def _cancel_pending(self) -> bool:
+        return self._cancel_at > 0 and not self._delivered
+
+    def _cancel_failure(self, step_name: str) -> "CancelledFailure":
+        why = "the workflow is being cancelled"
+        return CancelledFailure(step_name, f"{why} ({self._cancel_reason})" if self._cancel_reason else why)
+
+    def _kind_at(self, seq: int):
+        if seq <= len(self._steps):
+            rec = self._steps[seq - 1]
+            return rec.get("step_name", ""), rec.get("kind", "")
+        kinds = {"schedule_activity": "ACTIVITY", "start_timer": "TIMER", "await_signal": "SIGNAL", "record_marker": "MARKER"}
+        for c in self._pending:
+            if c.get("sequence") == seq and c.get("type") != "cancel_step":
+                return c.get("step_name", ""), kinds.get(c.get("type"), "")
+        return "", "MARKER"
+
+    def _deliver_cancel(self) -> None:
+        """Tell the code it is being cancelled, where it waits: every step it
+        started with no result it can see is interrupted (``result()`` raises
+        CancelledFailure) and, if still open, cancelled; the clock moves to the
+        request. Steps it starts afterwards (compensation) run normally."""
+        seq = self._next + 1
+        if self._cutoff_seq == 0:
+            self._pending.append(
+                {
+                    "type": "record_marker",
+                    "step_name": "cancellation",
+                    "sequence": seq,
+                    "marker": "cancel",
+                    "data": str(self._history_length),
+                }
+            )
+        elif self._cutoff < 0:
+            raise _NonDeterminism(f"cancel marker at step {self._cutoff_seq} is unreadable")
+        elif seq != self._cutoff_seq:
+            raise _NonDeterminism(
+                f"non-determinism: the cancellation reached the code at step {seq}, "
+                f"but history has it at step {self._cutoff_seq}"
+            )
+        self._next = seq
+        for s in range(1, seq):
+            name, kind = self._kind_at(s)
+            if kind == "MARKER" or self._visible(s) is not None or s in self._cancelled:
+                continue
+            self._interrupted.add(s)
+            if not self._has_result(s):
+                self._pending.append(
+                    {"type": "cancel_step", "step_name": name, "sequence": s, "reason": "the workflow is being cancelled"}
+                )
+        self._delivered = True
+        if self._cancel_time is not None and (self._now is None or self._cancel_time > self._now):
+            self._now = self._cancel_time
 
     def continue_as_new_suggested(self) -> bool:
         """True once the history has grown past the engine's warning share of
@@ -481,6 +583,9 @@ class Context:
             rid = f._resolved_id()
             if rid is not None and (best < 0 or rid < best_id):
                 best, best_id = i, rid
+        if best < 0 and self._cancel_pending():
+            self._deliver_cancel()
+            raise self._cancel_failure("")
         if best < 0:
             raise _Yield()
         if cancel_rest:
@@ -583,7 +688,10 @@ def decide(fn: Callable[[Context], Any], task: dict) -> dict:
     except _NonDeterminism as err:
         return {"replay_error": str(err)}
     except Exception as err:  # WorkflowFailure, uncaught ActivityFailure, bugs
-        return {"commands": ctx._pending + [{"type": "fail_workflow", "error": str(err) or repr(err)}]}
+        fail = {"type": "fail_workflow", "error": str(err) or repr(err)}
+        if ctx._delivered and (isinstance(err, CancelledFailure) or isinstance(err.__cause__, CancelledFailure)):
+            fail["cancelled"] = True  # a graceful cancel ends it CANCELLED
+        return {"commands": ctx._pending + [fail]}
 
 
 def _accepts_two_args(fn: Callable[..., Any]) -> bool:
@@ -824,13 +932,16 @@ class Worker:
             _put_payload(body, "payload", payload),
         )
 
-    def cancel(self, workflow_id: str, reason: str = "") -> None:
+    def cancel(self, workflow_id: str, reason: str = "", *, graceful: bool = False) -> None:
         """End a running workflow as CANCELLED. Workers running its activities
         are told to stop (the activity's ``lease_lost`` and ``cancelled`` events
-        are set)."""
-        self.conn.request(
-            "POST", f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}/cancel", {"reason": reason}
-        )
+        are set). With ``graceful`` the workflow code is told instead: the step
+        it waits on raises CancelledFailure, and it may compensate before it
+        re-raises it."""
+        body: dict = {"reason": reason}
+        if graceful:
+            body["graceful"] = True
+        self.conn.request("POST", f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}/cancel", body)
 
     def describe(self, workflow_id: str, run_id: Optional[str] = None) -> dict:
         """A workflow's current state; with ``run_id``, an earlier run's."""

@@ -341,13 +341,18 @@ var demoDef = state.WorkflowDefinition{
 
 // orderSaga is the Phase-2 code-based workflow: ordinary Go whose execution the
 // replay engine drives durably. reserve → sleep → charge (auto-retried) → ship; if
-// charge ultimately fails, release the reservation and fail with a wrapped error.
+// charge ultimately fails, or a graceful cancel arrives, release the reservation
+// and fail with a wrapped error (CANCELLED for the cancel).
 func orderSaga(ctx workflow.Context, input []byte) ([]byte, error) {
 	reserved, err := ctx.ExecuteActivity("reserve", input)
 	if err != nil {
 		return nil, err
 	}
 	ctx.Sleep("settle", 2*time.Second) // durable wait — survives restarts
+	if ctx.CancelRequested() {
+		ctx.ExecuteActivity("release", reserved)
+		return nil, fmt.Errorf("order cancelled, reservation released: %w", workflow.ErrWorkflowCancelled)
+	}
 	if _, err := ctx.ExecuteActivity("charge", reserved); err != nil {
 		ctx.ExecuteActivity("release", reserved) // compensation
 		return nil, fmt.Errorf("charge failed, reservation released: %w", err)

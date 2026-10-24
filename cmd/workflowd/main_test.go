@@ -64,7 +64,8 @@ func waitForTerminal(t *testing.T, e *server.Engine, id string) *server.GetWorkf
 			t.Fatalf("get %s: %v", id, err)
 		}
 		switch resp.GetSummary().GetStatus() {
-		case server.WorkflowStatus_WORKFLOW_STATUS_COMPLETED, server.WorkflowStatus_WORKFLOW_STATUS_FAILED:
+		case server.WorkflowStatus_WORKFLOW_STATUS_COMPLETED, server.WorkflowStatus_WORKFLOW_STATUS_FAILED,
+			server.WorkflowStatus_WORKFLOW_STATUS_CANCELLED:
 			return resp
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -145,5 +146,36 @@ func TestDemoWorkerIgnoresOtherSteps(t *testing.T) {
 	task, err := e.PollTask(ctx, "email-worker", "send-email")
 	if err != nil || task.GetWorkflowId() != "custom-1" {
 		t.Fatalf("email worker poll = %v, %v; want custom-1", task, err)
+	}
+}
+
+// A graceful cancel while the demo saga settles releases the reservation and
+// ends it CANCELLED: what the dashboard's "Request cancel" shows.
+func TestDemoSagaGracefulCancelReleases(t *testing.T) {
+	engine := demoHarness(t, 0)
+	id, err := engine.StartWorkflow("OrderSaga", []byte("order-9"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, _ := engine.GetWorkflow(id)
+		if len(resp.GetSteps()) >= 2 { // reserved, now settling
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the saga never reached its settle wait")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := engine.RequestCancelWorkflow(id, "customer left"); err != nil {
+		t.Fatal(err)
+	}
+	resp := waitForTerminal(t, engine, id)
+	if resp.GetSummary().GetStatus() != server.WorkflowStatus_WORKFLOW_STATUS_CANCELLED {
+		t.Fatalf("status %v: %s", resp.GetSummary().GetStatus(), resp.GetSummary().GetError())
+	}
+	if got := stepAttempts(resp); got["release"] != 1 || got["charge"] != 0 {
+		t.Fatalf("steps %v, want release run once and no charge", got)
 	}
 }

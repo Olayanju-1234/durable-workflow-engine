@@ -44,6 +44,10 @@ var ErrWorkflowFailed = errors.New("testsuite: workflow failed")
 // ErrBlocked means the workflow waits for a signal nobody will send.
 var ErrBlocked = errors.New("testsuite: workflow blocked")
 
+// ErrWorkflowCancelled wraps the error a workflow ended with after a graceful
+// cancel (RequestCancelAfter) it let end it.
+var ErrWorkflowCancelled = errors.New("testsuite: workflow cancelled")
+
 // maxDecisions stops a workflow that loops forever.
 const maxDecisions = 100_000
 
@@ -54,6 +58,7 @@ type scheduledSignal struct {
 	at      time.Time
 	name    string
 	payload []byte
+	cancel  bool // a graceful cancel request, its reason in payload
 }
 
 // Env is a single-use test environment: configure it, then call
@@ -102,6 +107,14 @@ func (e *Env) SetLogger(l *slog.Logger) {
 // SignalAfter sends a signal d after the workflow starts, in virtual time.
 func (e *Env) SignalAfter(d time.Duration, signal string, payload []byte) {
 	e.signals = append(e.signals, scheduledSignal{at: e.start.Add(d), name: signal, payload: payload})
+	slices.SortStableFunc(e.signals, func(a, b scheduledSignal) int { return a.at.Compare(b.at) })
+}
+
+// RequestCancelAfter asks, d after the workflow starts in virtual time, for it
+// to be cancelled gracefully, as client.CancelWorkflow with client.Graceful
+// does: the code is told at its next wait and may compensate.
+func (e *Env) RequestCancelAfter(d time.Duration, reason string) {
+	e.signals = append(e.signals, scheduledSignal{at: e.start.Add(d), payload: []byte(reason), cancel: true})
 	slices.SortStableFunc(e.signals, func(a, b scheduledSignal) int { return a.at.Compare(b.at) })
 }
 
@@ -174,6 +187,9 @@ func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 				case state.DecideCompleteWorkflow:
 					return d.Output, nil
 				case state.DecideFailWorkflow:
+					if st, err := e.state(); err == nil && d.Cancelled && st.CancelRequestedEventID > 0 {
+						return nil, fmt.Errorf("%w: %s", ErrWorkflowCancelled, d.Error)
+					}
 					return nil, fmt.Errorf("%w: %s", ErrWorkflowFailed, d.Error)
 				case state.DecideContinueAsNew:
 					if d.WorkflowType != "" {
@@ -224,6 +240,13 @@ func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 				TimerFired: &history.TimerFiredEvent{StepName: h.timer.StepName, Sequence: h.timer.Sequence},
 			}})
 			decide = true
+		case h.signal != nil && h.signal.cancel:
+			if st, err := e.state(); err == nil && st.CancelRequestedEventID == 0 {
+				e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
+					SignalReceived: &history.SignalReceivedEvent{SignalName: state.CancelSignal, Payload: h.signal.payload, CancelRequest: true},
+				}})
+				decide = true
+			}
 		case h.signal != nil:
 			e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
 				SignalReceived: &history.SignalReceivedEvent{SignalName: h.signal.name, Payload: h.signal.payload},

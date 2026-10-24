@@ -556,6 +556,37 @@ ctx.CancelStep(race[1-i]) // a no-op if the loser already has a result</code></p
       dashboard's <em>Cancel</em> button.
     </p>
     <p>
+      <strong>Cancel gracefully</strong> when the workflow has something to undo. Instead of ending it, the
+      request is delivered to the workflow code at its next wait: the steps it is waiting on fail with a
+      cancellation, the ones still running are cancelled, and steps it starts afterwards run normally, so it
+      can compensate. It ends <code>CANCELLED</code> if it lets the cancellation end it, or
+      <code>COMPLETED</code> if it returns normally.
+    </p>
+    <pre data-lang="go"><code>reserved, err := ctx.ExecuteActivity("reserve", order)
+if err != nil {
+	return nil, err
+}
+if _, err := ctx.NewTimer("ship-window", 48*time.Hour).Get(); err != nil {
+	if errors.Is(err, workflow.ErrWorkflowCancelled) {
+		ctx.ExecuteActivity("release", reserved) // compensation runs normally
+	}
+	return nil, err // CANCELLED
+}
+
+// elsewhere
+c.CancelWorkflow(ctx, "order-42", "customer changed their mind", client.Graceful())</code></pre>
+    <p>
+      TypeScript: <code>worker.cancel(id, reason, { graceful: true })</code>; what the code awaits rejects with
+      <code>CancelledFailure</code> (rethrow it to end <code>CANCELLED</code>). Python:
+      <code>worker.cancel(id, reason, graceful=True)</code>; <code>CancelledFailure</code>, re-raise it. Java:
+      <code>worker.cancel(id, reason, true)</code>; <code>Workflowd.CancelledFailure</code>. HTTP:
+      <code>POST /api/workflows/{id}/cancel</code> with <code>{"graceful": true}</code>; the dashboard's
+      <em>Request cancel</em>. Go's <code>Sleep</code> and <code>WaitForSignal</code> return no error, so check
+      <code>ctx.CancelRequested()</code> after them (every SDK has it). The cancellation reaches the code at the
+      same point on every replay: the first decision to deliver it records a <code>cancellation</code> marker
+      step. A workflow whose SDK predates 0.3.0 ignores the request; cancel it the hard way.
+    </p>
+    <p>
       <strong>Workers are told.</strong> When an activity's step is cancelled or its workflow
       finishes, the worker's next heartbeat or completion is refused with a cancellation (HTTP
       <code>409</code> with <code>"cancelled": true</code>; gRPC <code>FAILED_PRECONDITION</code>
@@ -1115,6 +1146,8 @@ DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
 → 200 {"status":"terminated"}</code></pre>
 
     <h3>Cancel a workflow</h3>
+    <p>With <code>{"graceful": true}</code> the workflow code is told and may compensate first
+      (<code>200 {"status":"cancel_requested"}</code>); describing it then shows <code>"cancel_requested": true</code>.</p>
     <pre data-lang="sh"><code>POST /api/workflows/{id}/cancel
 {"reason":"customer cancelled the order"}
 → 200 {"status":"cancelled"}</code></pre>
@@ -1157,6 +1190,7 @@ DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
         <tr><td><code>workflowd_leases_expired_total</code></td><td>counter</td><td>Tasks reclaimed from dead workers</td></tr>
         <tr><td><code>workflowd_retries_scheduled_total</code></td><td>counter</td><td>Retries armed after a failed attempt</td></tr>
         <tr><td><code>workflowd_steps_cancelled_total</code></td><td>counter</td><td>Open steps workflow code cancelled</td></tr>
+        <tr><td><code>workflowd_cancel_requests_total</code></td><td>counter</td><td>Graceful cancels requested (the code was told)</td></tr>
         <tr><td><code>workflowd_activity_timeouts_total{timeout}</code></td><td>counter</td><td>Attempts past their <code>start_to_close</code>, steps past their <code>schedule_to_close</code></td></tr>
         <tr><td><code>workflowd_signals_received_total</code></td><td>counter</td><td>Signals durably recorded</td></tr>
         <tr><td><code>workflowd_timers_fired_total</code></td><td>counter</td><td>Durable timers that reached their deadline</td></tr>

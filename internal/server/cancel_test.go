@@ -112,7 +112,8 @@ func TestCancelledTimerNeverFires(t *testing.T) {
 	e := timeoutEngine(t, newStore(t, t.TempDir()), map[string]workflow.Func{
 		"Twice": func(ctx workflow.Context, in []byte) ([]byte, error) {
 			callback := ctx.WaitForSignalAsync("first", "callback")
-			timer := ctx.NewTimer("deadline", 150*time.Millisecond)
+			// Long enough that the test's signal always wins, even under -race load.
+			timer := ctx.NewTimer("deadline", time.Second)
 			if ctx.WaitAny(callback, timer) == 0 {
 				ctx.CancelStep(timer)
 			}
@@ -133,7 +134,7 @@ func TestCancelledTimerNeverFires(t *testing.T) {
 	if got, want := stepStatuses(t, e, id), "first=COMPLETED deadline=CANCELLED second=SCHEDULED"; got != want {
 		t.Fatalf("steps %q, want %q", got, want)
 	}
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond) // past the timer's deadline
 	evs, _ := e.store.ReadAll(id)
 	for _, ev := range evs {
 		if ev.GetTimerFired() != nil {

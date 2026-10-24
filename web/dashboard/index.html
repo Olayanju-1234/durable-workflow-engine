@@ -169,7 +169,8 @@
       </form>
       <form class="action-row" id="terminate-form">
         <input type="text" id="term-reason" placeholder="reason (optional)" aria-label="Cancel or terminate reason">
-        <button class="btn btn-secondary" id="d-cancel" type="button" title="End it as CANCELLED; workers running its activities are told to stop">Cancel</button>
+        <button class="btn btn-secondary" id="d-request-cancel" type="button" title="Tell the workflow code it is being cancelled: it may compensate before it ends CANCELLED">Request cancel</button>
+        <button class="btn btn-secondary" id="d-cancel" type="button" title="End it as CANCELLED now; workers running its activities are told to stop">Cancel</button>
         <button class="btn btn-danger" id="d-terminate" type="submit" title="Emergency stop: end it as TERMINATED">Cut the warp</button>
       </form>
     </div>

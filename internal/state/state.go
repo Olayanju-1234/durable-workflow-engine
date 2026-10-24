@@ -151,6 +151,11 @@ type State struct {
 	ContinuedFromRunID string
 	// ContinuedAsNew describes the next run, once Status is StatusContinuedAsNew.
 	ContinuedAsNew *history.ContinuedAsNew
+	// CancelRequestedEventID is the event that asked to cancel the workflow
+	// gracefully (zero: none), with its time and reason.
+	CancelRequestedEventID int64
+	CancelRequestedAt      int64
+	CancelReason           string
 	// ExecutionTimeout is how long after StartedAt the workflow times out
 	// (zero = never).
 	ExecutionTimeout time.Duration
@@ -239,6 +244,13 @@ func (f *Folder) FormatOf(ev *history.HistoryEvent) uint32 {
 	switch attr := ev.GetAttributes().(type) {
 	case *history.HistoryEvent_MarkerRecorded:
 		need = max(need, history.FormatMarkers)
+		if attr.MarkerRecorded.GetMarker() == MarkerCancel {
+			need = max(need, history.FormatRuns)
+		}
+	case *history.HistoryEvent_SignalReceived:
+		if attr.SignalReceived.GetCancelRequest() {
+			need = max(need, history.FormatRuns)
+		}
 	case *history.HistoryEvent_StepScheduled:
 		if attr.StepScheduled.GetSequence() > f.lastSeq && f.open+f.retrying > 0 {
 			need = max(need, history.FormatParallelSteps)
@@ -432,6 +444,15 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 
 	case *history.HistoryEvent_SignalReceived:
 		sr := attr.SignalReceived
+		if sr.GetCancelRequest() {
+			// Not a signal: the workflow code is to be told it is being cancelled.
+			if st.CancelRequestedEventID == 0 {
+				st.CancelRequestedEventID, st.CancelRequestedAt = ev.GetEventId(), ev.GetTimestamp()
+				st.CancelReason = string(sr.GetPayload())
+			}
+			resolves = true
+			break
+		}
 		st.Signals = append(st.Signals, ReceivedSignal{Name: sr.GetSignalName(), Payload: sr.GetPayload()})
 		if id := sr.GetRequestId(); id != "" {
 			if st.SignalRequests == nil {
