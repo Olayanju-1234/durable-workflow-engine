@@ -656,6 +656,31 @@ ctx.CancelStep(race[1-i]) // a no-op if the loser already has a result</code></p
         recovery.</li>
     </ul>
 
+    <h3 id="workflow-ids">Workflow ids: reuse and conflicts</h3>
+    <p>
+      Start a workflow under your own id (an order number, a delivery id) and a second start with that id
+      fails with <code>ALREADY_EXISTS</code> / <code>409</code>: that is what makes starts idempotent. Two
+      options change it:
+    </p>
+    <table>
+      <thead><tr><th>Option</th><th>Values</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td>id reuse policy</td><td><code>REJECT_DUPLICATE</code> (default), <code>ALLOW_DUPLICATE</code>, <code>ALLOW_DUPLICATE_FAILED_ONLY</code></td><td>Whether an id whose run has <em>finished</em> may start a new run (only after a failure, timeout, cancel or terminate, for the last). The finished run is kept as an earlier run of the id.</td></tr>
+        <tr><td>id conflict policy</td><td><code>FAIL</code> (default), <code>USE_EXISTING</code></td><td>What a start does when the id is taken (a run still going, or a finished one it may not replace): fail, or return that run (<code>started: false</code>).</td></tr>
+      </tbody>
+    </table>
+    <pre data-lang="go"><code>s, err := c.Start(ctx, "Provision", input, client.WithWorkflowID("tenant-42"),
+	client.WithIDReusePolicy(client.AllowDuplicateFailedOnly), client.WithIDConflictPolicy(client.UseExisting))
+// s.Started is false if tenant-42 was already being provisioned, or provisioned successfully.</code></pre>
+    <p>
+      TypeScript: <code>worker.start(type, input, { workflowId, idReusePolicy: 'ALLOW_DUPLICATE', idConflictPolicy: 'USE_EXISTING' })</code>
+      → <code>{ workflowId, runId, started }</code>. Python: <code>worker.start(type, input, id, id_reuse_policy=..., id_conflict_policy=...)</code>.
+      Java: <code>worker.start(type, input, id, new Workflowd.StartOptions().withIdReusePolicy(...))</code>. HTTP:
+      <code>"id_reuse_policy"</code> and <code>"id_conflict_policy"</code> on <code>POST /api/workflows</code>; a returned
+      existing run answers <code>200</code> instead of <code>201</code>. Starts racing for one id are decided under
+      the workflow's lock: exactly one begins a run.
+    </p>
+
     <h2 id="limits">Limits</h2>
     <p>Each run's history and each payload are bounded, the same on HTTP and gRPC:</p>
     <table>
@@ -1061,10 +1086,12 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
 
     <h3>Start a workflow</h3>
     <pre data-lang="sh"><code>POST /api/workflows
-{"type":"OrderSaga","input":"order-42","workflow_id":"optional","execution_timeout_ms":86400000}
-→ 201 {"workflow_id":"order-42","run_id":"9f3c0a51e2d47b68"}</code></pre>
+{"type":"OrderSaga","input":"order-42","workflow_id":"optional","execution_timeout_ms":86400000,
+ "id_reuse_policy":"ALLOW_DUPLICATE_FAILED_ONLY","id_conflict_policy":"USE_EXISTING"}
+→ 201 {"workflow_id":"order-42","run_id":"9f3c0a51e2d47b68","started":true}</code></pre>
     <p>
-      A duplicate <code>workflow_id</code> returns <code>409</code>; an unregistered type
+      A taken <code>workflow_id</code> returns <code>409</code>, or <code>200</code> with the existing run under
+      <code>"id_conflict_policy":"USE_EXISTING"</code> (<a href="#workflow-ids">Workflow ids</a>); an unregistered type
       returns <code>400</code>. <code>execution_timeout_ms</code> is optional
       (<a href="#timeouts">Timeouts</a>).
     </p>

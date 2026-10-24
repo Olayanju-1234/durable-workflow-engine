@@ -28,7 +28,7 @@ import (
 //
 //	GET  /api/health
 //	GET  /api/workflows[?status=RUNNING&q=&limit=&offset=]
-//	POST /api/workflows                      {"type","input","workflow_id","execution_timeout_ms"}
+//	POST /api/workflows                      {"type","input","workflow_id","execution_timeout_ms","id_reuse_policy","id_conflict_policy"}
 //	GET  /api/workflows/{id}[?run_id=]
 //	GET  /api/workflows/{id}/runs
 //	POST /api/workflows/{id}/terminate       {"reason"}
@@ -434,6 +434,10 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		WorkflowID  string  `json:"workflow_id"`
 		// Optional: the workflow times out this long after it starts.
 		ExecutionTimeoutMs int64 `json:"execution_timeout_ms"`
+		// Optional: "ALLOW_DUPLICATE", "ALLOW_DUPLICATE_FAILED_ONLY" or
+		// "REJECT_DUPLICATE" (default); "FAIL" (default) or "USE_EXISTING".
+		IDReusePolicy    string `json:"id_reuse_policy"`
+		IDConflictPolicy string `json:"id_conflict_policy"`
 	}
 	if err := a.decodeJSON(r, &body); err != nil {
 		writeError(w, decodeStatus(err), err)
@@ -448,8 +452,14 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
+	reuse, conflict, err := parseIDPolicies(body.IDReusePolicy, body.IDConflictPolicy)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	started, err := e.Start(body.Type, input, body.WorkflowID,
-		WithExecutionTimeout(time.Duration(body.ExecutionTimeoutMs)*time.Millisecond))
+		WithExecutionTimeout(time.Duration(body.ExecutionTimeoutMs)*time.Millisecond),
+		WithIDReusePolicy(reuse), WithIDConflictPolicy(conflict))
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):
@@ -471,7 +481,33 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"workflow_id": started.WorkflowID, "run_id": started.RunID})
+	code := http.StatusCreated
+	if started.Existing {
+		code = http.StatusOK // the run that already held the id (USE_EXISTING)
+	}
+	writeJSON(w, code, map[string]any{"workflow_id": started.WorkflowID, "run_id": started.RunID, "started": !started.Existing})
+}
+
+// parseIDPolicies reads the start policies by name, case-insensitively, with
+// or without their enum prefix. Empty means the default.
+func parseIDPolicies(reuse, conflict string) (IdReusePolicy, IdConflictPolicy, error) {
+	var r IdReusePolicy
+	if reuse != "" {
+		v, ok := IdReusePolicy_value["ID_REUSE_POLICY_"+strings.TrimPrefix(strings.ToUpper(reuse), "ID_REUSE_POLICY_")]
+		if !ok {
+			return 0, 0, fmt.Errorf("%w: unknown id_reuse_policy %q (ALLOW_DUPLICATE, ALLOW_DUPLICATE_FAILED_ONLY, REJECT_DUPLICATE)", ErrInvalidArgument, reuse)
+		}
+		r = IdReusePolicy(v)
+	}
+	var c IdConflictPolicy
+	if conflict != "" {
+		v, ok := IdConflictPolicy_value["ID_CONFLICT_POLICY_"+strings.TrimPrefix(strings.ToUpper(conflict), "ID_CONFLICT_POLICY_")]
+		if !ok {
+			return 0, 0, fmt.Errorf("%w: unknown id_conflict_policy %q (FAIL, USE_EXISTING)", ErrInvalidArgument, conflict)
+		}
+		c = IdConflictPolicy(v)
+	}
+	return r, c, nil
 }
 
 func (a *HTTPAPI) terminateWorkflow(w http.ResponseWriter, r *http.Request) {

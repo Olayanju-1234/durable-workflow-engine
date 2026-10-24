@@ -71,6 +71,17 @@ export interface ActivityOptions {
 export interface StartWorkflowOptions {
   /** End the workflow as TIMED_OUT if it has not finished this long after it starts. */
   executionTimeoutMs?: number;
+  /** Whether an id whose run has finished may start a new run (default: REJECT_DUPLICATE). */
+  idReusePolicy?: 'ALLOW_DUPLICATE' | 'ALLOW_DUPLICATE_FAILED_ONLY' | 'REJECT_DUPLICATE';
+  /** USE_EXISTING returns the run that holds a taken id instead of failing (default: FAIL). */
+  idConflictPolicy?: 'FAIL' | 'USE_EXISTING';
+}
+
+/** What start() did: the run it began, or with USE_EXISTING the run that held the id. */
+export interface Started {
+  workflowId: string;
+  runId: string;
+  started: boolean;
 }
 
 /** What a workflow function receives. Every method is durable. */
@@ -248,6 +259,8 @@ export class Worker {
   register(): Promise<void>;
   /** Start a workflow; resolves to its id. */
   startWorkflow(type: string, input?: Payload, workflowId?: string, opts?: StartWorkflowOptions): Promise<string>;
+  /** Start a workflow and say which run began (or, with USE_EXISTING, which already held the id). */
+  start(type: string, input?: Payload, opts?: StartWorkflowOptions & { workflowId?: string }): Promise<Started>;
   /** Send an external signal to a running workflow; recorded once, even when retried. */
   signal(workflowId: string, name: string, payload?: Payload, opts?: { requestId?: string }): Promise<void>;
   /** End a running workflow as CANCELLED; workers running its activities are told to stop. */

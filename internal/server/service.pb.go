@@ -94,6 +94,115 @@ func (WorkflowStatus) EnumDescriptor() ([]byte, []int) {
 	return file_service_proto_rawDescGZIP(), []int{0}
 }
 
+// IdReusePolicy decides whether a start may begin a new run under a workflow
+// id whose latest run has finished. The finished run is kept as an earlier run.
+type IdReusePolicy int32
+
+const (
+	// REJECT_DUPLICATE: what every engine did before 0.3.0.
+	IdReusePolicy_ID_REUSE_POLICY_UNSPECIFIED     IdReusePolicy = 0
+	IdReusePolicy_ID_REUSE_POLICY_ALLOW_DUPLICATE IdReusePolicy = 1
+	// Only if the finished run failed, timed out, was cancelled or terminated.
+	IdReusePolicy_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY IdReusePolicy = 2
+	IdReusePolicy_ID_REUSE_POLICY_REJECT_DUPLICATE            IdReusePolicy = 3
+)
+
+// Enum value maps for IdReusePolicy.
+var (
+	IdReusePolicy_name = map[int32]string{
+		0: "ID_REUSE_POLICY_UNSPECIFIED",
+		1: "ID_REUSE_POLICY_ALLOW_DUPLICATE",
+		2: "ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY",
+		3: "ID_REUSE_POLICY_REJECT_DUPLICATE",
+	}
+	IdReusePolicy_value = map[string]int32{
+		"ID_REUSE_POLICY_UNSPECIFIED":                 0,
+		"ID_REUSE_POLICY_ALLOW_DUPLICATE":             1,
+		"ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY": 2,
+		"ID_REUSE_POLICY_REJECT_DUPLICATE":            3,
+	}
+)
+
+func (x IdReusePolicy) Enum() *IdReusePolicy {
+	p := new(IdReusePolicy)
+	*p = x
+	return p
+}
+
+func (x IdReusePolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (IdReusePolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_service_proto_enumTypes[1].Descriptor()
+}
+
+func (IdReusePolicy) Type() protoreflect.EnumType {
+	return &file_service_proto_enumTypes[1]
+}
+
+func (x IdReusePolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use IdReusePolicy.Descriptor instead.
+func (IdReusePolicy) EnumDescriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{1}
+}
+
+// IdConflictPolicy decides what a start does when its workflow id is taken.
+type IdConflictPolicy int32
+
+const (
+	// FAIL: the start fails with ALREADY_EXISTS (HTTP 409).
+	IdConflictPolicy_ID_CONFLICT_POLICY_UNSPECIFIED IdConflictPolicy = 0
+	IdConflictPolicy_ID_CONFLICT_POLICY_FAIL        IdConflictPolicy = 1
+	// Return the run that holds the id instead (started = false): "start, or
+	// give me the one already there".
+	IdConflictPolicy_ID_CONFLICT_POLICY_USE_EXISTING IdConflictPolicy = 2
+)
+
+// Enum value maps for IdConflictPolicy.
+var (
+	IdConflictPolicy_name = map[int32]string{
+		0: "ID_CONFLICT_POLICY_UNSPECIFIED",
+		1: "ID_CONFLICT_POLICY_FAIL",
+		2: "ID_CONFLICT_POLICY_USE_EXISTING",
+	}
+	IdConflictPolicy_value = map[string]int32{
+		"ID_CONFLICT_POLICY_UNSPECIFIED":  0,
+		"ID_CONFLICT_POLICY_FAIL":         1,
+		"ID_CONFLICT_POLICY_USE_EXISTING": 2,
+	}
+)
+
+func (x IdConflictPolicy) Enum() *IdConflictPolicy {
+	p := new(IdConflictPolicy)
+	*p = x
+	return p
+}
+
+func (x IdConflictPolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (IdConflictPolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_service_proto_enumTypes[2].Descriptor()
+}
+
+func (IdConflictPolicy) Type() protoreflect.EnumType {
+	return &file_service_proto_enumTypes[2]
+}
+
+func (x IdConflictPolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use IdConflictPolicy.Descriptor instead.
+func (IdConflictPolicy) EnumDescriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{2}
+}
+
 type Schedule struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Unique, and the prefix of every run's workflow id.
@@ -1618,8 +1727,13 @@ type StartWorkflowRequest struct {
 	// Optional: the workflow times out (status TIMED_OUT) this long after it
 	// starts. Zero means no limit.
 	ExecutionTimeoutMs int64 `protobuf:"varint,4,opt,name=execution_timeout_ms,json=executionTimeoutMs,proto3" json:"execution_timeout_ms,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Whether a workflow id whose run has finished may start a new run.
+	IdReusePolicy IdReusePolicy `protobuf:"varint,5,opt,name=id_reuse_policy,json=idReusePolicy,proto3,enum=workflow.v1.IdReusePolicy" json:"id_reuse_policy,omitempty"`
+	// What to do when the workflow id is taken: a run is still going, or a
+	// finished one the reuse policy does not let this start replace.
+	IdConflictPolicy IdConflictPolicy `protobuf:"varint,6,opt,name=id_conflict_policy,json=idConflictPolicy,proto3,enum=workflow.v1.IdConflictPolicy" json:"id_conflict_policy,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StartWorkflowRequest) Reset() {
@@ -1680,11 +1794,27 @@ func (x *StartWorkflowRequest) GetExecutionTimeoutMs() int64 {
 	return 0
 }
 
+func (x *StartWorkflowRequest) GetIdReusePolicy() IdReusePolicy {
+	if x != nil {
+		return x.IdReusePolicy
+	}
+	return IdReusePolicy_ID_REUSE_POLICY_UNSPECIFIED
+}
+
+func (x *StartWorkflowRequest) GetIdConflictPolicy() IdConflictPolicy {
+	if x != nil {
+		return x.IdConflictPolicy
+	}
+	return IdConflictPolicy_ID_CONFLICT_POLICY_UNSPECIFIED
+}
+
 type StartWorkflowResponse struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	WorkflowId string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
-	// The run this start began.
-	RunId         string `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The run this start began, or with USE_EXISTING the run that held the id.
+	RunId string `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// False when an existing run was returned instead of starting one.
+	Started       bool `protobuf:"varint,3,opt,name=started,proto3" json:"started,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1731,6 +1861,13 @@ func (x *StartWorkflowResponse) GetRunId() string {
 		return x.RunId
 	}
 	return ""
+}
+
+func (x *StartWorkflowResponse) GetStarted() bool {
+	if x != nil {
+		return x.Started
+	}
+	return false
 }
 
 type PollTaskRequest struct {
@@ -3307,17 +3444,20 @@ const file_service_proto_rawDesc = "" +
 	"\acommand\x18\x03 \x01(\v2\x1c.workflow.v1.WorkflowCommandR\acommand\x12!\n" +
 	"\freplay_error\x18\x04 \x01(\tR\vreplayError\x128\n" +
 	"\bcommands\x18\x05 \x03(\v2\x1c.workflow.v1.WorkflowCommandR\bcommands\"\x1e\n" +
-	"\x1cCompleteWorkflowTaskResponse\"\xa4\x01\n" +
+	"\x1cCompleteWorkflowTaskResponse\"\xb5\x02\n" +
 	"\x14StartWorkflowRequest\x12#\n" +
 	"\rworkflow_type\x18\x01 \x01(\tR\fworkflowType\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1f\n" +
 	"\vworkflow_id\x18\x03 \x01(\tR\n" +
 	"workflowId\x120\n" +
-	"\x14execution_timeout_ms\x18\x04 \x01(\x03R\x12executionTimeoutMs\"O\n" +
+	"\x14execution_timeout_ms\x18\x04 \x01(\x03R\x12executionTimeoutMs\x12B\n" +
+	"\x0fid_reuse_policy\x18\x05 \x01(\x0e2\x1a.workflow.v1.IdReusePolicyR\ridReusePolicy\x12K\n" +
+	"\x12id_conflict_policy\x18\x06 \x01(\x0e2\x1d.workflow.v1.IdConflictPolicyR\x10idConflictPolicy\"i\n" +
 	"\x15StartWorkflowResponse\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x15\n" +
-	"\x06run_id\x18\x02 \x01(\tR\x05runId\"M\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x18\n" +
+	"\astarted\x18\x03 \x01(\bR\astarted\"M\n" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1d\n" +
 	"\n" +
@@ -3443,7 +3583,16 @@ const file_service_proto_rawDesc = "" +
 	"\x19WORKFLOW_STATUS_TIMED_OUT\x10\x05\x12\x1e\n" +
 	"\x1aWORKFLOW_STATUS_TERMINATED\x10\x06\x12\x1d\n" +
 	"\x19WORKFLOW_STATUS_CANCELLED\x10\a\x12$\n" +
-	" WORKFLOW_STATUS_CONTINUED_AS_NEW\x10\b2\xc1\v\n" +
+	" WORKFLOW_STATUS_CONTINUED_AS_NEW\x10\b*\xac\x01\n" +
+	"\rIdReusePolicy\x12\x1f\n" +
+	"\x1bID_REUSE_POLICY_UNSPECIFIED\x10\x00\x12#\n" +
+	"\x1fID_REUSE_POLICY_ALLOW_DUPLICATE\x10\x01\x12/\n" +
+	"+ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY\x10\x02\x12$\n" +
+	" ID_REUSE_POLICY_REJECT_DUPLICATE\x10\x03*x\n" +
+	"\x10IdConflictPolicy\x12\"\n" +
+	"\x1eID_CONFLICT_POLICY_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17ID_CONFLICT_POLICY_FAIL\x10\x01\x12#\n" +
+	"\x1fID_CONFLICT_POLICY_USE_EXISTING\x10\x022\xc1\v\n" +
 	"\x0fWorkflowService\x12V\n" +
 	"\rStartWorkflow\x12!.workflow.v1.StartWorkflowRequest\x1a\".workflow.v1.StartWorkflowResponse\x12G\n" +
 	"\bPollTask\x12\x1c.workflow.v1.PollTaskRequest\x1a\x1d.workflow.v1.PollTaskResponse\x12S\n" +
@@ -3474,124 +3623,128 @@ func file_service_proto_rawDescGZIP() []byte {
 	return file_service_proto_rawDescData
 }
 
-var file_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_service_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_service_proto_msgTypes = make([]protoimpl.MessageInfo, 49)
 var file_service_proto_goTypes = []any{
 	(WorkflowStatus)(0),                  // 0: workflow.v1.WorkflowStatus
-	(*Schedule)(nil),                     // 1: workflow.v1.Schedule
-	(*ScheduleInfo)(nil),                 // 2: workflow.v1.ScheduleInfo
-	(*CreateScheduleRequest)(nil),        // 3: workflow.v1.CreateScheduleRequest
-	(*CreateScheduleResponse)(nil),       // 4: workflow.v1.CreateScheduleResponse
-	(*DeleteScheduleRequest)(nil),        // 5: workflow.v1.DeleteScheduleRequest
-	(*DeleteScheduleResponse)(nil),       // 6: workflow.v1.DeleteScheduleResponse
-	(*ListSchedulesRequest)(nil),         // 7: workflow.v1.ListSchedulesRequest
-	(*ListSchedulesResponse)(nil),        // 8: workflow.v1.ListSchedulesResponse
-	(*RegisterWorkflowTypeRequest)(nil),  // 9: workflow.v1.RegisterWorkflowTypeRequest
-	(*RegisterWorkflowTypeResponse)(nil), // 10: workflow.v1.RegisterWorkflowTypeResponse
-	(*PollWorkflowTaskRequest)(nil),      // 11: workflow.v1.PollWorkflowTaskRequest
-	(*WorkflowTask)(nil),                 // 12: workflow.v1.WorkflowTask
-	(*PollWorkflowTaskResponse)(nil),     // 13: workflow.v1.PollWorkflowTaskResponse
-	(*ScheduleActivityCommand)(nil),      // 14: workflow.v1.ScheduleActivityCommand
-	(*StartTimerCommand)(nil),            // 15: workflow.v1.StartTimerCommand
-	(*AwaitSignalCommand)(nil),           // 16: workflow.v1.AwaitSignalCommand
-	(*RecordMarkerCommand)(nil),          // 17: workflow.v1.RecordMarkerCommand
-	(*CancelStepCommand)(nil),            // 18: workflow.v1.CancelStepCommand
-	(*CompleteWorkflowCommand)(nil),      // 19: workflow.v1.CompleteWorkflowCommand
-	(*FailWorkflowCommand)(nil),          // 20: workflow.v1.FailWorkflowCommand
-	(*ContinueAsNewCommand)(nil),         // 21: workflow.v1.ContinueAsNewCommand
-	(*WorkflowCommand)(nil),              // 22: workflow.v1.WorkflowCommand
-	(*CompleteWorkflowTaskRequest)(nil),  // 23: workflow.v1.CompleteWorkflowTaskRequest
-	(*CompleteWorkflowTaskResponse)(nil), // 24: workflow.v1.CompleteWorkflowTaskResponse
-	(*StartWorkflowRequest)(nil),         // 25: workflow.v1.StartWorkflowRequest
-	(*StartWorkflowResponse)(nil),        // 26: workflow.v1.StartWorkflowResponse
-	(*PollTaskRequest)(nil),              // 27: workflow.v1.PollTaskRequest
-	(*Task)(nil),                         // 28: workflow.v1.Task
-	(*PollTaskResponse)(nil),             // 29: workflow.v1.PollTaskResponse
-	(*CompleteTaskRequest)(nil),          // 30: workflow.v1.CompleteTaskRequest
-	(*CompleteTaskResponse)(nil),         // 31: workflow.v1.CompleteTaskResponse
-	(*HeartbeatRequest)(nil),             // 32: workflow.v1.HeartbeatRequest
-	(*HeartbeatResponse)(nil),            // 33: workflow.v1.HeartbeatResponse
-	(*ActivityCancelled)(nil),            // 34: workflow.v1.ActivityCancelled
-	(*SignalWorkflowRequest)(nil),        // 35: workflow.v1.SignalWorkflowRequest
-	(*SignalWorkflowResponse)(nil),       // 36: workflow.v1.SignalWorkflowResponse
-	(*ListWorkflowsRequest)(nil),         // 37: workflow.v1.ListWorkflowsRequest
-	(*WorkflowSummary)(nil),              // 38: workflow.v1.WorkflowSummary
-	(*ListWorkflowsResponse)(nil),        // 39: workflow.v1.ListWorkflowsResponse
-	(*GetWorkflowRequest)(nil),           // 40: workflow.v1.GetWorkflowRequest
-	(*StepInfo)(nil),                     // 41: workflow.v1.StepInfo
-	(*GetWorkflowResponse)(nil),          // 42: workflow.v1.GetWorkflowResponse
-	(*ListWorkflowRunsRequest)(nil),      // 43: workflow.v1.ListWorkflowRunsRequest
-	(*RunInfo)(nil),                      // 44: workflow.v1.RunInfo
-	(*ListWorkflowRunsResponse)(nil),     // 45: workflow.v1.ListWorkflowRunsResponse
-	(*TerminateWorkflowRequest)(nil),     // 46: workflow.v1.TerminateWorkflowRequest
-	(*TerminateWorkflowResponse)(nil),    // 47: workflow.v1.TerminateWorkflowResponse
-	(*CancelWorkflowRequest)(nil),        // 48: workflow.v1.CancelWorkflowRequest
-	(*CancelWorkflowResponse)(nil),       // 49: workflow.v1.CancelWorkflowResponse
-	(*history.HistoryEvent)(nil),         // 50: history.v1.HistoryEvent
-	(*history.RetryPolicy)(nil),          // 51: history.v1.RetryPolicy
+	(IdReusePolicy)(0),                   // 1: workflow.v1.IdReusePolicy
+	(IdConflictPolicy)(0),                // 2: workflow.v1.IdConflictPolicy
+	(*Schedule)(nil),                     // 3: workflow.v1.Schedule
+	(*ScheduleInfo)(nil),                 // 4: workflow.v1.ScheduleInfo
+	(*CreateScheduleRequest)(nil),        // 5: workflow.v1.CreateScheduleRequest
+	(*CreateScheduleResponse)(nil),       // 6: workflow.v1.CreateScheduleResponse
+	(*DeleteScheduleRequest)(nil),        // 7: workflow.v1.DeleteScheduleRequest
+	(*DeleteScheduleResponse)(nil),       // 8: workflow.v1.DeleteScheduleResponse
+	(*ListSchedulesRequest)(nil),         // 9: workflow.v1.ListSchedulesRequest
+	(*ListSchedulesResponse)(nil),        // 10: workflow.v1.ListSchedulesResponse
+	(*RegisterWorkflowTypeRequest)(nil),  // 11: workflow.v1.RegisterWorkflowTypeRequest
+	(*RegisterWorkflowTypeResponse)(nil), // 12: workflow.v1.RegisterWorkflowTypeResponse
+	(*PollWorkflowTaskRequest)(nil),      // 13: workflow.v1.PollWorkflowTaskRequest
+	(*WorkflowTask)(nil),                 // 14: workflow.v1.WorkflowTask
+	(*PollWorkflowTaskResponse)(nil),     // 15: workflow.v1.PollWorkflowTaskResponse
+	(*ScheduleActivityCommand)(nil),      // 16: workflow.v1.ScheduleActivityCommand
+	(*StartTimerCommand)(nil),            // 17: workflow.v1.StartTimerCommand
+	(*AwaitSignalCommand)(nil),           // 18: workflow.v1.AwaitSignalCommand
+	(*RecordMarkerCommand)(nil),          // 19: workflow.v1.RecordMarkerCommand
+	(*CancelStepCommand)(nil),            // 20: workflow.v1.CancelStepCommand
+	(*CompleteWorkflowCommand)(nil),      // 21: workflow.v1.CompleteWorkflowCommand
+	(*FailWorkflowCommand)(nil),          // 22: workflow.v1.FailWorkflowCommand
+	(*ContinueAsNewCommand)(nil),         // 23: workflow.v1.ContinueAsNewCommand
+	(*WorkflowCommand)(nil),              // 24: workflow.v1.WorkflowCommand
+	(*CompleteWorkflowTaskRequest)(nil),  // 25: workflow.v1.CompleteWorkflowTaskRequest
+	(*CompleteWorkflowTaskResponse)(nil), // 26: workflow.v1.CompleteWorkflowTaskResponse
+	(*StartWorkflowRequest)(nil),         // 27: workflow.v1.StartWorkflowRequest
+	(*StartWorkflowResponse)(nil),        // 28: workflow.v1.StartWorkflowResponse
+	(*PollTaskRequest)(nil),              // 29: workflow.v1.PollTaskRequest
+	(*Task)(nil),                         // 30: workflow.v1.Task
+	(*PollTaskResponse)(nil),             // 31: workflow.v1.PollTaskResponse
+	(*CompleteTaskRequest)(nil),          // 32: workflow.v1.CompleteTaskRequest
+	(*CompleteTaskResponse)(nil),         // 33: workflow.v1.CompleteTaskResponse
+	(*HeartbeatRequest)(nil),             // 34: workflow.v1.HeartbeatRequest
+	(*HeartbeatResponse)(nil),            // 35: workflow.v1.HeartbeatResponse
+	(*ActivityCancelled)(nil),            // 36: workflow.v1.ActivityCancelled
+	(*SignalWorkflowRequest)(nil),        // 37: workflow.v1.SignalWorkflowRequest
+	(*SignalWorkflowResponse)(nil),       // 38: workflow.v1.SignalWorkflowResponse
+	(*ListWorkflowsRequest)(nil),         // 39: workflow.v1.ListWorkflowsRequest
+	(*WorkflowSummary)(nil),              // 40: workflow.v1.WorkflowSummary
+	(*ListWorkflowsResponse)(nil),        // 41: workflow.v1.ListWorkflowsResponse
+	(*GetWorkflowRequest)(nil),           // 42: workflow.v1.GetWorkflowRequest
+	(*StepInfo)(nil),                     // 43: workflow.v1.StepInfo
+	(*GetWorkflowResponse)(nil),          // 44: workflow.v1.GetWorkflowResponse
+	(*ListWorkflowRunsRequest)(nil),      // 45: workflow.v1.ListWorkflowRunsRequest
+	(*RunInfo)(nil),                      // 46: workflow.v1.RunInfo
+	(*ListWorkflowRunsResponse)(nil),     // 47: workflow.v1.ListWorkflowRunsResponse
+	(*TerminateWorkflowRequest)(nil),     // 48: workflow.v1.TerminateWorkflowRequest
+	(*TerminateWorkflowResponse)(nil),    // 49: workflow.v1.TerminateWorkflowResponse
+	(*CancelWorkflowRequest)(nil),        // 50: workflow.v1.CancelWorkflowRequest
+	(*CancelWorkflowResponse)(nil),       // 51: workflow.v1.CancelWorkflowResponse
+	(*history.HistoryEvent)(nil),         // 52: history.v1.HistoryEvent
+	(*history.RetryPolicy)(nil),          // 53: history.v1.RetryPolicy
 }
 var file_service_proto_depIdxs = []int32{
-	1,  // 0: workflow.v1.ScheduleInfo.schedule:type_name -> workflow.v1.Schedule
-	1,  // 1: workflow.v1.CreateScheduleRequest.schedule:type_name -> workflow.v1.Schedule
-	2,  // 2: workflow.v1.ListSchedulesResponse.schedules:type_name -> workflow.v1.ScheduleInfo
-	50, // 3: workflow.v1.WorkflowTask.history:type_name -> history.v1.HistoryEvent
-	12, // 4: workflow.v1.PollWorkflowTaskResponse.task:type_name -> workflow.v1.WorkflowTask
-	51, // 5: workflow.v1.ScheduleActivityCommand.retry_policy:type_name -> history.v1.RetryPolicy
-	14, // 6: workflow.v1.WorkflowCommand.schedule_activity:type_name -> workflow.v1.ScheduleActivityCommand
-	15, // 7: workflow.v1.WorkflowCommand.start_timer:type_name -> workflow.v1.StartTimerCommand
-	16, // 8: workflow.v1.WorkflowCommand.await_signal:type_name -> workflow.v1.AwaitSignalCommand
-	19, // 9: workflow.v1.WorkflowCommand.complete_workflow:type_name -> workflow.v1.CompleteWorkflowCommand
-	20, // 10: workflow.v1.WorkflowCommand.fail_workflow:type_name -> workflow.v1.FailWorkflowCommand
-	17, // 11: workflow.v1.WorkflowCommand.record_marker:type_name -> workflow.v1.RecordMarkerCommand
-	18, // 12: workflow.v1.WorkflowCommand.cancel_step:type_name -> workflow.v1.CancelStepCommand
-	21, // 13: workflow.v1.WorkflowCommand.continue_as_new:type_name -> workflow.v1.ContinueAsNewCommand
-	22, // 14: workflow.v1.CompleteWorkflowTaskRequest.command:type_name -> workflow.v1.WorkflowCommand
-	22, // 15: workflow.v1.CompleteWorkflowTaskRequest.commands:type_name -> workflow.v1.WorkflowCommand
-	28, // 16: workflow.v1.PollTaskResponse.task:type_name -> workflow.v1.Task
-	0,  // 17: workflow.v1.ListWorkflowsRequest.status_filter:type_name -> workflow.v1.WorkflowStatus
-	0,  // 18: workflow.v1.WorkflowSummary.status:type_name -> workflow.v1.WorkflowStatus
-	38, // 19: workflow.v1.ListWorkflowsResponse.workflows:type_name -> workflow.v1.WorkflowSummary
-	38, // 20: workflow.v1.GetWorkflowResponse.summary:type_name -> workflow.v1.WorkflowSummary
-	41, // 21: workflow.v1.GetWorkflowResponse.steps:type_name -> workflow.v1.StepInfo
-	0,  // 22: workflow.v1.RunInfo.status:type_name -> workflow.v1.WorkflowStatus
-	44, // 23: workflow.v1.ListWorkflowRunsResponse.runs:type_name -> workflow.v1.RunInfo
-	25, // 24: workflow.v1.WorkflowService.StartWorkflow:input_type -> workflow.v1.StartWorkflowRequest
-	27, // 25: workflow.v1.WorkflowService.PollTask:input_type -> workflow.v1.PollTaskRequest
-	30, // 26: workflow.v1.WorkflowService.CompleteTask:input_type -> workflow.v1.CompleteTaskRequest
-	35, // 27: workflow.v1.WorkflowService.SignalWorkflow:input_type -> workflow.v1.SignalWorkflowRequest
-	32, // 28: workflow.v1.WorkflowService.Heartbeat:input_type -> workflow.v1.HeartbeatRequest
-	37, // 29: workflow.v1.WorkflowService.ListWorkflows:input_type -> workflow.v1.ListWorkflowsRequest
-	40, // 30: workflow.v1.WorkflowService.GetWorkflow:input_type -> workflow.v1.GetWorkflowRequest
-	46, // 31: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
-	48, // 32: workflow.v1.WorkflowService.CancelWorkflow:input_type -> workflow.v1.CancelWorkflowRequest
-	43, // 33: workflow.v1.WorkflowService.ListWorkflowRuns:input_type -> workflow.v1.ListWorkflowRunsRequest
-	9,  // 34: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
-	11, // 35: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
-	23, // 36: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
-	3,  // 37: workflow.v1.WorkflowService.CreateSchedule:input_type -> workflow.v1.CreateScheduleRequest
-	5,  // 38: workflow.v1.WorkflowService.DeleteSchedule:input_type -> workflow.v1.DeleteScheduleRequest
-	7,  // 39: workflow.v1.WorkflowService.ListSchedules:input_type -> workflow.v1.ListSchedulesRequest
-	26, // 40: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
-	29, // 41: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
-	31, // 42: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
-	36, // 43: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
-	33, // 44: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
-	39, // 45: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
-	42, // 46: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
-	47, // 47: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
-	49, // 48: workflow.v1.WorkflowService.CancelWorkflow:output_type -> workflow.v1.CancelWorkflowResponse
-	45, // 49: workflow.v1.WorkflowService.ListWorkflowRuns:output_type -> workflow.v1.ListWorkflowRunsResponse
-	10, // 50: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
-	13, // 51: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
-	24, // 52: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
-	4,  // 53: workflow.v1.WorkflowService.CreateSchedule:output_type -> workflow.v1.CreateScheduleResponse
-	6,  // 54: workflow.v1.WorkflowService.DeleteSchedule:output_type -> workflow.v1.DeleteScheduleResponse
-	8,  // 55: workflow.v1.WorkflowService.ListSchedules:output_type -> workflow.v1.ListSchedulesResponse
-	40, // [40:56] is the sub-list for method output_type
-	24, // [24:40] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	3,  // 0: workflow.v1.ScheduleInfo.schedule:type_name -> workflow.v1.Schedule
+	3,  // 1: workflow.v1.CreateScheduleRequest.schedule:type_name -> workflow.v1.Schedule
+	4,  // 2: workflow.v1.ListSchedulesResponse.schedules:type_name -> workflow.v1.ScheduleInfo
+	52, // 3: workflow.v1.WorkflowTask.history:type_name -> history.v1.HistoryEvent
+	14, // 4: workflow.v1.PollWorkflowTaskResponse.task:type_name -> workflow.v1.WorkflowTask
+	53, // 5: workflow.v1.ScheduleActivityCommand.retry_policy:type_name -> history.v1.RetryPolicy
+	16, // 6: workflow.v1.WorkflowCommand.schedule_activity:type_name -> workflow.v1.ScheduleActivityCommand
+	17, // 7: workflow.v1.WorkflowCommand.start_timer:type_name -> workflow.v1.StartTimerCommand
+	18, // 8: workflow.v1.WorkflowCommand.await_signal:type_name -> workflow.v1.AwaitSignalCommand
+	21, // 9: workflow.v1.WorkflowCommand.complete_workflow:type_name -> workflow.v1.CompleteWorkflowCommand
+	22, // 10: workflow.v1.WorkflowCommand.fail_workflow:type_name -> workflow.v1.FailWorkflowCommand
+	19, // 11: workflow.v1.WorkflowCommand.record_marker:type_name -> workflow.v1.RecordMarkerCommand
+	20, // 12: workflow.v1.WorkflowCommand.cancel_step:type_name -> workflow.v1.CancelStepCommand
+	23, // 13: workflow.v1.WorkflowCommand.continue_as_new:type_name -> workflow.v1.ContinueAsNewCommand
+	24, // 14: workflow.v1.CompleteWorkflowTaskRequest.command:type_name -> workflow.v1.WorkflowCommand
+	24, // 15: workflow.v1.CompleteWorkflowTaskRequest.commands:type_name -> workflow.v1.WorkflowCommand
+	1,  // 16: workflow.v1.StartWorkflowRequest.id_reuse_policy:type_name -> workflow.v1.IdReusePolicy
+	2,  // 17: workflow.v1.StartWorkflowRequest.id_conflict_policy:type_name -> workflow.v1.IdConflictPolicy
+	30, // 18: workflow.v1.PollTaskResponse.task:type_name -> workflow.v1.Task
+	0,  // 19: workflow.v1.ListWorkflowsRequest.status_filter:type_name -> workflow.v1.WorkflowStatus
+	0,  // 20: workflow.v1.WorkflowSummary.status:type_name -> workflow.v1.WorkflowStatus
+	40, // 21: workflow.v1.ListWorkflowsResponse.workflows:type_name -> workflow.v1.WorkflowSummary
+	40, // 22: workflow.v1.GetWorkflowResponse.summary:type_name -> workflow.v1.WorkflowSummary
+	43, // 23: workflow.v1.GetWorkflowResponse.steps:type_name -> workflow.v1.StepInfo
+	0,  // 24: workflow.v1.RunInfo.status:type_name -> workflow.v1.WorkflowStatus
+	46, // 25: workflow.v1.ListWorkflowRunsResponse.runs:type_name -> workflow.v1.RunInfo
+	27, // 26: workflow.v1.WorkflowService.StartWorkflow:input_type -> workflow.v1.StartWorkflowRequest
+	29, // 27: workflow.v1.WorkflowService.PollTask:input_type -> workflow.v1.PollTaskRequest
+	32, // 28: workflow.v1.WorkflowService.CompleteTask:input_type -> workflow.v1.CompleteTaskRequest
+	37, // 29: workflow.v1.WorkflowService.SignalWorkflow:input_type -> workflow.v1.SignalWorkflowRequest
+	34, // 30: workflow.v1.WorkflowService.Heartbeat:input_type -> workflow.v1.HeartbeatRequest
+	39, // 31: workflow.v1.WorkflowService.ListWorkflows:input_type -> workflow.v1.ListWorkflowsRequest
+	42, // 32: workflow.v1.WorkflowService.GetWorkflow:input_type -> workflow.v1.GetWorkflowRequest
+	48, // 33: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
+	50, // 34: workflow.v1.WorkflowService.CancelWorkflow:input_type -> workflow.v1.CancelWorkflowRequest
+	45, // 35: workflow.v1.WorkflowService.ListWorkflowRuns:input_type -> workflow.v1.ListWorkflowRunsRequest
+	11, // 36: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
+	13, // 37: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
+	25, // 38: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
+	5,  // 39: workflow.v1.WorkflowService.CreateSchedule:input_type -> workflow.v1.CreateScheduleRequest
+	7,  // 40: workflow.v1.WorkflowService.DeleteSchedule:input_type -> workflow.v1.DeleteScheduleRequest
+	9,  // 41: workflow.v1.WorkflowService.ListSchedules:input_type -> workflow.v1.ListSchedulesRequest
+	28, // 42: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
+	31, // 43: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
+	33, // 44: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
+	38, // 45: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
+	35, // 46: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
+	41, // 47: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
+	44, // 48: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
+	49, // 49: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
+	51, // 50: workflow.v1.WorkflowService.CancelWorkflow:output_type -> workflow.v1.CancelWorkflowResponse
+	47, // 51: workflow.v1.WorkflowService.ListWorkflowRuns:output_type -> workflow.v1.ListWorkflowRunsResponse
+	12, // 52: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
+	15, // 53: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
+	26, // 54: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
+	6,  // 55: workflow.v1.WorkflowService.CreateSchedule:output_type -> workflow.v1.CreateScheduleResponse
+	8,  // 56: workflow.v1.WorkflowService.DeleteSchedule:output_type -> workflow.v1.DeleteScheduleResponse
+	10, // 57: workflow.v1.WorkflowService.ListSchedules:output_type -> workflow.v1.ListSchedulesResponse
+	42, // [42:58] is the sub-list for method output_type
+	26, // [26:42] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_service_proto_init() }
@@ -3618,7 +3771,7 @@ func file_service_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_service_proto_rawDesc), len(file_service_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      3,
 			NumMessages:   49,
 			NumExtensions: 0,
 			NumServices:   1,

@@ -31,6 +31,9 @@ worker.activity('charge', async () => {
   throw new NonRetryableError('card declined', { type: 'Declined' });
 });
 
+void worker.start('Order', 'x', { workflowId: 'order-7', idReusePolicy: 'ALLOW_DUPLICATE', idConflictPolicy: 'USE_EXISTING' })
+  .then((s) => (s.started ? s.runId : s.workflowId));
+
 const cluster = new Worker({ addresses: ['http://n1:8233', 'http://n2:8233'], activityConcurrency: 8 });
 cluster.workflow('Typed', async (ctx) => {
   const order = ctx.inputAs<{ id: string }>('json');

@@ -43,6 +43,8 @@ receipt = ctx.activity("charge", {"amount": 42}, retry=RetryPolicy(max_attempts=
 # Bound one attempt and the whole step (seconds); bound a whole run when you start it.
 ctx.activity("render", doc, start_to_close_timeout=30, schedule_to_close_timeout=300)
 worker.start_workflow("Order", order, f"order-{order['id']}", execution_timeout=86400)
+# Idempotent start: the run already holding the id comes back instead of a 409.
+run = worker.start("Order", order, f"order-{order['id']}", id_conflict_policy="USE_EXISTING")
 
 # Change code safely while executions are in flight; record a non-deterministic value once.
 if ctx.get_version("fraud-check", DEFAULT_VERSION, 1) == 1:

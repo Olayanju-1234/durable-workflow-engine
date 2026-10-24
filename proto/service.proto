@@ -307,12 +307,40 @@ message StartWorkflowRequest {
   // Optional: the workflow times out (status TIMED_OUT) this long after it
   // starts. Zero means no limit.
   int64 execution_timeout_ms = 4;
+  // Whether a workflow id whose run has finished may start a new run.
+  IdReusePolicy id_reuse_policy = 5;
+  // What to do when the workflow id is taken: a run is still going, or a
+  // finished one the reuse policy does not let this start replace.
+  IdConflictPolicy id_conflict_policy = 6;
+}
+
+// IdReusePolicy decides whether a start may begin a new run under a workflow
+// id whose latest run has finished. The finished run is kept as an earlier run.
+enum IdReusePolicy {
+  // REJECT_DUPLICATE: what every engine did before 0.3.0.
+  ID_REUSE_POLICY_UNSPECIFIED = 0;
+  ID_REUSE_POLICY_ALLOW_DUPLICATE = 1;
+  // Only if the finished run failed, timed out, was cancelled or terminated.
+  ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY = 2;
+  ID_REUSE_POLICY_REJECT_DUPLICATE = 3;
+}
+
+// IdConflictPolicy decides what a start does when its workflow id is taken.
+enum IdConflictPolicy {
+  // FAIL: the start fails with ALREADY_EXISTS (HTTP 409).
+  ID_CONFLICT_POLICY_UNSPECIFIED = 0;
+  ID_CONFLICT_POLICY_FAIL = 1;
+  // Return the run that holds the id instead (started = false): "start, or
+  // give me the one already there".
+  ID_CONFLICT_POLICY_USE_EXISTING = 2;
 }
 
 message StartWorkflowResponse {
   string workflow_id = 1;
-  // The run this start began.
+  // The run this start began, or with USE_EXISTING the run that held the id.
   string run_id = 2;
+  // False when an existing run was returned instead of starting one.
+  bool started = 3;
 }
 
 message PollTaskRequest {

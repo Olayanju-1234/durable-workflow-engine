@@ -184,6 +184,27 @@ public final class E2E {
             fail("continue-as-new: output " + loop.get("output") + ", runs " + runs);
         }
 
+        // Workflow id reuse: a finished id is refused by default, returned with USE_EXISTING, and
+        // starts a new run when the reuse policy allows it.
+        Workflowd.Started first = worker.start("JavaAfterRestart", "", "java-reuse", new Workflowd.StartOptions());
+        waitDone(worker, "java-reuse");
+        int refused = 0;
+        try {
+            worker.start("JavaAfterRestart", "", "java-reuse", null);
+        } catch (java.io.IOException e) {
+            refused = e.getMessage().startsWith("HTTP 409") ? 409 : -1;
+        }
+        Workflowd.Started same = worker.start("JavaAfterRestart", "", "java-reuse",
+                new Workflowd.StartOptions().withIdConflictPolicy(Workflowd.IdConflictPolicy.USE_EXISTING));
+        Workflowd.Started again = worker.start("JavaAfterRestart", "", "java-reuse",
+                new Workflowd.StartOptions().withIdReusePolicy(Workflowd.IdReusePolicy.ALLOW_DUPLICATE));
+        waitDone(worker, "java-reuse");
+        List<Map<String, Object>> reuseRuns = worker.runs("java-reuse");
+        if (refused != 409 || same.started || !same.runId.equals(first.runId) || !again.started || reuseRuns.size() != 2
+                || !again.runId.equals(reuseRuns.get(0).get("run_id")) || !first.runId.equals(reuseRuns.get(1).get("run_id"))) {
+            fail("reuse: refused " + refused + ", same " + same.runId + "/" + same.started + ", again " + again.runId + ", runs " + reuseRuns);
+        }
+
         // A restarted engine has forgotten every registration: the worker must notice and
         // register again before this workflow can be dispatched.
         System.out.println("RESTART");

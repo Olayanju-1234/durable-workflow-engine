@@ -338,6 +338,24 @@ if (
 ):
     fail(f"continue-as-new: output {loop['output']}, {loop['history_length']} events, runs {runs}")
 
+# Workflow id reuse: a finished id is refused by default, returned with
+# USE_EXISTING, and starts a new run when the reuse policy allows it.
+first = worker.start("PyAfterRestart", "", "py-reuse")
+wait_done("py-reuse")
+try:
+    worker.start("PyAfterRestart", "", "py-reuse")
+    fail("reuse: a finished id was started again by default")
+except Exception as err:
+    if getattr(err, "status", None) != 409:
+        fail(f"reuse: {err}")
+same = worker.start("PyAfterRestart", "", "py-reuse", id_conflict_policy="use_existing")
+again = worker.start("PyAfterRestart", "", "py-reuse", id_reuse_policy="allow_duplicate")
+wait_done("py-reuse")
+if same != {"workflow_id": "py-reuse", "run_id": first["run_id"], "started": False} or not again["started"] or (
+    [r["run_id"] for r in worker.runs("py-reuse")] != [again["run_id"], first["run_id"]]
+):
+    fail(f"reuse: first {first}, same {same}, again {again}")
+
 forever_id = worker.start_workflow("PyForever", execution_timeout=0.3)
 for _ in range(100):
     wf = worker.describe(forever_id)

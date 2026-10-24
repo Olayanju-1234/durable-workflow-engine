@@ -404,3 +404,28 @@ func TestHTTPPayloadLimits(t *testing.T) {
 		t.Fatalf("workflow task body over the request limit: HTTP %d", code)
 	}
 }
+
+// TestHTTPIDPolicies: the start policies by name over HTTP; 201 starts, 200
+// returns the existing run, 409 refuses, 400 for an unknown policy.
+func TestHTTPIDPolicies(t *testing.T) {
+	h := newAPIHarness(t, state.WorkflowDefinition{Type: "Wait", Steps: []state.StepDef{state.AwaitSignal("w", "go")}})
+	code, first := h.do(t, "POST", "/api/workflows", `{"type":"Wait","workflow_id":"p"}`)
+	if code != http.StatusCreated || first["started"] != true {
+		t.Fatalf("start: %d %v", code, first)
+	}
+	if code, _ := h.do(t, "POST", "/api/workflows", `{"type":"Wait","workflow_id":"p","id_reuse_policy":"allow_duplicate"}`); code != http.StatusConflict {
+		t.Fatalf("running id with allow_duplicate: HTTP %d, want 409", code)
+	}
+	code, same := h.do(t, "POST", "/api/workflows", `{"type":"Wait","workflow_id":"p","id_conflict_policy":"use_existing"}`)
+	if code != http.StatusOK || same["started"] != false || same["run_id"] != first["run_id"] {
+		t.Fatalf("use_existing: %d %v", code, same)
+	}
+	if code, _ := h.do(t, "POST", "/api/workflows", `{"type":"Wait","workflow_id":"p","id_reuse_policy":"sometimes"}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown policy: HTTP %d, want 400", code)
+	}
+	h.do(t, "POST", "/api/workflows/p/signal", `{"name":"go"}`)
+	code, again := h.do(t, "POST", "/api/workflows", `{"type":"Wait","workflow_id":"p","id_reuse_policy":"ID_REUSE_POLICY_ALLOW_DUPLICATE"}`)
+	if code != http.StatusCreated || again["started"] != true || again["run_id"] == first["run_id"] {
+		t.Fatalf("reuse after it finished: %d %v", code, again)
+	}
+}

@@ -116,6 +116,64 @@ type StartOption func(*startOptions)
 type startOptions struct {
 	id               string
 	executionTimeout time.Duration
+	reuse            server.IdReusePolicy
+	conflict         server.IdConflictPolicy
+}
+
+// IDReusePolicy decides whether a workflow id whose run has finished may start
+// a new run; the finished run is kept as an earlier run (ListWorkflowRuns).
+type IDReusePolicy int
+
+const (
+	// RejectDuplicate refuses (ErrAlreadyExists): the default.
+	RejectDuplicate IDReusePolicy = iota
+	// AllowDuplicate starts a new run whatever the finished one's outcome.
+	AllowDuplicate
+	// AllowDuplicateFailedOnly starts one only if the finished run failed,
+	// timed out, was cancelled or terminated.
+	AllowDuplicateFailedOnly
+)
+
+// IDConflictPolicy decides what a start does when its id is taken: a run is
+// still going, or a finished one the reuse policy does not let it replace.
+type IDConflictPolicy int
+
+const (
+	// FailOnConflict fails with ErrAlreadyExists: the default.
+	FailOnConflict IDConflictPolicy = iota
+	// UseExisting returns the run that holds the id instead (Started.Started
+	// is false): "start it, or give me the one already there".
+	UseExisting
+)
+
+// WithIDReusePolicy sets whether a finished workflow id may start a new run.
+func WithIDReusePolicy(p IDReusePolicy) StartOption {
+	return func(o *startOptions) {
+		o.reuse = map[IDReusePolicy]server.IdReusePolicy{
+			RejectDuplicate:          server.IdReusePolicy_ID_REUSE_POLICY_REJECT_DUPLICATE,
+			AllowDuplicate:           server.IdReusePolicy_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+			AllowDuplicateFailedOnly: server.IdReusePolicy_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY,
+		}[p]
+	}
+}
+
+// WithIDConflictPolicy sets what a start does when its id is taken.
+func WithIDConflictPolicy(p IDConflictPolicy) StartOption {
+	return func(o *startOptions) {
+		if p == UseExisting {
+			o.conflict = server.IdConflictPolicy_ID_CONFLICT_POLICY_USE_EXISTING
+		} else {
+			o.conflict = server.IdConflictPolicy_ID_CONFLICT_POLICY_FAIL
+		}
+	}
+}
+
+// Started is what Start did.
+type Started struct {
+	WorkflowID string
+	RunID      string
+	// Started is false when UseExisting returned the run that held the id.
+	Started bool
 }
 
 // WithWorkflowID starts the workflow under a caller-chosen id, for example an
@@ -132,6 +190,13 @@ func WithExecutionTimeout(d time.Duration) StartOption {
 
 // StartWorkflow starts a workflow of a registered type and returns its id.
 func (c *Client) StartWorkflow(ctx context.Context, workflowType string, input []byte, opts ...StartOption) (string, error) {
+	s, err := c.Start(ctx, workflowType, input, opts...)
+	return s.WorkflowID, err
+}
+
+// Start is StartWorkflow that also says which run it began, or with
+// UseExisting which run already held the id.
+func (c *Client) Start(ctx context.Context, workflowType string, input []byte, opts ...StartOption) (Started, error) {
 	var so startOptions
 	for _, o := range opts {
 		o(&so)
@@ -139,25 +204,30 @@ func (c *Client) StartWorkflow(ctx context.Context, workflowType string, input [
 	req := &server.StartWorkflowRequest{
 		WorkflowType: workflowType, Input: input, WorkflowId: so.id,
 		ExecutionTimeoutMs: so.executionTimeout.Milliseconds(),
+		IdReusePolicy:      so.reuse, IdConflictPolicy: so.conflict,
 	}
 	generated := req.WorkflowId == ""
 	if generated {
 		// Chosen here, not on the server, so a retry after a lost reply reuses it.
 		req.WorkflowId = fmt.Sprintf("%s-%s", workflowType, randomSuffix())
 	}
+	var resp *server.StartWorkflowResponse
 	attempts, err := c.conn.Call(ctx, func(ctx context.Context, s server.WorkflowServiceClient, opt grpc.CallOption) error {
-		_, err := s.StartWorkflow(ctx, req, opt)
+		var err error
+		resp, err = s.StartWorkflow(ctx, req, opt)
 		return err
 	})
 	if generated && attempts > 1 && status.Code(err) == codes.AlreadyExists {
 		// Only an earlier attempt of this call can hold a fresh random id: a
 		// leader accepted it and then lost leadership before replying.
-		return req.WorkflowId, nil
+		return Started{WorkflowID: req.WorkflowId, Started: true}, nil
 	}
 	if err != nil {
-		return "", wrap("start workflow", err)
+		return Started{}, wrap("start workflow", err)
 	}
-	return req.WorkflowId, nil
+	// An engine before 0.3.0 sends neither field; it never returns an existing run.
+	started := resp.GetStarted() || resp.GetRunId() == ""
+	return Started{WorkflowID: req.WorkflowId, RunID: resp.GetRunId(), Started: started}, nil
 }
 
 // SignalOption customises SignalWorkflow.

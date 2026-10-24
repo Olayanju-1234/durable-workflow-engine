@@ -286,6 +286,57 @@ public final class Workflowd {
         }
     }
 
+    /** Whether a workflow id whose run has finished may start a new run (the finished one is kept). */
+    public enum IdReusePolicy {
+        /** Start a new run whatever the finished one's outcome. */
+        ALLOW_DUPLICATE,
+        /** Only if the finished run failed, timed out, was cancelled or terminated. */
+        ALLOW_DUPLICATE_FAILED_ONLY,
+        /** Refuse (HTTP 409): the default. */
+        REJECT_DUPLICATE
+    }
+
+    /** What a start does when its workflow id is taken. */
+    public enum IdConflictPolicy {
+        /** Fail with HTTP 409: the default. */
+        FAIL,
+        /** Return the run that holds the id instead ({@link Started#started} is false). */
+        USE_EXISTING
+    }
+
+    /** Options for {@link Worker#start}. Immutable: each {@code with} method returns a copy. */
+    public static final class StartOptions {
+        final Duration executionTimeout;
+        final IdReusePolicy reuse;
+        final IdConflictPolicy conflict;
+
+        public StartOptions() { this(null, null, null); }
+
+        private StartOptions(Duration executionTimeout, IdReusePolicy reuse, IdConflictPolicy conflict) {
+            this.executionTimeout = executionTimeout;
+            this.reuse = reuse;
+            this.conflict = conflict;
+        }
+
+        /** End the workflow as TIMED_OUT if it has not finished this long after it starts. */
+        public StartOptions withExecutionTimeout(Duration d) { return new StartOptions(d, reuse, conflict); }
+        public StartOptions withIdReusePolicy(IdReusePolicy p) { return new StartOptions(executionTimeout, p, conflict); }
+        public StartOptions withIdConflictPolicy(IdConflictPolicy p) { return new StartOptions(executionTimeout, reuse, p); }
+    }
+
+    /** What {@link Worker#start} did: the run it began, or with USE_EXISTING the run that held the id. */
+    public static final class Started {
+        public final String workflowId;
+        public final String runId;
+        public final boolean started;
+
+        Started(String workflowId, String runId, boolean started) {
+            this.workflowId = workflowId;
+            this.runId = runId;
+            this.started = started;
+        }
+    }
+
     static void putMillis(Map<String, Object> obj, String field, Duration d) {
         if (d != null && !d.isZero() && !d.isNegative()) obj.put(field, Math.max(1L, d.toMillis()));
     }
@@ -955,6 +1006,18 @@ public final class Workflowd {
          */
         public String startWorkflow(String type, String input, String workflowId, Duration executionTimeout)
                 throws IOException, InterruptedException {
+            return start(type, input, workflowId, new StartOptions().withExecutionTimeout(executionTimeout)).workflowId;
+        }
+
+        /**
+         * Start a workflow and say what happened. {@link StartOptions#withIdReusePolicy} decides
+         * whether an id whose run has finished may start a new run; with
+         * {@link IdConflictPolicy#USE_EXISTING} a taken id returns the run that holds it instead
+         * of failing with a 409.
+         */
+        @SuppressWarnings("unchecked")
+        public Started start(String type, String input, String workflowId, StartOptions opts)
+                throws IOException, InterruptedException {
             boolean generated = workflowId == null || workflowId.isEmpty();
             // Chosen here so a retry after a lost reply cannot start a second execution.
             String id = generated ? type + "-" + Long.toHexString(System.nanoTime()) + Long.toHexString(Double.doubleToLongBits(Math.random())) : workflowId;
@@ -962,13 +1025,20 @@ public final class Workflowd {
             body.put("type", type);
             body.put("input", input == null ? "" : input);
             body.put("workflow_id", id);
-            putMillis(body, "execution_timeout_ms", executionTimeout);
+            if (opts != null) {
+                putMillis(body, "execution_timeout_ms", opts.executionTimeout);
+                // Only when set: an engine before 0.3.0 refuses the fields.
+                if (opts.reuse != null) body.put("id_reuse_policy", opts.reuse.name());
+                if (opts.conflict != null) body.put("id_conflict_policy", opts.conflict.name());
+            }
             try {
-                request("POST", "/api/workflows", body);
+                Object res = request("POST", "/api/workflows", body);
+                Map<String, Object> m = res instanceof Map ? (Map<String, Object>) res : Map.of();
+                return new Started(id, str(m.get("run_id")), !Boolean.FALSE.equals(m.get("started")));
             } catch (HttpError e) {
                 if (!(generated && e.status == 409)) throw e;
+                return new Started(id, "", true);
             }
-            return id;
         }
 
         /**

@@ -260,6 +260,20 @@ if (loop.output !== `50 ticks; run ${loop.run_id}` || runs.length !== 3 || loop.
   fail(`continue-as-new: output ${loop.output}, ${loop.history_length} events, runs ${JSON.stringify(runs)}`);
 }
 
+// Workflow id reuse: a finished id is refused by default, returned with
+// USE_EXISTING, and starts a new run when the reuse policy allows it.
+const first = await worker.start('TsAfterRestart', '', { workflowId: 'ts-reuse' });
+await waitDone('ts-reuse');
+const refused = await worker.start('TsAfterRestart', '', { workflowId: 'ts-reuse' }).catch((err) => err.status);
+const same = await worker.start('TsAfterRestart', '', { workflowId: 'ts-reuse', idConflictPolicy: 'use_existing' });
+const again = await worker.start('TsAfterRestart', '', { workflowId: 'ts-reuse', idReusePolicy: 'ALLOW_DUPLICATE' });
+await waitDone('ts-reuse');
+const reuseRuns = (await worker.runs('ts-reuse')).runs.map((r) => r.run_id).join();
+if (refused !== 409 || same.started || same.runId !== first.runId || !again.started ||
+    reuseRuns !== `${again.runId},${first.runId}`) {
+  fail(`reuse: refused ${refused}, same ${JSON.stringify(same)}, again ${JSON.stringify(again)}, runs ${reuseRuns}`);
+}
+
 const foreverId = await worker.startWorkflow('TsForever', '', '', { executionTimeoutMs: 300 });
 for (let i = 0; ; i++) {
   const wf = await worker.describe(foreverId);

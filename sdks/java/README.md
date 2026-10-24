@@ -58,6 +58,10 @@ worker.activityWithContext("provision", (input, actx) -> {
 });
 ```
 
+Idempotent starts: `worker.start(type, input, id, new Workflowd.StartOptions().withIdConflictPolicy(Workflowd.IdConflictPolicy.USE_EXISTING))`
+returns the run already holding the id (`started` false) instead of failing with a 409;
+`withIdReusePolicy(Workflowd.IdReusePolicy.ALLOW_DUPLICATE)` lets a finished id start again.
+
 For an engine with auth and TLS:
 `new Workflowd.Worker("https://…:8233", "worker-1", token, Workflowd.trustPem(Path.of("ca.pem")))`
 (pass `null` for the SSLContext with a public CA).
