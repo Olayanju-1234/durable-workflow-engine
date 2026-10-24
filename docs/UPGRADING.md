@@ -29,7 +29,7 @@ needs it is written. Binaries before 0.3.0 neither write nor read that file.
 | 3 | Two steps in flight at once (parallel activities, `waitAny` races) | 0.1.0 (any build from `f7c18c1`) | refuses the history |
 | 4 | A cancelled step, or a step closed between retries by a timeout or a cancel | 0.2.0 | refuses a history with a step closed between retries; reads a cancelled step as failed |
 | 5 | Continue-as-new and graceful cancellation | 0.3.0 | reads a run that continued as new as completed (the chain stops); ignores a cancel request |
-| 6 | A namespace other than `default`, or a named task queue | 0.4.0 | does not see the namespace's workflows at all (they stop running); hands a named queue's tasks to any worker polling the default queue |
+| 6 | A namespace other than `default`, a named task queue, or a paused, jittered or `BUFFER_ONE` schedule | 0.4.0 | does not see the namespace's workflows at all (they stop running); hands a named queue's tasks to any worker polling the default queue; fires a paused schedule, without jitter, and overlapping a held fire |
 
 Statuses added as flags (`TIMED_OUT`, `CANCELLED`, `TERMINATED`) need no format: an older
 binary shows them as `FAILED`, which is harmless.
@@ -93,8 +93,9 @@ types); otherwise the feature is simply unavailable until the engine is upgraded
 
 ## Release notes on rollback
 
-- **0.4.0:** the first history in a namespace other than `default`, or the first event naming a
-  task queue other than the default one, raises the directory to format 6 (namespaced histories
+- **0.4.0:** the first history in a namespace other than `default`, the first event naming a
+  task queue other than the default one, or the first schedule paused, jittered or set to
+  `BUFFER_ONE`, raises the directory to format 6 (namespaced histories
   live under `namespaces/`, which older binaries do not read; older binaries route by step name
   alone). Upgrading without using either keeps the format, and the rollback, where they were.
 - **0.3.0:** adds formats (this document). A workflow that continues as new raises the

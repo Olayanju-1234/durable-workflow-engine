@@ -28,6 +28,93 @@ type Schedule struct {
 	SkipIfRunning bool
 	// TaskQueue is the task queue the runs start on; empty is the default.
 	TaskQueue string
+	// Overlap decides what a fire does while an earlier run is still going
+	// (SkipIfRunning is the same as OverlapSkip).
+	Overlap OverlapPolicy
+	// Jitter starts each run up to this long after its fire time, by an
+	// offset fixed per fire; run ids keep the fire time.
+	Jitter time.Duration
+	// Paused schedules do not fire; Note says why.
+	Paused bool
+	Note   string
+}
+
+// OverlapPolicy is what a schedule's fire does while an earlier run is going.
+type OverlapPolicy int
+
+const (
+	// OverlapDefault: OverlapAllowAll, or OverlapSkip with SkipIfRunning.
+	OverlapDefault OverlapPolicy = iota
+	// OverlapSkip skips the fire.
+	OverlapSkip
+	// OverlapBufferOne holds the fire and starts it when the running run
+	// finishes; fires while one is held are skipped.
+	OverlapBufferOne
+	// OverlapAllowAll starts it anyway.
+	OverlapAllowAll
+)
+
+// Backfilled is what a backfill did.
+type Backfilled struct {
+	Started, Existing, Skipped int
+}
+
+// PauseSchedule stops a schedule firing until ResumeSchedule. note says why.
+func (c *Client) PauseSchedule(ctx context.Context, id, note string) error {
+	_, err := c.conn.Call(ctx, func(ctx context.Context, stub server.WorkflowServiceClient, opt grpc.CallOption) error {
+		_, err := stub.PauseSchedule(ctx, &server.PauseScheduleRequest{ScheduleId: id, Note: note}, opt)
+		return err
+	})
+	return wrap("pause schedule", err)
+}
+
+// ResumeSchedule makes a paused schedule fire again.
+func (c *Client) ResumeSchedule(ctx context.Context, id string) error {
+	_, err := c.conn.Call(ctx, func(ctx context.Context, stub server.WorkflowServiceClient, opt grpc.CallOption) error {
+		_, err := stub.ResumeSchedule(ctx, &server.ResumeScheduleRequest{ScheduleId: id}, opt)
+		return err
+	})
+	return wrap("resume schedule", err)
+}
+
+// BackfillSchedule starts the runs the schedule would have started for its
+// fire times after from and up to to (both past), once each: runs that exist
+// already are counted, not started again. skip starts a fire only if no run
+// of the schedule is going then.
+func (c *Client) BackfillSchedule(ctx context.Context, id string, from, to time.Time, skip bool) (Backfilled, error) {
+	req := &server.BackfillScheduleRequest{ScheduleId: id, StartTime: from.UnixNano(), EndTime: to.UnixNano()}
+	if skip {
+		req.OverlapPolicy = server.OverlapPolicy_OVERLAP_POLICY_SKIP
+	}
+	var resp *server.BackfillScheduleResponse
+	_, err := c.conn.Call(ctx, func(ctx context.Context, stub server.WorkflowServiceClient, opt grpc.CallOption) error {
+		var err error
+		resp, err = stub.BackfillSchedule(ctx, req, opt)
+		return err
+	})
+	if err != nil {
+		return Backfilled{}, wrap("backfill schedule", err)
+	}
+	return Backfilled{Started: int(resp.GetStarted()), Existing: int(resp.GetExisting()), Skipped: int(resp.GetSkipped())}, nil
+}
+
+// PreviewSchedule returns the next n fire times of a schedule, and when each
+// run would start with its jitter.
+func (c *Client) PreviewSchedule(ctx context.Context, id string, n int) (fires, starts []time.Time, err error) {
+	var resp *server.PreviewScheduleResponse
+	_, err = c.conn.Call(ctx, func(ctx context.Context, stub server.WorkflowServiceClient, opt grpc.CallOption) error {
+		var err error
+		resp, err = stub.PreviewSchedule(ctx, &server.PreviewScheduleRequest{ScheduleId: id, Count: int32(n)}, opt)
+		return err
+	})
+	if err != nil {
+		return nil, nil, wrap("preview schedule", err)
+	}
+	for i, f := range resp.GetFireTimes() {
+		fires = append(fires, time.Unix(0, f).UTC())
+		starts = append(starts, time.Unix(0, resp.GetStartTimes()[i]).UTC())
+	}
+	return fires, starts, nil
 }
 
 // ScheduleDescription is a schedule as the engine reports it.
@@ -44,6 +131,7 @@ func (c *Client) CreateSchedule(ctx context.Context, s Schedule) error {
 	req := &server.CreateScheduleRequest{Schedule: &server.Schedule{
 		ScheduleId: s.ID, Cron: s.Cron, Timezone: s.Timezone,
 		WorkflowType: s.WorkflowType, Input: s.Input, SkipIfRunning: s.SkipIfRunning, TaskQueue: s.TaskQueue,
+		OverlapPolicy: server.OverlapPolicy(s.Overlap), JitterMs: s.Jitter.Milliseconds(), Paused: s.Paused, Note: s.Note,
 	}}
 	_, err := c.conn.Call(ctx, func(ctx context.Context, stub server.WorkflowServiceClient, opt grpc.CallOption) error {
 		_, err := stub.CreateSchedule(ctx, req, opt)
@@ -82,7 +170,8 @@ func (c *Client) ListSchedules(ctx context.Context) ([]ScheduleDescription, erro
 			Schedule: Schedule{
 				ID: s.GetScheduleId(), Cron: s.GetCron(), Timezone: s.GetTimezone(),
 				WorkflowType: s.GetWorkflowType(), Input: s.GetInput(), SkipIfRunning: s.GetSkipIfRunning(),
-				TaskQueue: s.GetTaskQueue(),
+				TaskQueue: s.GetTaskQueue(), Overlap: OverlapPolicy(s.GetOverlapPolicy()),
+				Jitter: time.Duration(s.GetJitterMs()) * time.Millisecond, Paused: s.GetPaused(), Note: s.GetNote(),
 			},
 			CreatedAt: time.Unix(0, info.GetCreatedAt()).UTC(),
 		}

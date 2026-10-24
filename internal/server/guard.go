@@ -233,6 +233,8 @@ func httpOp(r *http.Request) op {
 		return opRegister
 	case p == "/api/workflows":
 		return opStart
+	case p == "/api/schedules/preview":
+		return opRead // answers a question, changes nothing
 	case strings.HasPrefix(p, "/api/schedules"):
 		return opSchedule
 	case strings.HasSuffix(p, "/signal"):
@@ -254,6 +256,9 @@ var grpcOps = map[string]op{
 	WorkflowService_TerminateWorkflow_FullMethodName:    opTerminate,
 	WorkflowService_CreateSchedule_FullMethodName:       opSchedule,
 	WorkflowService_DeleteSchedule_FullMethodName:       opSchedule,
+	WorkflowService_PauseSchedule_FullMethodName:        opSchedule,
+	WorkflowService_ResumeSchedule_FullMethodName:       opSchedule,
+	WorkflowService_BackfillSchedule_FullMethodName:     opSchedule,
 	WorkflowService_RegisterWorkflowType_FullMethodName: opRegister,
 	WorkflowService_CompleteTask_FullMethodName:         opWorker,
 	WorkflowService_Heartbeat_FullMethodName:            opWorker,

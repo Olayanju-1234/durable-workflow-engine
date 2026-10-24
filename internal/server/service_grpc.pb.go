@@ -35,6 +35,10 @@ const (
 	WorkflowService_CreateSchedule_FullMethodName       = "/workflow.v1.WorkflowService/CreateSchedule"
 	WorkflowService_DeleteSchedule_FullMethodName       = "/workflow.v1.WorkflowService/DeleteSchedule"
 	WorkflowService_ListSchedules_FullMethodName        = "/workflow.v1.WorkflowService/ListSchedules"
+	WorkflowService_PauseSchedule_FullMethodName        = "/workflow.v1.WorkflowService/PauseSchedule"
+	WorkflowService_ResumeSchedule_FullMethodName       = "/workflow.v1.WorkflowService/ResumeSchedule"
+	WorkflowService_BackfillSchedule_FullMethodName     = "/workflow.v1.WorkflowService/BackfillSchedule"
+	WorkflowService_PreviewSchedule_FullMethodName      = "/workflow.v1.WorkflowService/PreviewSchedule"
 )
 
 // WorkflowServiceClient is the client API for WorkflowService service.
@@ -117,6 +121,16 @@ type WorkflowServiceClient interface {
 	CreateSchedule(ctx context.Context, in *CreateScheduleRequest, opts ...grpc.CallOption) (*CreateScheduleResponse, error)
 	DeleteSchedule(ctx context.Context, in *DeleteScheduleRequest, opts ...grpc.CallOption) (*DeleteScheduleResponse, error)
 	ListSchedules(ctx context.Context, in *ListSchedulesRequest, opts ...grpc.CallOption) (*ListSchedulesResponse, error)
+	// PauseSchedule stops a schedule firing until ResumeSchedule; fires due
+	// while it is paused are not started later.
+	PauseSchedule(ctx context.Context, in *PauseScheduleRequest, opts ...grpc.CallOption) (*PauseScheduleResponse, error)
+	ResumeSchedule(ctx context.Context, in *ResumeScheduleRequest, opts ...grpc.CallOption) (*ResumeScheduleResponse, error)
+	// BackfillSchedule starts the runs a schedule would have started over a
+	// past range: one per fire time, under the same ids a fire uses, so it is
+	// idempotent.
+	BackfillSchedule(ctx context.Context, in *BackfillScheduleRequest, opts ...grpc.CallOption) (*BackfillScheduleResponse, error)
+	// PreviewSchedule says when a schedule (or a spec not yet created) fires next.
+	PreviewSchedule(ctx context.Context, in *PreviewScheduleRequest, opts ...grpc.CallOption) (*PreviewScheduleResponse, error)
 }
 
 type workflowServiceClient struct {
@@ -287,6 +301,46 @@ func (c *workflowServiceClient) ListSchedules(ctx context.Context, in *ListSched
 	return out, nil
 }
 
+func (c *workflowServiceClient) PauseSchedule(ctx context.Context, in *PauseScheduleRequest, opts ...grpc.CallOption) (*PauseScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PauseScheduleResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_PauseSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowServiceClient) ResumeSchedule(ctx context.Context, in *ResumeScheduleRequest, opts ...grpc.CallOption) (*ResumeScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResumeScheduleResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_ResumeSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowServiceClient) BackfillSchedule(ctx context.Context, in *BackfillScheduleRequest, opts ...grpc.CallOption) (*BackfillScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BackfillScheduleResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_BackfillSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workflowServiceClient) PreviewSchedule(ctx context.Context, in *PreviewScheduleRequest, opts ...grpc.CallOption) (*PreviewScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PreviewScheduleResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_PreviewSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WorkflowServiceServer is the server API for WorkflowService service.
 // All implementations must embed UnimplementedWorkflowServiceServer
 // for forward compatibility.
@@ -367,6 +421,16 @@ type WorkflowServiceServer interface {
 	CreateSchedule(context.Context, *CreateScheduleRequest) (*CreateScheduleResponse, error)
 	DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error)
 	ListSchedules(context.Context, *ListSchedulesRequest) (*ListSchedulesResponse, error)
+	// PauseSchedule stops a schedule firing until ResumeSchedule; fires due
+	// while it is paused are not started later.
+	PauseSchedule(context.Context, *PauseScheduleRequest) (*PauseScheduleResponse, error)
+	ResumeSchedule(context.Context, *ResumeScheduleRequest) (*ResumeScheduleResponse, error)
+	// BackfillSchedule starts the runs a schedule would have started over a
+	// past range: one per fire time, under the same ids a fire uses, so it is
+	// idempotent.
+	BackfillSchedule(context.Context, *BackfillScheduleRequest) (*BackfillScheduleResponse, error)
+	// PreviewSchedule says when a schedule (or a spec not yet created) fires next.
+	PreviewSchedule(context.Context, *PreviewScheduleRequest) (*PreviewScheduleResponse, error)
 	mustEmbedUnimplementedWorkflowServiceServer()
 }
 
@@ -424,6 +488,18 @@ func (UnimplementedWorkflowServiceServer) DeleteSchedule(context.Context, *Delet
 }
 func (UnimplementedWorkflowServiceServer) ListSchedules(context.Context, *ListSchedulesRequest) (*ListSchedulesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListSchedules not implemented")
+}
+func (UnimplementedWorkflowServiceServer) PauseSchedule(context.Context, *PauseScheduleRequest) (*PauseScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PauseSchedule not implemented")
+}
+func (UnimplementedWorkflowServiceServer) ResumeSchedule(context.Context, *ResumeScheduleRequest) (*ResumeScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResumeSchedule not implemented")
+}
+func (UnimplementedWorkflowServiceServer) BackfillSchedule(context.Context, *BackfillScheduleRequest) (*BackfillScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BackfillSchedule not implemented")
+}
+func (UnimplementedWorkflowServiceServer) PreviewSchedule(context.Context, *PreviewScheduleRequest) (*PreviewScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreviewSchedule not implemented")
 }
 func (UnimplementedWorkflowServiceServer) mustEmbedUnimplementedWorkflowServiceServer() {}
 func (UnimplementedWorkflowServiceServer) testEmbeddedByValue()                         {}
@@ -734,6 +810,78 @@ func _WorkflowService_ListSchedules_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkflowService_PauseSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PauseScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).PauseSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_PauseSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).PauseSchedule(ctx, req.(*PauseScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowService_ResumeSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResumeScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).ResumeSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_ResumeSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).ResumeSchedule(ctx, req.(*ResumeScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowService_BackfillSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BackfillScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).BackfillSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_BackfillSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).BackfillSchedule(ctx, req.(*BackfillScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WorkflowService_PreviewSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PreviewScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).PreviewSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_PreviewSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).PreviewSchedule(ctx, req.(*PreviewScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkflowService_ServiceDesc is the grpc.ServiceDesc for WorkflowService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -804,6 +952,22 @@ var WorkflowService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListSchedules",
 			Handler:    _WorkflowService_ListSchedules_Handler,
+		},
+		{
+			MethodName: "PauseSchedule",
+			Handler:    _WorkflowService_PauseSchedule_Handler,
+		},
+		{
+			MethodName: "ResumeSchedule",
+			Handler:    _WorkflowService_ResumeSchedule_Handler,
+		},
+		{
+			MethodName: "BackfillSchedule",
+			Handler:    _WorkflowService_BackfillSchedule_Handler,
+		},
+		{
+			MethodName: "PreviewSchedule",
+			Handler:    _WorkflowService_PreviewSchedule_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
