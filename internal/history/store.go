@@ -41,16 +41,62 @@ type HistoryStore struct {
 	// fsync'd (Sync does it, with the files).
 	dirDirty bool
 
+	// format is the history format recorded for the directory (0: none yet).
+	// Guarded by mu.
+	format uint32
+
 	// writeFile is (*os.File).Write; tests swap it to inject a torn write.
 	writeFile func(f *os.File, b []byte) (int, error)
 }
 
 // NewHistoryStore opens a store rooted at dir, creating the directory if needed.
+// It refuses a directory whose recorded history format is newer than this
+// binary reads, before anything can read or write a history there.
 func NewHistoryStore(dir string) (*HistoryStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("history: create data dir: %w", err)
 	}
-	return &HistoryStore{dir: dir, files: make(map[string]*os.File), dirty: make(map[string]bool), writeFile: (*os.File).Write}, nil
+	format, err := ReadFormat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if format > FormatVersion {
+		return nil, TooNewError(format, "data directory "+dir)
+	}
+	return &HistoryStore{dir: dir, format: format, files: make(map[string]*os.File), dirty: make(map[string]bool), writeFile: (*os.File).Write}, nil
+}
+
+// Format is the history format recorded for the data directory, 0 if none is
+// recorded yet (a directory written only by binaries before 0.3.0).
+func (s *HistoryStore) Format() uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.format
+}
+
+// RequireFormat records that the directory holds history needing format
+// need, unless it already says so. It is how the directory's format rises:
+// before the first event that needs it is written, so a crash in between
+// can only leave the record too high, never too low.
+func (s *HistoryStore) RequireFormat(need uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requireFormatLocked(need)
+}
+
+func (s *HistoryStore) requireFormatLocked(need uint32) error {
+	need = max(need, FormatBase)
+	if need > FormatVersion {
+		return TooNewError(need, "an event")
+	}
+	if need <= s.format {
+		return nil
+	}
+	if err := WriteFormat(s.dir, need); err != nil {
+		return err
+	}
+	s.format = need
+	return nil
 }
 
 // Append serializes event and writes it as a single durable record to the
@@ -104,6 +150,11 @@ func (s *HistoryStore) Sync() error {
 func (s *HistoryStore) append(workflowID string, event *HistoryEvent, sync bool) error {
 	if err := validateWorkflowID(workflowID); err != nil {
 		return err
+	}
+	if need := event.GetMinReaderFormat(); need > FormatBase {
+		if err := s.RequireFormat(need); err != nil {
+			return err
+		}
 	}
 	payload, err := proto.Marshal(event)
 	if err != nil {
@@ -217,16 +268,27 @@ func (s *HistoryStore) ReadRaw(workflowID string) ([]byte, error) {
 // a cluster snapshot; a crash part-way leaves a mix of old and new files, which
 // the caller repairs by installing the same snapshot again.
 func (s *HistoryStore) ReplaceAll(files map[string][]byte) error {
+	need := FormatBase
 	for id, data := range files {
 		if err := validateWorkflowID(id); err != nil {
 			return err
 		}
-		if _, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), nil); err != nil {
+		if _, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), func(payload []byte) error {
+			ev := &HistoryEvent{}
+			if err := proto.Unmarshal(payload, ev); err != nil {
+				return err
+			}
+			need = max(need, ev.GetMinReaderFormat())
+			return nil
+		}); err != nil {
 			return fmt.Errorf("history: replace %s: %w", id, err)
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.requireFormatLocked(need); err != nil {
+		return err
+	}
 	for id := range s.files {
 		s.releaseLocked(id)
 	}

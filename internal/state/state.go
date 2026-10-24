@@ -196,10 +196,11 @@ func Reconstruct(events []*history.HistoryEvent) (*State, error) {
 // whole history. After an error it is poisoned: the history is invalid.
 type Folder struct {
 	st       State
-	open     int   // steps in flight (StepScheduled)
-	retrying int   // steps whose failed attempt will be retried
-	lastSeq  int64 // highest sequence scheduled so far
-	n        int   // events applied
+	open     int    // steps in flight (StepScheduled)
+	retrying int    // steps whose failed attempt will be retried
+	lastSeq  int64  // highest sequence scheduled so far
+	n        int    // events applied
+	format   uint32 // the newest history format any applied event needs
 	err      error
 }
 
@@ -215,15 +216,56 @@ func (f *Folder) State() *State { return &f.st }
 // Err is the error that poisoned the folder, if any.
 func (f *Folder) Err() error { return f.err }
 
+// Format is the oldest history format that reads every event applied so far.
+func (f *Folder) Format() uint32 { return max(f.format, history.FormatBase) }
+
+// FormatOf is the oldest history format that reads ev correctly as the next
+// event: its stamp, or for events written before stamps existed, the format
+// of the feature it uses. Pure: it does not apply ev.
+func (f *Folder) FormatOf(ev *history.HistoryEvent) uint32 {
+	need := max(ev.GetMinReaderFormat(), history.FormatBase)
+	switch attr := ev.GetAttributes().(type) {
+	case *history.HistoryEvent_MarkerRecorded:
+		need = max(need, history.FormatMarkers)
+	case *history.HistoryEvent_StepScheduled:
+		if attr.StepScheduled.GetSequence() > f.lastSeq && f.open+f.retrying > 0 {
+			need = max(need, history.FormatParallelSteps)
+		}
+	case *history.HistoryEvent_TimerStarted:
+		if f.open+f.retrying > 0 {
+			need = max(need, history.FormatParallelSteps)
+		}
+	case *history.HistoryEvent_StepFailed:
+		sf := attr.StepFailed
+		if s := f.st.Step(sf.GetSequence()); sf.GetCancelled() || (s != nil && s.Retrying && !sf.GetWillRetry()) {
+			need = max(need, history.FormatClosedSteps)
+		}
+	}
+	return need
+}
+
 // Apply folds one more event into the state.
 func (f *Folder) Apply(ev *history.HistoryEvent) error {
 	if f.err != nil {
+		return f.err
+	}
+	need := f.FormatOf(ev)
+	if need > history.FormatVersion {
+		f.err = history.TooNewError(need, fmt.Sprintf("event %d", ev.GetEventId()))
+		return f.err
+	}
+	if ev.GetAttributes() == nil && len(ev.ProtoReflect().GetUnknown()) > 0 {
+		// A kind of event this binary has no field for: a newer binary wrote it.
+		f.err = fmt.Errorf("%w: event %d is of a kind this binary does not know (written by a newer workflowd); "+
+			"this binary reads up to history format %d (docs/UPGRADING.md)",
+			history.ErrFormatTooNew, ev.GetEventId(), history.FormatVersion)
 		return f.err
 	}
 	if err := f.apply(ev); err != nil {
 		f.err = err
 		return err
 	}
+	f.format = max(f.format, need)
 	f.n++
 	return nil
 }

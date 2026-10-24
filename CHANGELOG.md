@@ -7,6 +7,16 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+### Added
+- **An upgrade/rollback contract** (ADR-0011, `docs/UPGRADING.md`). History has numbered formats;
+  each event that an older binary would refuse or misread carries `min_reader_format`, and the data
+  directory records its format in `FORMAT`, raised the first time a feature that needs it is used.
+  A binary refuses to start on a directory (or recover a history) in a newer format than it reads,
+  with a message naming the release it needs, instead of failing workflow by workflow.
+  `workflowd --check-format` reports what a directory needs and whether this binary serves it;
+  `--rescan-format` records the current need (lowering it after purges); `--version` and
+  `/api/health` (`history_format`, `reads_history_format`) report formats.
+
 ## [0.2.0] - 2026-10-23
 
 The first correctness release, from running liftoff (a NestJS app) on workflowd in

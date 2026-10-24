@@ -40,6 +40,8 @@ func main() {
 		httpAddr    = flag.String("http-addr", ":8233", "HTTP listen address for the dashboard + JSON API (serve mode; empty disables)")
 		demoWorker  = flag.Bool("demo-worker", false, "run an in-process worker for the built-in demo activities (reserve, charge, ship, release)")
 		retention   = flag.Duration("retention", 0, "delete finished workflows this long after their last event, e.g. 168h (0 keeps them forever)")
+		checkFmt    = flag.Bool("check-format", false, "report the data directory's history format and whether this binary can serve it, then exit (run with the engine stopped)")
+		rescanFmt   = flag.Bool("rescan-format", false, "like --check-format, then record the format the histories need now (lowers it once newer histories are gone)")
 
 		// Clustering is opt-in; with none of these set the daemon is single-node.
 		nodeID   = flag.String("node-id", "", "this node's id in --peers (cluster mode)")
@@ -51,7 +53,14 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("workflowd %s\n", version.Version)
+		fmt.Printf("workflowd %s (reads history format %d)\n", version.Version, history.FormatVersion)
+		return
+	}
+	if *checkFmt || *rescanFmt {
+		if err := checkFormat(os.Stdout, *dataDir, *rescanFmt); err != nil {
+			fmt.Fprintln(os.Stderr, "workflowd:", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -73,7 +82,9 @@ func main() {
 
 	store, err := history.NewHistoryStore(*dataDir)
 	if err != nil {
-		logger.Error("open history store", "err", err)
+		// A directory written by a newer binary is refused here, before
+		// recovery could misread a single history.
+		logger.Error("open history store", "data_dir", *dataDir, "err", err)
 		os.Exit(1)
 	}
 	defer store.Close()

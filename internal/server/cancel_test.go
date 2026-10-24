@@ -196,9 +196,11 @@ func TestCancelledActivityTellsItsWorker(t *testing.T) {
 func TestCancelRetryingActivity(t *testing.T) {
 	e := timeoutEngine(t, newStore(t, t.TempDir()), map[string]workflow.Func{
 		"Retrying": func(ctx workflow.Context, in []byte) ([]byte, error) {
+			// The budget must outlast the test's first CompleteTask even under
+			// -race load, and end well inside the backoff that follows it.
 			flaky := ctx.ExecuteActivityAsync("flaky", in,
-				workflow.WithRetryPolicy(workflow.RetryPolicy{MaxAttempts: 3, InitialBackoff: 300 * time.Millisecond}))
-			timer := ctx.NewTimer("budget", 100*time.Millisecond)
+				workflow.WithRetryPolicy(workflow.RetryPolicy{MaxAttempts: 3, InitialBackoff: 1500 * time.Millisecond}))
+			timer := ctx.NewTimer("budget", 500*time.Millisecond)
 			if ctx.WaitAny(flaky, timer) == 1 {
 				ctx.CancelStep(flaky)
 			}
@@ -218,7 +220,7 @@ func TestCancelRetryingActivity(t *testing.T) {
 	if !strings.Contains(string(st.Output), "step cancelled") || st.Steps[0].Status != state.StepCancelled || st.Steps[0].Attempts != 1 {
 		t.Fatalf("output %q step %+v, want the retrying step cancelled after 1 attempt", st.Output, st.Steps[0])
 	}
-	time.Sleep(350 * time.Millisecond) // past the backoff
+	time.Sleep(1200 * time.Millisecond) // past the backoff
 	if e.queue.depth() != 0 {
 		t.Fatal("the cancelled step's retry was dispatched")
 	}
