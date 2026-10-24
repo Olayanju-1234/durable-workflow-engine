@@ -1,4 +1,4 @@
-// Package sdks_test runs the TypeScript and Python SDKs end to end against a
+// Package sdks_test runs the TypeScript, Python and Java SDKs end to end against a
 // real engine. Each language has a script that drives the same scenario and
 // exits non-zero on any mismatch; a test is skipped when its runtime is not
 // installed.
@@ -163,4 +163,30 @@ func TestPythonSDK(t *testing.T) {
 		t.Skip("python3 not installed")
 	}
 	runScript(t, newE2EEngine(t), py, "python/e2e.py")
+}
+
+func TestJavaSDK(t *testing.T) {
+	// CI's runners have a JDK, so this must not quietly skip there.
+	skip := t.Skipf
+	if os.Getenv("CI") != "" {
+		skip = t.Fatalf
+	}
+	javac, err := exec.LookPath("javac")
+	if err != nil {
+		skip("javac not installed")
+	}
+	java, err := exec.LookPath("java")
+	if err != nil {
+		skip("java not installed")
+	}
+	if err := exec.Command(javac, "-version").Run(); err != nil {
+		skip("javac does not run (no JDK behind it): %v", err)
+	}
+	classes := t.TempDir()
+	out, err := exec.Command(javac, "--release", "11", "-Xlint:all,-serial", "-Werror", "-d", classes,
+		"java/Workflowd.java", "java/E2E.java").CombinedOutput()
+	if err != nil {
+		t.Fatalf("javac: %v\n%s", err, out)
+	}
+	runScript(t, newE2EEngine(t), java, "-cp", classes, "E2E")
 }

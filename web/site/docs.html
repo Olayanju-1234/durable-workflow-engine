@@ -230,9 +230,9 @@ result: Hello, Ada! 👋</code></pre>
     <table>
       <thead><tr><th>Don't</th><th>Do</th><th>Why</th></tr></thead>
       <tbody>
-        <tr><td><code>time.Now()</code>, <code>Date.now()</code></td><td><code>ctx.Now()</code> / TypeScript <code>ctx.now()</code> (when the latest result the code received was recorded)</td><td>Wall clock differs on every replay</td></tr>
+        <tr><td><code>time.Now()</code>, <code>Date.now()</code></td><td><code>ctx.Now()</code> / <code>ctx.now()</code> in TypeScript, Python and Java (when the latest result the code received was recorded)</td><td>Wall clock differs on every replay</td></tr>
         <tr><td><code>time.Sleep</code></td><td><code>ctx.Sleep(...)</code></td><td>Only a recorded timer survives a restart</td></tr>
-        <tr><td><code>rand</code>, <code>uuid.New()</code>, <code>Math.random()</code></td><td><code>ctx.SideEffect(...)</code>, TypeScript <code>ctx.random()</code>, or generate inside an activity</td><td>New value each replay</td></tr>
+        <tr><td><code>rand</code>, <code>uuid.New()</code>, <code>Math.random()</code></td><td><code>ctx.SideEffect(...)</code>, <code>ctx.random()</code> (TypeScript, Python, Java), or generate inside an activity</td><td>New value each replay</td></tr>
         <tr><td>HTTP calls, DB queries, file I/O</td><td><code>ctx.ExecuteActivity(...)</code></td><td>Side effects would repeat on every replay</td></tr>
         <tr><td><code>go func(){}</code>, channels</td><td><code>ctx.ExecuteActivityAsync</code>, <code>ctx.WaitAny</code> (<a href="#parallel">Parallel steps</a>)</td><td>Goroutine scheduling is non-deterministic</td></tr>
         <tr><td>Reading global mutable state</td><td>Pass data through the workflow input and step outputs</td><td>Process memory is gone after a restart</td></tr>
@@ -519,7 +519,9 @@ if ctx.WaitAny(reply, deadline) == 1 {
       <code>ctx.waitAny([...])</code> instead of <code>Promise.race</code> (which picks by call
       order). Python: <code>ctx.activity_async</code>, <code>ctx.sleep_async</code>,
       <code>ctx.wait_for_signal_async</code>, then <code>ctx.wait_all</code> /
-      <code>ctx.wait_any</code>.
+      <code>ctx.wait_any</code>. Java: <code>ctx.activityAsync</code>, <code>ctx.sleepAsync</code>,
+      <code>ctx.waitForSignalAsync</code> return a <code>Workflowd.Future</code>; then
+      <code>ctx.waitAll</code> / <code>ctx.waitAny</code>.
     </p>
 
     <h2 id="cancellation">Cancellation</h2>
@@ -540,6 +542,8 @@ ctx.CancelStep(race[1-i]) // a no-op if the loser already has a result</code></p
       <code>ctx.cancel(promise)</code>; awaiting it rejects with <code>CancelledFailure</code>.
       Python: <code>ctx.wait_any(reply, deadline, cancel_rest=True)</code> or
       <code>future.cancel()</code>; <code>result()</code> raises <code>CancelledFailure</code>.
+      Java: <code>ctx.waitAny(true, reply, deadline)</code> or <code>future.cancel()</code>;
+      <code>get()</code> throws <code>Workflowd.CancelledFailure</code>.
     </p>
     <p>
       <strong>Cancel a workflow</strong> when its work is no longer wanted: it ends as
@@ -556,7 +560,8 @@ ctx.CancelStep(race[1-i]) // a no-op if the loser already has a result</code></p
       with an <code>ActivityCancelled</code> detail). Go: the activity's ctx ends with cause
       <code>worker.ErrActivityCancelled</code>. TypeScript: <code>task.signal</code> aborts with a
       <code>CancelledFailure</code>. Python: the <code>cancelled</code> and <code>lease_lost</code>
-      events are set. A long activity should heartbeat (the SDKs do it for you) and stop when told.
+      events are set. Java: an activity registered with <code>worker.activityWithContext</code> sees
+      <code>isCancelled()</code> and <code>isLeaseLost()</code> turn true. A long activity should heartbeat (the SDKs do it for you) and stop when told.
     </p>
 
     <h2 id="schedules">Schedules</h2>
@@ -734,6 +739,14 @@ def reserve(payload):
     return f"reserved:{payload}"
 
 worker.run()</code></pre>
+    <p>
+      <code>pip install workflowd</code> (Python 3.9+). The same deterministic helpers:
+      <code>ctx.now()</code> (a UTC <code>datetime</code>), <code>ctx.random()</code>,
+      <code>ctx.sleep_until(name, when)</code>, and <code>ctx.wait_for_signal(name, signal, timeout=seconds)</code>,
+      which returns <code>None</code> if no signal comes in time. Java has them too:
+      <code>ctx.now()</code> (an <code>Instant</code>), <code>ctx.random()</code>, <code>ctx.sleepUntil</code>,
+      and <code>ctx.waitForSignal(name, signal, Duration)</code>, which returns <code>null</code> on timeout.
+    </p>
 
     <h2 id="polyglot-protocol">The SDK protocol</h2>
     <p>
@@ -1186,8 +1199,6 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
         and with nothing set every port is open plaintext.</li>
       <li><strong>At-least-once</strong> activity execution: make activities idempotent. (Signals
         are exactly-once; each carries an idempotency key.)</li>
-      <li><strong>Parallel steps are Go, TypeScript and Python</strong>; the Java SDK runs one step
-        at a time.</li>
       <li><strong>Not load-tested.</strong> Workflows run in parallel, each under its own lock with
         its state cached, and listing reads an in-memory index; the main remaining cost is one fsync
         per event (<a href="https://github.com/Olayanju-1234/durable-workflow-engine/blob/main/docs/adr/0006-keep-file-per-workflow-store.md">ADR-0006</a>).</li>
