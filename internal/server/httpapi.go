@@ -34,14 +34,21 @@ import (
 //	POST /api/workflows/{id}/terminate       {"reason"}
 //	POST /api/workflows/{id}/cancel          {"reason"}
 //	POST /api/workflows/{id}/signal          {"name","payload"}
+//	GET  /api/namespaces
+//
+// Every route but health works in one namespace: the one the caller's token
+// grants, or the one named by the X-Workflowd-Namespace header or the
+// namespace query parameter (see Authorizer).
 type HTTPAPI struct {
 	src EngineSource
 	log *slog.Logger
-	// authToken guards every /api route but health when set (Authorization:
-	// Bearer <token>). Empty disables auth entirely — the pre-existing default.
+	// authToken is the engine's own token: it reaches every namespace. With
+	// neither it nor namespace tokens set the API is open, as before 0.4.0.
 	authToken string
-	// publicReads leaves workflow list/describe open even with authToken set.
+	// publicReads leaves default-namespace list/describe open with a token set.
 	publicReads bool
+	namespaces  *NamespaceSet
+	authz       *Authorizer
 	// demoWorker is reported by /api/health so the dashboard can guide visitors.
 	demoWorker bool
 	// clusterStatus, when set, is reported by /api/health under "cluster".
@@ -60,6 +67,7 @@ func NewHTTPAPI(engine *Engine, logger *slog.Logger, opts ...HTTPOption) *HTTPAP
 	for _, opt := range opts {
 		opt(a)
 	}
+	a.authz = NewAuthorizer(a.authToken, a.publicReads, a.namespaces)
 	return a
 }
 
@@ -77,6 +85,11 @@ func WithAuthToken(token string) HTTPOption {
 // still required to start, signal or terminate them and to run workers.
 func WithPublicReads() HTTPOption {
 	return func(a *HTTPAPI) { a.publicReads = true }
+}
+
+// WithNamespaceSet gives the API the configured namespaces and their tokens.
+func WithNamespaceSet(set *NamespaceSet) HTTPOption {
+	return func(a *HTTPAPI) { a.namespaces = set }
 }
 
 // WithDemoWorker reports in /api/health that an in-process demo worker is
@@ -114,6 +127,16 @@ func (a *HTTPAPI) engine(w http.ResponseWriter) *Engine {
 	return e
 }
 
+// scope returns the engine scoped to the request's namespace, or answers (503
+// with a leader hint) and returns nil.
+func (a *HTTPAPI) scope(w http.ResponseWriter, r *http.Request) *Scope {
+	e := a.engine(w)
+	if e == nil {
+		return nil
+	}
+	return e.In(grantOf(r).Namespace)
+}
+
 // writeNotLeader answers 503: the request was fine, this node just isn't the
 // one that can serve it. The body and a header say where the leader is.
 func (a *HTTPAPI) writeNotLeader(w http.ResponseWriter, err error) {
@@ -143,6 +166,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/workflows/{id}/terminate", a.terminateWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", a.cancelWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
+	mux.HandleFunc("GET /api/namespaces", a.listNamespaces)
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
 	a.registerScheduleRoutes(mux)
@@ -154,29 +178,80 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	return mux
 }
 
-// Wrap layers request logging and (when configured) bearer-token auth around a
-// fully-assembled mux — call it after mounting the dashboard on Handler(), so
-// the middleware sees the final routing table. Auth applies only to /api routes
-// other than health; static assets stay public.
+// Wrap layers request logging and auth around a fully-assembled mux — call
+// it after mounting the dashboard on Handler(), so the middleware sees the
+// final routing table. Auth applies only to /api routes other than health;
+// static assets stay public.
 func (a *HTTPAPI) Wrap(h http.Handler) http.Handler {
-	return a.logRequests(a.requireAuth(h))
+	return a.logRequests(a.authorize(h))
 }
 
-// requireAuth enforces the bearer token on API routes when one is
-// configured. Comparison is constant-time; the header form is exact ("Bearer").
-func (a *HTTPAPI) requireAuth(next http.Handler) http.Handler {
+// HeaderNamespace names the namespace a request works in (or ?namespace=).
+const HeaderNamespace = "X-Workflowd-Namespace"
+
+type grantKey struct{}
+
+// grantOf is the request's grant; a request that never passed authorize (a
+// handler mounted without Wrap) gets the default namespace.
+func grantOf(r *http.Request) Grant {
+	if g, ok := r.Context().Value(grantKey{}).(Grant); ok {
+		return g
+	}
+	return Grant{Namespace: DefaultNamespace, Anonymous: true}
+}
+
+// authorize resolves every API request's namespace and token into a Grant
+// (see Authorizer) and refuses the ones it does not allow: 401 for a missing
+// or unknown token, 403 for a token used outside its namespace.
+func (a *HTTPAPI) authorize(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.authToken == "" || !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/health" ||
-			(a.publicReads && isPublicRead(r)) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/health" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !validBearer(r.Header.Get("Authorization"), a.authToken) {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="workflowd"`)
-			writeError(w, http.StatusUnauthorized, errMissingToken)
+		requested := r.Header.Get(HeaderNamespace)
+		if q := r.URL.Query().Get("namespace"); q != "" {
+			if requested != "" && requested != q {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("%w: the %s header says %q but ?namespace= says %q",
+					ErrInvalidArgument, HeaderNamespace, requested, q))
+				return
+			}
+			requested = q
+		}
+		token, hasAuth := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !hasAuth && r.Header.Get("Authorization") != "" {
+			token = "\x00" // a malformed header is an invalid token, not a missing one
+		}
+		g, err := a.authz.Authorize(token, requested, isPublicRead(r))
+		if err != nil {
+			writeAuthError(w, err)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), grantKey{}, g)))
+	})
+}
+
+// writeAuthError answers a refused request.
+func writeAuthError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrForbidden):
+		writeError(w, http.StatusForbidden, err)
+	case errors.Is(err, ErrInvalidArgument):
+		writeError(w, http.StatusBadRequest, err)
+	default:
+		w.Header().Set("WWW-Authenticate", `Bearer realm="workflowd"`)
+		writeError(w, http.StatusUnauthorized, err)
+	}
+}
+
+// listNamespaces lists the namespaces the caller can use, and which one this
+// request is in.
+func (a *HTTPAPI) listNamespaces(w http.ResponseWriter, r *http.Request) {
+	g := grantOf(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"namespaces": a.authz.Visible(g),
+		"current":    g.Namespace,
+		"admin":      g.Admin,
 	})
 }
 
@@ -318,7 +393,7 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	}
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -352,7 +427,7 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -408,7 +483,7 @@ type runDTO struct {
 }
 
 func (a *HTTPAPI) listWorkflowRuns(w http.ResponseWriter, r *http.Request) {
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -453,7 +528,7 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -516,16 +591,16 @@ func parseIDPolicies(reuse, conflict string) (IdReusePolicy, IdConflictPolicy, e
 }
 
 func (a *HTTPAPI) terminateWorkflow(w http.ResponseWriter, r *http.Request) {
-	a.endWorkflow(w, r, "terminated", (*Engine).TerminateWorkflow)
+	a.endWorkflow(w, r, "terminated", (*Scope).TerminateWorkflow)
 }
 
 func (a *HTTPAPI) cancelWorkflow(w http.ResponseWriter, r *http.Request) {
-	a.endWorkflow(w, r, "cancelled", (*Engine).CancelWorkflow)
+	a.endWorkflow(w, r, "cancelled", (*Scope).CancelWorkflow)
 }
 
 // endWorkflow serves terminate and cancel: {"reason"} in, {"status"} out.
 // Cancel takes "graceful": true too, which tells the workflow code instead.
-func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done string, end func(*Engine, string, string) error) {
+func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done string, end func(*Scope, string, string) error) {
 	var body struct {
 		Reason   string `json:"reason"`
 		Graceful bool   `json:"graceful"`
@@ -537,7 +612,7 @@ func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done strin
 			return
 		}
 	}
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -546,7 +621,7 @@ func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done strin
 			writeError(w, http.StatusBadRequest, fmt.Errorf("%w: only cancel can be graceful", ErrInvalidArgument))
 			return
 		}
-		end, done = (*Engine).RequestCancelWorkflow, "cancel_requested"
+		end, done = (*Scope).RequestCancelWorkflow, "cancel_requested"
 	}
 	err := end(e, r.PathValue("id"), body.Reason)
 	switch {
@@ -580,7 +655,7 @@ func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}

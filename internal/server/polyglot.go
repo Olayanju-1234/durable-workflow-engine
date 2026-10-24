@@ -64,7 +64,7 @@ type decisionTask struct {
 type workflowTaskQueue = routedQueue[*WorkflowTask]
 
 func newWorkflowTaskQueue() *workflowTaskQueue {
-	return newRoutedQueue((*WorkflowTask).GetWorkflowType)
+	return newRoutedQueue((*WorkflowTask).GetWorkflowType, func(t *WorkflowTask) string { return nsOf(t.GetWorkflowId()) })
 }
 
 // dropWorkflow removes any pending task for a workflow — used when a decision
@@ -74,13 +74,18 @@ func dropWorkflow(q *workflowTaskQueue, workflowID string) {
 }
 
 // RegisterWorkflowTypes marks workflow types as executed by an external SDK and
-// makes them startable. SDK workers call this on connect (and on reconnect,
-// since registrations are in-memory and an engine restart clears them).
+// makes them startable, in the default namespace. SDK workers call this on
+// connect (and on reconnect, since registrations are in-memory and an engine
+// restart clears them).
 //
 // Registering also kicks any workflow of that type that was waiting for a
 // decision: the engine may have restarted while no SDK worker was connected, in
 // which case recovery skipped those workflows as "unregistered type".
 func (e *Engine) RegisterWorkflowTypes(workflowTypes []string, workerID, sdk string) error {
+	return e.registerWorkflowTypes(DefaultNamespace, workflowTypes, workerID, sdk)
+}
+
+func (e *Engine) registerWorkflowTypes(ns string, workflowTypes []string, workerID, sdk string) error {
 	var added []string
 	e.mu.Lock()
 	for _, wt := range workflowTypes {
@@ -88,7 +93,7 @@ func (e *Engine) RegisterWorkflowTypes(workflowTypes []string, workerID, sdk str
 			e.mu.Unlock()
 			return fmt.Errorf("server: empty workflow type in registration from %q", workerID)
 		}
-		if existing, ok := e.planners[wt]; ok {
+		if existing, ok := e.planners[nsName{ns, wt}]; ok {
 			// An in-process Go workflow already owns this type. Refuse rather
 			// than silently letting a remote SDK shadow compiled-in code.
 			if _, isRemote := existing.(*remotePlanner); !isRemote {
@@ -97,33 +102,33 @@ func (e *Engine) RegisterWorkflowTypes(workflowTypes []string, workerID, sdk str
 			}
 			continue
 		}
-		e.planners[wt] = &remotePlanner{workflowType: wt}
+		e.planners[nsName{ns, wt}] = &remotePlanner{workflowType: wt}
 		added = append(added, wt)
-		e.log.Info("workflow type registered", "type", wt, "worker_id", workerID, "sdk", sdk)
+		e.log.Info("workflow type registered", "namespace", ns, "type", wt, "worker_id", workerID, "sdk", sdk)
 	}
 	e.mu.Unlock()
 
 	// Pick up anything that was stranded while this type had no runner. A
 	// type already registered has nothing stranded: its decisions dispatch.
 	for _, wt := range added {
-		if err := e.resumeType(wt); err != nil {
+		if err := e.resumeType(ns, wt); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// resumeType advances every non-terminal workflow of a type that is waiting
-// on a decision.
-func (e *Engine) resumeType(workflowType string) error {
+// resumeType advances every non-terminal workflow of a type in a namespace
+// that is waiting on a decision.
+func (e *Engine) resumeType(ns, workflowType string) error {
 	waiting, err := e.indexed(func(s *WorkflowSummary) bool {
-		return s.GetWorkflowType() == workflowType && (s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_RUNNING ||
-			s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_WAITING)
+		return nsOf(s.GetWorkflowId()) == ns && s.GetWorkflowType() == workflowType &&
+			(s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_RUNNING || s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_WAITING)
 	})
 	if err != nil {
 		return fmt.Errorf("server: list workflows to resume %s: %w", workflowType, err)
 	}
-	planner, _ := e.planner(workflowType)
+	planner, _ := e.planner(ns, workflowType)
 	for _, s := range waiting {
 		id := s.GetWorkflowId()
 		w := e.lockWorkflow(id)
@@ -235,9 +240,15 @@ func (e *Engine) onDecisionTimeout(tm timer.Timer) {
 // decision. The returned task carries the workflow's entire history — the SDK
 // replays it to work out what comes next.
 func (e *Engine) PollWorkflowTask(ctx context.Context, workerID string, workflowTypes []string) (*WorkflowTask, error) {
+	return e.pollWorkflowTask(ctx, DefaultNamespace, workerID, workflowTypes)
+}
+
+// pollWorkflowTask is PollWorkflowTask for a namespace; the task names its
+// workflow by store key.
+func (e *Engine) pollWorkflowTask(ctx context.Context, ns, workerID string, workflowTypes []string) (*WorkflowTask, error) {
 	ctx, cancel := e.pollContext(ctx)
 	defer cancel()
-	task, err := e.workflowQueue.poll(ctx, workflowTypes)
+	task, err := e.workflowQueue.poll(ctx, ns, workflowTypes)
 	if err != nil {
 		return nil, e.pollError(err)
 	}

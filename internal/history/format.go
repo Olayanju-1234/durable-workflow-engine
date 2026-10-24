@@ -25,9 +25,11 @@ const (
 	FormatClosedSteps uint32 = 4
 	// FormatRuns: continue-as-new and graceful cancellation (0.3.0).
 	FormatRuns uint32 = 5
+	// FormatNamespaces: a history outside the default namespace (0.4.0).
+	FormatNamespaces uint32 = 6
 
 	// FormatVersion is the newest format this binary reads and writes.
-	FormatVersion = FormatRuns
+	FormatVersion = FormatNamespaces
 )
 
 // FormatRelease names the first release (and commit) whose binary reads each
@@ -38,6 +40,7 @@ var FormatRelease = map[uint32]string{
 	FormatParallelSteps: "workflowd 0.1.0, or a build from f7c18c1 on",
 	FormatClosedSteps:   "workflowd 0.2.0 or later",
 	FormatRuns:          "workflowd 0.3.0 or later",
+	FormatNamespaces:    "workflowd 0.4.0 or later",
 }
 
 // ErrFormatTooNew means the data directory, or one of its histories, was

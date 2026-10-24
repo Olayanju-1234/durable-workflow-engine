@@ -7,6 +7,18 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+### Added
+- **Namespaces** (ADR-0015): logical tenants inside one engine, each with its own workflows,
+  schedules, workflow types, task routing and retention. `--namespaces FILE` (JSON) configures
+  them with their own tokens (`token_file` or `token_sha256`) and retention. A namespace token
+  reaches only its namespace (403 elsewhere); the engine token (`--auth-token`) reaches all; a
+  call picks one with `X-Workflowd-Namespace`, `?namespace=` or gRPC metadata
+  `workflowd-namespace`. `GET /api/namespaces`. Go `client.Options.Namespace`, `namespace` in the
+  TypeScript and Python workers, `worker.namespace(...)` in Java, a namespace picker in the
+  dashboard. The `default` namespace is everything that existed before: histories, URLs, clients
+  and the open demo are unchanged. A namespace's histories live in `namespaces/<name>/` and need
+  history format 6.
+
 ## [0.3.0] - 2026-10-24
 
 The second release from running liftoff in production: workflows that run forever, a contract

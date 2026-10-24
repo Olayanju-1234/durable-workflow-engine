@@ -241,6 +241,27 @@ public final class E2E {
             fail("reuse: refused " + refused + ", same " + same.runId + "/" + same.started + ", again " + again.runId + ", runs " + reuseRuns);
         }
 
+        // Namespaces: a worker holding the e2e namespace's token works there, under the same type
+        // and id the default namespace uses, and sees nothing else.
+        Workflowd.Worker nsWorker = new Workflowd.Worker(List.of(follower), "java-e2e-ns", "e2e-token", null);
+        nsWorker.workflow("JavaParallel", ctx -> "in e2e: " + ctx.activity("java-shout", ctx.input()));
+        nsWorker.activity("java-shout", input -> input.toUpperCase(java.util.Locale.ROOT));
+        nsWorker.start();
+        nsWorker.startWorkflow("JavaParallel", "hello", parallelId);
+        Map<String, Object> nsDone = waitDone(nsWorker, parallelId);
+        Map<String, Object> defaultSide = worker.describe(parallelId);
+        int elsewhere = 200;
+        try {
+            new Workflowd.Worker(List.of(follower), "java-e2e-other", "e2e-token", null).namespace("default").describe(parallelId);
+        } catch (java.io.IOException e) {
+            elsewhere = e.getMessage().startsWith("HTTP 403") ? 403 : -1;
+        }
+        if (!"in e2e: HELLO".equals(nsDone.get("output")) || "in e2e: HELLO".equals(defaultSide.get("output")) || elsewhere != 403) {
+            fail("namespace: output " + nsDone.get("output") + ", default's " + defaultSide.get("output")
+                    + ", token outside its namespace " + elsewhere);
+        }
+        nsWorker.stop();
+
         // A restarted engine has forgotten every registration: the worker must notice and
         // register again before this workflow can be dispatched.
         System.out.println("RESTART");

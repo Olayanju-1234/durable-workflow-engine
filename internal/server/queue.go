@@ -8,7 +8,9 @@ import (
 
 // routedQueue is an in-memory FIFO whose pollers can ask only for the items they
 // can handle: an activity worker names the steps it implements, an SDK worker
-// names the workflow types it can replay. route extracts that key from an item.
+// names the workflow types it can replay. route extracts that key from an item,
+// and scope where it belongs (its namespace): a poller only ever sees its own
+// scope's items, whatever names it asks for.
 //
 // Each item is handed to exactly one poller: removal happens under mu, so two
 // pollers can never both take the same item. That is the "no duplicate
@@ -19,6 +21,7 @@ import (
 // work by replaying the log. Nothing here is durable.
 type routedQueue[T any] struct {
 	route func(T) string
+	scope func(T) string
 
 	mu      sync.Mutex
 	pending []T
@@ -27,8 +30,8 @@ type routedQueue[T any] struct {
 	ready chan struct{}
 }
 
-func newRoutedQueue[T any](route func(T) string) *routedQueue[T] {
-	return &routedQueue[T]{route: route, ready: make(chan struct{})}
+func newRoutedQueue[T any](route, scope func(T) string) *routedQueue[T] {
+	return &routedQueue[T]{route: route, scope: scope, ready: make(chan struct{})}
 }
 
 func (q *routedQueue[T]) enqueue(item T) {
@@ -54,14 +57,14 @@ func (q *routedQueue[T]) depth() int {
 	return len(q.pending)
 }
 
-// poll blocks until an item whose route is in routes is available, or ctx
-// ends. Passing no routes accepts any item. Long-poll is a worker's normal
-// idle state.
-func (q *routedQueue[T]) poll(ctx context.Context, routes []string) (T, error) {
+// poll blocks until an item in scope whose route is in routes is available,
+// or ctx ends. Passing no routes accepts any item in scope. Long-poll is a
+// worker's normal idle state.
+func (q *routedQueue[T]) poll(ctx context.Context, scope string, routes []string) (T, error) {
 	for {
 		q.mu.Lock()
 		for i, item := range q.pending {
-			if len(routes) == 0 || slices.Contains(routes, q.route(item)) {
+			if q.scope(item) == scope && (len(routes) == 0 || slices.Contains(routes, q.route(item))) {
 				q.pending = slices.Delete(q.pending, i, i+1)
 				q.mu.Unlock()
 				return item, nil
@@ -79,9 +82,10 @@ func (q *routedQueue[T]) poll(ctx context.Context, routes []string) (T, error) {
 	}
 }
 
-// taskQueue holds activity tasks, routed by step name.
+// taskQueue holds activity tasks, routed by step name within a namespace.
+// Tasks name their workflow by its store key until they leave the engine.
 type taskQueue = routedQueue[*Task]
 
 func newTaskQueue() *taskQueue {
-	return newRoutedQueue((*Task).GetStepName)
+	return newRoutedQueue((*Task).GetStepName, func(t *Task) string { return nsOf(t.GetWorkflowId()) })
 }

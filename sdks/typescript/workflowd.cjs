@@ -771,8 +771,9 @@ class HTTPError extends Error {
  * again: every new engine (restart, new leader) starts with no registrations.
  */
 class Connection {
-  constructor(addresses, token) {
+  constructor(addresses, token, namespace) {
     this.token = token;
+    this.namespace = namespace;
     this.addrs = addresses.map((a) => a.replace(/\/$/, ''));
     if (this.addrs.length === 0) throw new Error('workflowd: at least one address is required');
     this.current = 0;
@@ -810,6 +811,7 @@ class Connection {
           headers: {
             'Content-Type': 'application/json',
             ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+            ...(this.namespace ? { 'X-Workflowd-Namespace': this.namespace } : {}),
           },
           body: body === undefined ? undefined : JSON.stringify(body),
         });
@@ -850,8 +852,10 @@ class Connection {
 class Worker {
   /**
    * `token` is sent as `Authorization: Bearer <token>` for an engine started
-   * with --auth-token-file. An https address uses Node's trust store; for a
-   * private CA, start Node with NODE_EXTRA_CA_CERTS=/path/to/ca.pem.
+   * with --auth-token-file, or a namespace's token. `namespace` names the
+   * namespace every call works in (unset: the default, or a namespace token's
+   * own). An https address uses Node's trust store; for a private CA, start
+   * Node with NODE_EXTRA_CA_CERTS=/path/to/ca.pem.
    */
   constructor({
     address = 'http://localhost:8233',
@@ -859,10 +863,11 @@ class Worker {
     workerId,
     sdk = 'typescript/0.3.0',
     token,
+    namespace,
     activityConcurrency = 4,
     workflowConcurrency = 2,
   } = {}) {
-    this.conn = new Connection(addresses ?? [address], token);
+    this.conn = new Connection(addresses ?? [address], token, namespace);
     this.workerId = workerId ?? `ts-worker-${Math.random().toString(16).slice(2, 10)}`;
     this.sdk = sdk;
     this.workflows = new Map();

@@ -56,12 +56,21 @@ function setToken(token) {
   } catch { /* storage blocked: keep it in memory only */ }
 }
 
+// The namespace every call works in ('' = the one the token grants). A
+// ?namespace= link picks it; otherwise the tab remembers the last choice.
+const NS_KEY = 'workflowd-namespace';
+let namespace = new URLSearchParams(location.search).get('namespace') || '';
+if (!namespace) {
+  try { namespace = sessionStorage.getItem(NS_KEY) || ''; } catch { /* storage blocked */ }
+}
+
 async function api(path, options) {
   const send = (token) => fetch(path, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(namespace && path !== '/api/health' ? { 'X-Workflowd-Namespace': namespace } : {}),
     },
   });
   const sent = apiToken;
@@ -385,6 +394,38 @@ async function startWorkflow(e) {
   }
 }
 
+// The namespace picker shows only when the caller can use more than one.
+async function loadNamespaces() {
+  let info;
+  try {
+    info = await api('/api/namespaces');
+  } catch (err) {
+    if (namespace && /HTTP 40[13]|forbidden|token/i.test(err.message)) {
+      // A remembered namespace this token cannot use: fall back to its own.
+      namespace = '';
+      try { sessionStorage.removeItem(NS_KEY); } catch { /* storage blocked */ }
+      return loadNamespaces();
+    }
+    return;
+  }
+  const names = info.namespaces || [];
+  const sel = $('ns');
+  sel.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  sel.value = info.current;
+  // Shown whenever there is a choice, or the view is not the default one.
+  $('ns-pick').hidden = names.length < 2 && info.current === 'default';
+}
+
+function switchNamespace(next) {
+  namespace = next;
+  try { sessionStorage.setItem(NS_KEY, next); } catch { /* storage blocked */ }
+  const url = new URL(location.href);
+  url.searchParams.set('namespace', next);
+  history.replaceState(null, '', url);
+  closeDrawer();
+  refresh();
+}
+
 // On a node running the demo worker, point visitors at a workflow that will
 // actually move, and at the input that shows the saga compensating.
 async function loadNodeInfo() {
@@ -482,10 +523,12 @@ function init() {
     state.autoRefresh = e.target.checked;
     scheduleRefresh();
   });
+  $('ns').addEventListener('change', (e) => switchNamespace(e.target.value));
 
   refresh();
   scheduleRefresh();
   loadNodeInfo();
+  loadNamespaces();
 }
 
 document.addEventListener('DOMContentLoaded', init);

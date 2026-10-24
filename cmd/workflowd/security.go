@@ -28,6 +28,7 @@ const (
 // listener is plaintext and unauthenticated, as before they existed.
 type securityFlags struct {
 	authToken, authTokenFile, metricsTokenFile string
+	namespacesFile                             string
 	publicReads                                bool
 	tlsCert, tlsKey                            string
 	raftCert, raftKey, raftCA                  string
@@ -38,6 +39,7 @@ func registerSecurityFlags(fs *flag.FlagSet) *securityFlags {
 	fs.StringVar(&f.authToken, "auth-token", "", "require this bearer token on the JSON API and gRPC (visible in ps: prefer --auth-token-file or $"+envAuthToken+")")
 	fs.StringVar(&f.authTokenFile, "auth-token-file", "", "read the API/gRPC bearer token from this file (default: $"+envAuthToken+")")
 	fs.BoolVar(&f.publicReads, "auth-public-reads", false, "with a token set, let anyone list and describe workflows; starting, signalling, terminating and workers still need the token")
+	fs.StringVar(&f.namespacesFile, "namespaces", "", "JSON file of namespaces: each one's tokens, retention and limits (docs: Namespaces). The default namespace always exists; --auth-token reaches every namespace")
 	fs.StringVar(&f.metricsTokenFile, "metrics-auth-token-file", "", "require the bearer token in this file on /metrics (default: $"+envMetricsAuthToken+"; unset leaves /metrics open)")
 	fs.StringVar(&f.tlsCert, "tls-cert", "", "PEM certificate for TLS on the gRPC, dashboard/API and metrics listeners (reloaded when the file changes)")
 	fs.StringVar(&f.tlsKey, "tls-key", "", "PEM private key for --tls-cert")
@@ -51,8 +53,9 @@ func registerSecurityFlags(fs *flag.FlagSet) *securityFlags {
 type security struct {
 	authToken, metricsToken string
 	publicReads             bool
-	tls                     *tls.Config // client-facing listeners; nil = plaintext
-	peerTLS                 *tls.Config // Raft peers; nil = plaintext
+	namespaces              *server.NamespaceSet // nil: only default
+	tls                     *tls.Config          // client-facing listeners; nil = plaintext
+	peerTLS                 *tls.Config          // Raft peers; nil = plaintext
 }
 
 func (f *securityFlags) resolve(logger *slog.Logger) (security, error) {
@@ -70,6 +73,11 @@ func (f *securityFlags) resolve(logger *slog.Logger) (security, error) {
 		return s, errors.New("--auth-public-reads needs a token (--auth-token-file or $" + envAuthToken + ")")
 	}
 	s.publicReads = f.publicReads
+	if f.namespacesFile != "" {
+		if s.namespaces, err = server.LoadNamespaces(f.namespacesFile); err != nil {
+			return s, err
+		}
+	}
 
 	if f.tlsCert != "" || f.tlsKey != "" {
 		if s.tls, err = tlsconfig.Server(f.tlsCert, f.tlsKey); err != nil {
@@ -118,9 +126,14 @@ func readSecretFile(fileFlag, path string, logger *slog.Logger) (string, error) 
 	return tok, nil
 }
 
+// authorizer decides every call's namespace and token, on both transports.
+func (s security) authorizer() *server.Authorizer {
+	return server.NewAuthorizer(s.authToken, s.publicReads, s.namespaces)
+}
+
 // grpcServerOptions are the TLS and auth options for the client-facing gRPC server.
 func (s security) grpcServerOptions() []grpc.ServerOption {
-	opts := server.GRPCAuth(s.authToken, s.publicReads)
+	opts := server.GRPCAuthorize(s.authorizer())
 	if s.tls != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(s.tls)))
 	}
@@ -129,7 +142,7 @@ func (s security) grpcServerOptions() []grpc.ServerOption {
 
 // httpOptions are the auth options for the JSON API.
 func (s security) httpOptions() []server.HTTPOption {
-	opts := []server.HTTPOption{server.WithAuthToken(s.authToken)}
+	opts := []server.HTTPOption{server.WithAuthToken(s.authToken), server.WithNamespaceSet(s.namespaces)}
 	if s.publicReads {
 		opts = append(opts, server.WithPublicReads())
 	}
@@ -143,9 +156,12 @@ func (s security) metricsHandler(h http.Handler) http.Handler {
 
 // logPosture says once at startup what is and isn't protected.
 func (s security) logPosture(logger *slog.Logger, httpOn bool) {
-	if s.authToken == "" && httpOn {
-		logger.Warn("API auth is disabled; anyone who can reach the HTTP or gRPC port can start, signal and terminate workflows",
+	if s.authToken == "" && httpOn && s.authorizer().Open() {
+		logger.Warn("API auth is disabled for the default namespace; anyone who can reach the HTTP or gRPC port can start, signal and terminate its workflows",
 			"hint", "set --auth-token-file or $"+envAuthToken)
+	}
+	if names := s.namespaces.Names(); len(names) > 1 {
+		logger.Info("namespaces configured", "namespaces", names)
 	}
 	if s.tls == nil {
 		logger.Info("client listeners are plaintext", "hint", "set --tls-cert/--tls-key, or terminate TLS in a proxy")

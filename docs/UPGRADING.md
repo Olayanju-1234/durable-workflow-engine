@@ -29,6 +29,7 @@ needs it is written. Binaries before 0.3.0 neither write nor read that file.
 | 3 | Two steps in flight at once (parallel activities, `waitAny` races) | 0.1.0 (any build from `f7c18c1`) | refuses the history |
 | 4 | A cancelled step, or a step closed between retries by a timeout or a cancel | 0.2.0 | refuses a history with a step closed between retries; reads a cancelled step as failed |
 | 5 | Continue-as-new and graceful cancellation | 0.3.0 | reads a run that continued as new as completed (the chain stops); ignores a cancel request |
+| 6 | A namespace other than `default` | 0.4.0 | does not see the namespace's workflows at all: they stop running |
 
 Statuses added as flags (`TIMED_OUT`, `CANCELLED`, `TERMINATED`) need no format: an older
 binary shows them as `FAILED`, which is harmless.
@@ -84,6 +85,7 @@ SDKs keep working against newer engines.
 | 0.1.x | 0.1.0 | |
 | 0.2.0 | 0.2.0 for timeouts, cancellation, error types, `ctx.now()` | TS `ctx.now()` needs `started_at` on workflow tasks |
 | 0.3.0 | 0.3.0 for continue-as-new, id reuse policies, graceful cancellation | |
+| 0.4.0 | 0.4.0 for namespaces | An engine before 0.4.0 ignores the namespace header, so a namespaced worker would work in `default` there; it is refused instead only if it uses a namespace token |
 
 When an SDK sends a field an older engine does not know, the engine refuses the request
 (`400 unknown field`). SDKs fall back where the result would otherwise be lost (activity error
@@ -91,6 +93,9 @@ types); otherwise the feature is simply unavailable until the engine is upgraded
 
 ## Release notes on rollback
 
+- **0.4.0:** the first history in a namespace other than `default` raises the directory to
+  format 6 (it lives under `namespaces/`, which older binaries do not read). Upgrading without
+  configuring a namespace keeps the format, and the rollback, where they were.
 - **0.3.0:** adds formats (this document). A workflow that continues as new raises the
   directory to format 5 and moves its finished runs to `__workflowd-run~...` history files,
   which older binaries ignore. The new limits apply to existing workflows as soon as you

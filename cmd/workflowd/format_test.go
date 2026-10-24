@@ -71,3 +71,22 @@ func TestCheckFormat(t *testing.T) {
 		t.Fatalf("a refused rescan rewrote the record to %d", f)
 	}
 }
+
+// A history outside the default namespace needs format 6 whatever it holds:
+// a binary before 0.4.0 would not see it.
+func TestCheckFormatCountsNamespaces(t *testing.T) {
+	dir := t.TempDir()
+	writeEvents(t, dir, "acme/wf",
+		&history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{WorkflowStarted: &history.WorkflowStartedEvent{WorkflowType: "T"}}})
+	// Pretend the record was lowered by hand: the scan must still see it.
+	if err := history.WriteFormat(dir, history.FormatBase); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := checkFormat(&out, dir, true); err != nil {
+		t.Fatalf("rescan: %v\n%s", err, out.String())
+	}
+	if f, _ := history.ReadFormat(dir); f != history.FormatNamespaces {
+		t.Fatalf("after rescan the record is %d, want %d:\n%s", f, history.FormatNamespaces, out.String())
+	}
+}

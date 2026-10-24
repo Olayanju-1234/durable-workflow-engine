@@ -37,9 +37,9 @@ type HistoryStore struct {
 	mu    sync.Mutex
 	files map[string]*os.File // workflowID -> open append handle
 	dirty map[string]bool     // written by AppendBuffered and not yet fsync'd
-	// dirDirty: AppendBuffered created a file whose directory entry is not yet
-	// fsync'd (Sync does it, with the files).
-	dirDirty bool
+	// dirtyDirs: directories in which AppendBuffered created a file whose
+	// entry is not yet fsync'd (Sync does it, with the files).
+	dirtyDirs map[string]bool
 
 	// format is the history format recorded for the directory (0: none yet).
 	// Guarded by mu.
@@ -63,7 +63,8 @@ func NewHistoryStore(dir string) (*HistoryStore, error) {
 	if format > FormatVersion {
 		return nil, TooNewError(format, "data directory "+dir)
 	}
-	return &HistoryStore{dir: dir, format: format, files: make(map[string]*os.File), dirty: make(map[string]bool), writeFile: (*os.File).Write}, nil
+	return &HistoryStore{dir: dir, format: format, files: make(map[string]*os.File), dirty: make(map[string]bool),
+		dirtyDirs: make(map[string]bool), writeFile: (*os.File).Write}, nil
 }
 
 // Format is the history format recorded for the data directory, 0 if none is
@@ -119,11 +120,11 @@ func (s *HistoryStore) AppendBuffered(workflowID string, event *HistoryEvent) er
 func (s *HistoryStore) Sync() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.dirDirty {
-		if err := s.syncDir(); err != nil {
+	for dir := range s.dirtyDirs {
+		if err := syncDir(dir); err != nil {
 			return err
 		}
-		s.dirDirty = false
+		delete(s.dirtyDirs, dir)
 	}
 	for id := range s.dirty {
 		f, cached := s.files[id]
@@ -263,7 +264,7 @@ func (s *HistoryStore) ReadRaw(workflowID string) ([]byte, error) {
 }
 
 // ReplaceAll makes the store hold exactly the given histories, keyed by
-// workflow id, as raw bytes from ReadRaw. Each file is written to a temp file
+// store key, as raw bytes from ReadRaw. Each file is written to a temp file
 // and renamed into place, and every history not listed is removed. It installs
 // a cluster snapshot; a crash part-way leaves a mix of old and new files, which
 // the caller repairs by installing the same snapshot again.
@@ -272,6 +273,9 @@ func (s *HistoryStore) ReplaceAll(files map[string][]byte) error {
 	for id, data := range files {
 		if err := validateWorkflowID(id); err != nil {
 			return err
+		}
+		if Namespaced(id) {
+			need = max(need, FormatNamespaces)
 		}
 		if _, err := record.Scan(bufio.NewReader(bytes.NewReader(data)), func(payload []byte) error {
 			ev := &HistoryEvent{}
@@ -294,26 +298,38 @@ func (s *HistoryStore) ReplaceAll(files map[string][]byte) error {
 	}
 	clear(s.dirty) // every history is about to be rewritten durably
 	for id, data := range files {
-		if err := record.ReplaceFile(s.dir, id+historyExt, data); err != nil {
+		dir := s.dirOf(id)
+		if Namespaced(id) {
+			ns, _ := SplitKey(id)
+			if err := s.namespaceDirLocked(ns); err != nil {
+				return err
+			}
+		}
+		_, name := SplitKey(id)
+		if err := record.ReplaceFile(dir, name+historyExt, data); err != nil {
 			return fmt.Errorf("history: replace %s: %w", id, err)
 		}
 	}
-	entries, err := os.ReadDir(s.dir)
+	existing, err := s.listLocked()
 	if err != nil {
-		return fmt.Errorf("history: read data dir: %w", err)
+		return err
 	}
-	for _, e := range entries {
-		id, ok := strings.CutSuffix(e.Name(), historyExt)
-		if !ok || e.IsDir() {
+	dirs := map[string]bool{s.dir: true}
+	for _, id := range existing {
+		if _, keep := files[id]; keep {
 			continue
 		}
-		if _, keep := files[id]; !keep {
-			if err := os.Remove(filepath.Join(s.dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("history: remove %s: %w", id, err)
-			}
+		if err := os.Remove(s.path(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("history: remove %s: %w", id, err)
+		}
+		dirs[s.dirOf(id)] = true
+	}
+	for dir := range dirs {
+		if err := syncDir(dir); err != nil {
+			return err
 		}
 	}
-	return s.syncDir()
+	return nil
 }
 
 // Close flushes and closes all open file handles. The store must not be used afterward.
@@ -378,7 +394,7 @@ func (s *HistoryStore) Delete(workflowID string) error {
 	if err := os.Remove(s.path(workflowID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("history: delete %s: %w", workflowID, err)
 	}
-	return s.syncDir()
+	return syncDir(s.dirOf(workflowID))
 }
 
 // NewRun ends a workflow's current history file and starts the next: the
@@ -399,6 +415,9 @@ func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent)
 	}
 	if err := validateWorkflowID(archiveID); err != nil {
 		return err
+	}
+	if s.dirOf(archiveID) != s.dirOf(workflowID) {
+		return fmt.Errorf("history: run archive %q is not in the namespace of %q", archiveID, workflowID)
 	}
 	payload, err := proto.Marshal(first)
 	if err != nil {
@@ -440,7 +459,7 @@ func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent)
 			return fmt.Errorf("history: keep %s as %s: a different history already has that name", workflowID, archiveID)
 		}
 	}
-	if err := s.syncDir(); err != nil {
+	if err := syncDir(s.dirOf(workflowID)); err != nil {
 		return err
 	}
 	next := cur + ".next"
@@ -461,7 +480,7 @@ func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent)
 	if err := os.Rename(next, cur); err != nil {
 		return fmt.Errorf("history: start %s's next run: %w", workflowID, err)
 	}
-	return s.syncDir()
+	return syncDir(s.dirOf(workflowID))
 }
 
 // syncFile fsyncs a file through a fresh descriptor.
@@ -481,13 +500,19 @@ func syncFile(path string) error {
 // first use. On the first open of an existing file it recovers a torn tail; on
 // the first creation of a new file it fsyncs the parent directory (or, with
 // syncDir false, leaves that to Sync). Callers must hold s.mu.
-func (s *HistoryStore) fileLocked(workflowID string, syncDir bool) (*os.File, error) {
+func (s *HistoryStore) fileLocked(workflowID string, syncDirNow bool) (*os.File, error) {
 	if f, ok := s.files[workflowID]; ok {
 		return f, nil
 	}
 	path := s.path(workflowID)
 	_, statErr := os.Stat(path)
 	isNew := errors.Is(statErr, os.ErrNotExist)
+	if isNew && Namespaced(workflowID) {
+		ns, _ := SplitKey(workflowID)
+		if err := s.namespaceDirLocked(ns); err != nil {
+			return nil, err
+		}
+	}
 
 	// O_RDWR (not O_WRONLY) so recovery can read the file back to find the clean
 	// tail; O_APPEND still forces every write to the physical end of the file.
@@ -496,12 +521,12 @@ func (s *HistoryStore) fileLocked(workflowID string, syncDir bool) (*os.File, er
 		return nil, fmt.Errorf("history: open append: %w", err)
 	}
 
-	if isNew && !syncDir {
-		s.dirDirty = true
+	if isNew && !syncDirNow {
+		s.dirtyDirs[s.dirOf(workflowID)] = true
 	} else if isNew {
 		// A new file's name isn't durable until its parent directory is fsync'd;
 		// without this a crash could lose the file despite a synced first append.
-		if err := s.syncDir(); err != nil {
+		if err := syncDir(s.dirOf(workflowID)); err != nil {
 			f.Close()
 			return nil, err
 		}
@@ -545,10 +570,10 @@ func recoverTornTail(f *os.File) error {
 	return nil
 }
 
-// syncDir fsyncs the data directory so a newly-created history file is durably
-// linked into it. Callers must hold s.mu.
-func (s *HistoryStore) syncDir() error {
-	d, err := os.Open(s.dir)
+// syncDir fsyncs a directory so a file newly created, renamed or removed in
+// it is durably so.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("history: open data dir: %w", err)
 	}
@@ -559,19 +584,82 @@ func (s *HistoryStore) syncDir() error {
 	return nil
 }
 
-func (s *HistoryStore) path(workflowID string) string {
-	return filepath.Join(s.dir, workflowID+historyExt)
+// dirOf is the directory that holds a key's history.
+func (s *HistoryStore) dirOf(key string) string {
+	if !Namespaced(key) {
+		return s.dir
+	}
+	ns, _ := SplitKey(key)
+	return filepath.Join(s.dir, namespacesDir, ns)
 }
 
-// ListWorkflows returns the id of every workflow with a history file in the data
-// directory, in unspecified order. The data dir is the durable index of all
-// workflows, so this is how crash recovery discovers what to replay after a
-// restart — the in-memory task queue is gone, but the logs on disk are not.
+func (s *HistoryStore) path(key string) string {
+	_, id := SplitKey(key)
+	return filepath.Join(s.dirOf(key), id+historyExt)
+}
+
+// namespaceDirLocked makes a namespace's directory exist, durably, before a
+// history is created in it. The directory's format is raised first: a binary
+// before 0.4.0 would not see the namespace's workflows at all. The caller
+// holds s.mu.
+func (s *HistoryStore) namespaceDirLocked(ns string) error {
+	if err := s.requireFormatLocked(FormatNamespaces); err != nil {
+		return err
+	}
+	dir := filepath.Join(s.dir, namespacesDir, ns)
+	if _, err := os.Stat(dir); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("history: create namespace %s: %w", ns, err)
+	}
+	for _, d := range []string{filepath.Join(s.dir, namespacesDir), s.dir} {
+		if err := syncDir(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListWorkflows returns the key of every history in the data directory, the
+// default namespace's and every other namespace's, in unspecified order. The
+// data dir is the durable index of all workflows, so this is how crash
+// recovery discovers what to replay after a restart — the in-memory task
+// queue is gone, but the logs on disk are not.
 func (s *HistoryStore) ListWorkflows() ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.listLocked()
+}
 
-	entries, err := os.ReadDir(s.dir)
+func (s *HistoryStore) listLocked() ([]string, error) {
+	ids, err := listHistories(s.dir, "")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(filepath.Join(s.dir, namespacesDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return ids, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("history: read namespaces: %w", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !ValidNamespace(e.Name()) || e.Name() == DefaultNamespace {
+			continue
+		}
+		more, err := listHistories(filepath.Join(s.dir, namespacesDir, e.Name()), e.Name())
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, more...)
+	}
+	return ids, nil
+}
+
+// listHistories returns the keys of the history files in one directory.
+func listHistories(dir, ns string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("history: read data dir: %w", err)
 	}
@@ -584,18 +672,7 @@ func (s *HistoryStore) ListWorkflows() ([]string, error) {
 		if !strings.HasSuffix(name, historyExt) {
 			continue // ignore sentinels, temp files, anything not a history log
 		}
-		ids = append(ids, strings.TrimSuffix(name, historyExt))
+		ids = append(ids, Key(ns, strings.TrimSuffix(name, historyExt)))
 	}
 	return ids, nil
-}
-
-// validateWorkflowID rejects IDs that are empty or could escape the data dir.
-func validateWorkflowID(id string) error {
-	if id == "" {
-		return errors.New("history: empty workflow ID")
-	}
-	if id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
-		return fmt.Errorf("history: invalid workflow ID %q", id)
-	}
-	return nil
 }

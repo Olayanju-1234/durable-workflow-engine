@@ -106,7 +106,8 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 		GRPCAddr: advertised(cfg.addr, selfHost), HTTPAddr: advertised(cfg.httpAddr, selfHost),
 		DataDir: dataDir, Store: store, Logger: logger, TickInterval: cc.tick, PeerTLS: cfg.sec.peerTLS,
 		NewEngine: func(hl server.HistoryLog) *server.Engine {
-			e := server.NewEngine(store, logger, server.WithHistoryLog(hl), server.WithLimits(cfg.limits))
+			e := server.NewEngine(store, logger, server.WithHistoryLog(hl), server.WithLimits(cfg.limits),
+				server.WithNamespaces(cfg.sec.namespaces))
 			registerDemoTypes(e)
 			return e
 		},

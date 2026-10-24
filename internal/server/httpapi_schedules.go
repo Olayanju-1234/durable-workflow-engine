@@ -28,8 +28,8 @@ type scheduleDTO struct {
 	NextFireAt    string `json:"next_fire_at,omitempty"`
 }
 
-func (a *HTTPAPI) listSchedules(w http.ResponseWriter, _ *http.Request) {
-	e := a.engine(w)
+func (a *HTTPAPI) listSchedules(w http.ResponseWriter, r *http.Request) {
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -70,7 +70,7 @@ func (a *HTTPAPI) createSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -85,7 +85,7 @@ func (a *HTTPAPI) createSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *HTTPAPI) deleteSchedule(w http.ResponseWriter, r *http.Request) {
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}

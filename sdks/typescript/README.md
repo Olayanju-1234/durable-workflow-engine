@@ -82,7 +82,8 @@ Cancel a whole workflow with `worker.cancel(id, reason)`: it ends as `CANCELLED`
 activities it was running get their `task.signal` aborted with a `CancelledFailure`.
 
 For an engine with auth and TLS: `new Worker({ address: 'https://…:8233', token })`, and
-`NODE_EXTRA_CA_CERTS=/path/ca.pem` for a private CA.
+`NODE_EXTRA_CA_CERTS=/path/ca.pem` for a private CA. With a namespace's token the worker works in
+that namespace; with the engine's token, pick one with `namespace: 'acme'` (engine 0.4.0+).
 
 Workflow code must be deterministic: no clocks, randomness or I/O except through `ctx`.
 How replay works, and the protocol, are in the

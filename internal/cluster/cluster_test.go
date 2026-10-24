@@ -142,6 +142,7 @@ func (tc *testCluster) start(id string) {
 		NewEngine: func(l server.HistoryLog) *server.Engine {
 			e := server.NewEngine(store, logger, server.WithHistoryLog(l), server.WithLeaseDuration(time.Second))
 			e.Register(threeSteps)
+			e.In("acme").RegisterWorkflow(threeSteps.Type, threeSteps)
 			return e
 		},
 	})
@@ -261,7 +262,12 @@ func (tc *testCluster) waitIdentical(id string, want int) []*history.HistoryEven
 			if m.c == nil {
 				continue
 			}
-			raw, err := os.ReadFile(filepath.Join(m.dir, id+".history"))
+			ns, local := history.SplitKey(id)
+			path := filepath.Join(m.dir, local+".history")
+			if history.Namespaced(id) {
+				path = filepath.Join(m.dir, "namespaces", ns, local+".history")
+			}
+			raw, err := os.ReadFile(path)
 			if err != nil || (first != nil && !bytes.Equal(raw, first)) {
 				same = false
 				break
@@ -557,5 +563,57 @@ func TestReplicatedLogReportsRejection(t *testing.T) {
 	stale := &replicatedLog{node: lead.c.node, term: lead.c.Status().Term - 1}
 	if err := stale.Append("wf-x", &history.HistoryEvent{EventId: 2}); !errors.Is(err, server.ErrNotLeader) {
 		t.Fatalf("append for an older term: %v, want ErrNotLeader", err)
+	}
+}
+
+// Namespaced workflows replicate like any other, and a follower that missed
+// them gets them, in their namespace, from a snapshot.
+func TestClusterReplicatesNamespaces(t *testing.T) {
+	tc := newTestCluster(t, 3, 10)
+	lead, e := tc.leader()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			e := tc.serving()
+			if e == nil {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+			pctx, pcancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			task, err := e.In("acme").PollTask(pctx, "acme-worker")
+			pcancel()
+			if err == nil {
+				_ = e.In("acme").CompleteTask(task.GetWorkflowId(), task.GetStepName(), task.GetSequence(), task.GetLeaseToken(), nil)
+			}
+		}
+	}()
+	var lagger string
+	for id := range tc.members {
+		if id != lead.id {
+			lagger = id
+		}
+	}
+	tc.stop(lagger)
+	for _, id := range []string{"n-1", "n-2", "n-3", "n-4"} {
+		if _, err := e.In("acme").Start("Three", nil, id); err != nil {
+			t.Fatal(err)
+		}
+		waitStatus(t, func() (*server.Engine, error) { return lead.c.Engine() }, "acme/"+id, server.WorkflowStatus_WORKFLOW_STATUS_COMPLETED)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for lead.c.Status().Snapshot == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	tc.start(lagger)
+	for _, id := range []string{"n-1", "n-4"} {
+		tc.waitIdentical("acme/"+id, 8)
+	}
+	got, _ := tc.members[lagger].store.ListWorkflows()
+	if !slices.Contains(got, "acme/n-4") || slices.Contains(got, "n-4") {
+		t.Fatalf("lagger holds %v", got)
+	}
+	if f := tc.members[lagger].store.Format(); f < history.FormatNamespaces {
+		t.Fatalf("lagger's format is %d after restoring namespaced histories", f)
 	}
 }

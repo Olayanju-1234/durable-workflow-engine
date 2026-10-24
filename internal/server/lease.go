@@ -290,7 +290,7 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 			attempt.StartToClose, le.workerID)
 		attempt.ErrorType = ErrorTypeStartToCloseTimeout
 	}
-	delay, willRetry := e.retryAfter(&attempt, time.Now())
+	delay, willRetry := e.retryAfter(nsOf(tm.WorkflowID), &attempt, time.Now())
 	failedEv := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepFailed{
 		StepFailed: &history.StepFailedEvent{
 			StepName: le.stepName, Sequence: le.sequence, Error: reason,

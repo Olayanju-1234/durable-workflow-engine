@@ -82,13 +82,21 @@ func (h *e2eEngine) restart() {
 	}
 	// A short lease, so an activity that runs longer survives only by heartbeating.
 	// Small history limits, so a looping workflow is told to continue as new.
+	// The scripts' namespace scenario works in "e2e"; the default namespace
+	// stays open, as it is with no engine token.
+	namespaces, err := server.NewNamespaceSet([]server.NamespaceConfig{{Name: "e2e", Tokens: []string{"e2e-token"}}})
+	if err != nil {
+		h.t.Fatal(err)
+	}
 	e := server.NewEngine(h.store, h.log, server.WithLeaseDuration(600*time.Millisecond), server.WithLimits(server.Limits{
 		MaxHistoryEvents: 60, MaxHistoryBytes: server.DefaultMaxHistoryBytes, MaxPayloadBytes: server.DefaultMaxPayloadBytes,
-	}))
+	}), server.WithNamespaces(namespaces))
 	if err := e.Recover(); err != nil {
 		h.t.Fatalf("recover: %v", err)
 	}
-	h.engine, h.handler = e, olderEngineFor("legacy", server.NewHTTPAPI(e, h.log).Handler())
+	api := server.NewHTTPAPI(e, h.log, server.WithNamespaceSet(namespaces))
+	mux := api.Handler()
+	h.engine, h.handler = e, olderEngineFor("legacy", api.Wrap(mux))
 }
 
 // olderEngineFor answers like an engine that predates error types (400,

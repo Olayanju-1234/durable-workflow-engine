@@ -417,6 +417,40 @@ for _ in range(100):
 else:
     fail("the workflow never timed out")
 
+# Namespaces: a worker holding the e2e namespace's token works there, under
+# the same type and id the default namespace uses, and sees nothing else.
+ns_worker = Worker(addresses=[follower], worker_id="py-e2e-ns", token="e2e-token")
+
+
+@ns_worker.workflow("PyE2E")
+def py_e2e_ns(ctx):
+    return "in e2e: " + ctx.activity("py-shout", ctx.input)
+
+
+@ns_worker.activity("py-shout")
+def py_shout(s):
+    return s.upper()
+
+
+ns_worker.run(block=False)
+ns_worker.start_workflow("PyE2E", "hello", wid)
+for _ in range(100):
+    ns_done = ns_worker.describe(wid)
+    if ns_done["status"] == "COMPLETED":
+        break
+    time.sleep(0.05)
+else:
+    fail(f"namespace: {ns_done['status']} {ns_done.get('error')}")
+default_side = worker.describe(wid)
+try:
+    Worker(addresses=[follower], token="e2e-token", namespace="default").describe(wid)
+    elsewhere = 200
+except Exception as err:
+    elsewhere = getattr(err, "status", err)
+if ns_done.get("output") != "in e2e: HELLO" or default_side.get("output") == ns_done.get("output") or elsewhere != 403:
+    fail(f"namespace: output {ns_done.get('output')}, default's {default_side.get('output')}, token outside its namespace {elsewhere}")
+ns_worker.stop()
+
 # A restarted engine has forgotten every registration: the worker must notice
 # and register again before this workflow can be dispatched.
 print("RESTART", flush=True)

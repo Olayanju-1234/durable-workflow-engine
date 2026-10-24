@@ -33,14 +33,21 @@ var (
 	ErrActivityCancelled = errors.New("server: activity cancelled")
 )
 
-// ListWorkflows summarizes every workflow, sorted by id. When filter is not
-// UNSPECIFIED only matching workflows are returned. It reads the in-memory
-// visibility index (index.go), not the history files. A workflow whose history
-// cannot be read or replayed is listed with UNSPECIFIED status and the reason:
-// a broken log is surfaced, never hidden.
+// ListWorkflows summarizes every workflow in the default namespace, sorted
+// by id. When filter is not UNSPECIFIED only matching workflows are returned.
+// It reads the in-memory visibility index (index.go), not the history files.
+// A workflow whose history cannot be read or replayed is listed with
+// UNSPECIFIED status and the reason: a broken log is surfaced, never hidden.
 func (e *Engine) ListWorkflows(filter WorkflowStatus) ([]*WorkflowSummary, error) {
+	return e.listWorkflows(DefaultNamespace, filter)
+}
+
+// listWorkflows is ListWorkflows for a namespace; summaries name workflows by
+// store key.
+func (e *Engine) listWorkflows(ns string, filter WorkflowStatus) ([]*WorkflowSummary, error) {
 	return e.indexed(func(s *WorkflowSummary) bool {
-		return filter == WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED || s.GetStatus() == filter
+		return nsOf(s.GetWorkflowId()) == ns &&
+			(filter == WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED || s.GetStatus() == filter)
 	})
 }
 

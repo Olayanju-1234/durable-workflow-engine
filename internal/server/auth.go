@@ -60,32 +60,65 @@ func GRPCAuth(token string, publicReads bool) []grpc.ServerOption {
 	if token == "" {
 		return nil
 	}
-	check := func(ctx context.Context, method string) error {
-		if publicReads && readMethods[method] {
-			return nil
-		}
+	return GRPCAuthorize(NewAuthorizer(token, publicReads, nil))
+}
+
+// MetadataNamespace is the gRPC metadata key that names a call's namespace.
+const MetadataNamespace = "workflowd-namespace"
+
+// GRPCAuthorize returns server options that resolve every call's namespace
+// and token into a Grant the way the JSON API does, refusing calls a grant
+// does not allow. A server without them serves the default namespace only.
+func GRPCAuthorize(authz *Authorizer) []grpc.ServerOption {
+	check := func(ctx context.Context, method string) (context.Context, error) {
 		md, _ := metadata.FromIncomingContext(ctx)
-		for _, v := range md.Get("authorization") {
-			if validBearer(v, token) {
-				return nil
+		token := ""
+		if v := md.Get("authorization"); len(v) > 0 {
+			var ok bool
+			if token, ok = strings.CutPrefix(v[0], "Bearer "); !ok {
+				token = "\x00" // malformed: an invalid token, not a missing one
 			}
 		}
-		return status.Error(codes.Unauthenticated, errMissingToken.Error())
+		requested := ""
+		if v := md.Get(MetadataNamespace); len(v) > 0 {
+			requested = v[0]
+		}
+		g, err := authz.Authorize(token, requested, readMethods[method])
+		switch {
+		case err == nil:
+			return context.WithValue(ctx, grantKey{}, g), nil
+		case errors.Is(err, ErrForbidden):
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		case errors.Is(err, ErrInvalidArgument):
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		default:
+			return nil, status.Error(codes.Unauthenticated, err.Error())
+		}
 	}
 	return []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-			if err := check(ctx, info.FullMethod); err != nil {
+			ctx, err := check(ctx, info.FullMethod)
+			if err != nil {
 				return nil, err
 			}
 			return handler(ctx, req)
 		}),
 		grpc.ChainStreamInterceptor(func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-			if err := check(ss.Context(), info.FullMethod); err != nil {
+			if _, err := check(ss.Context(), info.FullMethod); err != nil {
 				return err
 			}
 			return handler(srv, ss)
 		}),
 	}
+}
+
+// grantFrom is a gRPC call's grant; a server without GRPCAuthorize serves
+// the default namespace.
+func grantFrom(ctx context.Context) Grant {
+	if g, ok := ctx.Value(grantKey{}).(Grant); ok {
+		return g
+	}
+	return Grant{Namespace: DefaultNamespace, Anonymous: true}
 }
 
 var errMissingToken = errors.New("missing or invalid bearer token")

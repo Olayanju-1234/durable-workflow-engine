@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,7 +130,7 @@ func TestRecoverRefusesHistoryFromNewerBinary(t *testing.T) {
 	if !errors.Is(err, history.ErrFormatTooNew) {
 		t.Fatalf("recover: err = %v, want ErrFormatTooNew", err)
 	}
-	for _, want := range []string{"from-the-future", "needs history format 6"} {
+	for _, want := range []string{"from-the-future", fmt.Sprintf("needs history format %d", history.FormatVersion+1)} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}

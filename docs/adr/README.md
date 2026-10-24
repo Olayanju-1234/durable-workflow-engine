@@ -20,6 +20,7 @@ that supersedes the old one.
 | [0012](0012-continue-as-new-and-limits.md) | Continue-as-new, runs, and history and payload limits | Accepted |
 | [0013](0013-workflow-id-reuse.md) | Workflow id reuse and conflict policies | Accepted |
 | [0014](0014-graceful-cancellation.md) | Graceful cancellation | Accepted |
+| [0015](0015-namespaces.md) | Namespaces | Accepted |
 
 ## Template
 

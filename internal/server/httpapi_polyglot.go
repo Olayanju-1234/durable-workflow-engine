@@ -110,7 +110,7 @@ func (a *HTTPAPI) registerWorkflowTypes(w http.ResponseWriter, r *http.Request) 
 		writeError(w, decodeStatus(err), err)
 		return
 	}
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -129,7 +129,7 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 	types := splitCSV(r.URL.Query().Get("types"))
 	workerID := r.URL.Query().Get("worker_id")
 
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -268,7 +268,7 @@ func (a *HTTPAPI) completeWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -364,7 +364,7 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 }
 
 func (a *HTTPAPI) pollActivityTask(w http.ResponseWriter, r *http.Request) {
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -426,7 +426,7 @@ func (a *HTTPAPI) completeActivityTask(w http.ResponseWriter, r *http.Request) {
 		output = decoded
 	}
 
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
@@ -436,7 +436,7 @@ func (a *HTTPAPI) completeActivityTask(w http.ResponseWriter, r *http.Request) {
 			Message: body.Error, Type: body.ErrorType, NonRetryable: body.NonRetryable,
 		})
 	} else {
-		err = e.CompleteTask(body.WorkflowID, body.StepName, body.Sequence, body.LeaseToken, output, "", false)
+		err = e.CompleteTask(body.WorkflowID, body.StepName, body.Sequence, body.LeaseToken, output)
 	}
 	if err != nil {
 		if errors.Is(err, ErrNotLeader) {
@@ -463,7 +463,7 @@ func (a *HTTPAPI) heartbeatActivityTask(w http.ResponseWriter, r *http.Request) 
 		writeError(w, decodeStatus(err), err)
 		return
 	}
-	e := a.engine(w)
+	e := a.scope(w, r)
 	if e == nil {
 		return
 	}

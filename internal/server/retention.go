@@ -9,23 +9,45 @@ import (
 )
 
 // PurgeTerminated deletes the history of every finished workflow (completed,
-// failed or terminated) whose last event is older than cutoff, and returns how
-// many it deleted. Running and waiting workflows are never touched, however
-// old. Each workflow is checked and deleted under its own lock, so a purge
-// never stalls live traffic.
+// failed or terminated) whose last event is older than cutoff, in every
+// namespace, and returns how many it deleted. Running and waiting workflows
+// are never touched, however old. Each workflow is checked and deleted under
+// its own lock, so a purge never stalls live traffic.
 func (e *Engine) PurgeTerminated(cutoff time.Time) (int, error) {
+	return e.purge(func(string) (time.Time, bool) { return cutoff, true })
+}
+
+// cutoffFunc gives a namespace's retention cutoff, or false to keep its
+// finished workflows forever.
+type cutoffFunc func(ns string) (time.Time, bool)
+
+// retentionCutoffs is the cutoff of each namespace at now: its own retention
+// if it has one configured, else keep (zero: forever).
+func (e *Engine) retentionCutoffs(now time.Time, keep time.Duration) cutoffFunc {
+	return func(ns string) (time.Time, bool) {
+		d := keep
+		if cfg := e.namespaces.Get(ns); cfg != nil && cfg.Retention != nil {
+			d = *cfg.Retention
+		}
+		return now.Add(-d), d > 0
+	}
+}
+
+func (e *Engine) purge(cutoffOf cutoffFunc) (int, error) {
 	due, err := e.indexed(func(s *WorkflowSummary) bool {
-		return isTerminalStatus(s.GetStatus()) && s.GetUpdatedAt() <= cutoff.UnixNano()
+		cutoff, ok := cutoffOf(nsOf(s.GetWorkflowId()))
+		return ok && isTerminalStatus(s.GetStatus()) && s.GetUpdatedAt() <= cutoff.UnixNano()
 	})
 	if err != nil {
 		return 0, fmt.Errorf("server: purge: %w", err)
 	}
-	purged, err := e.purgeArchivedRuns(cutoff)
+	purged, err := e.purgeArchivedRuns(cutoffOf)
 	if err != nil {
 		return 0, fmt.Errorf("server: purge archived runs: %w", err)
 	}
 	for _, s := range due {
 		id := s.GetWorkflowId()
+		cutoff, _ := cutoffOf(nsOf(id))
 		ok, err := e.purgeIfExpired(id, cutoff)
 		if err != nil {
 			// One unreadable log must not block retention for the rest.
@@ -67,11 +89,12 @@ func (e *Engine) purgeIfExpired(workflowID string, cutoff time.Time) (bool, erro
 	return true, nil
 }
 
-// RunRetention purges finished workflows older than keep, once at start and
-// then every interval, until ctx ends.
+// RunRetention purges finished workflows older than keep (or than their
+// namespace's own retention), once at start and then every interval, until
+// ctx ends.
 func (e *Engine) RunRetention(ctx context.Context, keep, interval time.Duration) {
 	for {
-		n, err := e.PurgeTerminated(time.Now().Add(-keep))
+		n, err := e.purge(e.retentionCutoffs(time.Now(), keep))
 		if err != nil {
 			e.log.Error("retention pass failed", "err", err)
 		} else if n > 0 {
