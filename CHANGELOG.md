@@ -7,6 +7,14 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-24
+
+The second release from running liftoff in production: workflows that run forever, a contract
+for upgrades and rollbacks, idempotent and reusable workflow ids, graceful cancellation, and the
+Python and Java SDKs caught up with TypeScript. The new SDK features need an engine from this
+release; older SDKs keep working against it. Every existing history stays readable. See
+`docs/UPGRADING.md` before upgrading: the history limits apply to existing workflows.
+
 ### Added
 - **An upgrade/rollback contract** (ADR-0011, `docs/UPGRADING.md`). History has numbered formats;
   each event that an older binary would refuse or misread carries `min_reader_format`, and the data
@@ -43,7 +51,6 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   refused (413 / `RESOURCE_EXHAUSTED`) or, when produced inside, fail the step (`PayloadTooLarge`)
   or the workflow. Metric `workflowd_history_limit_total{kind}`; `history_size_bytes` on workflows.
   Workflow tasks carry `run_id`, `history_size_bytes` and `suggest_continue_as_new_at`.
-
 - **Workflow id reuse and conflict policies** (ADR-0013): `id_reuse_policy` (`REJECT_DUPLICATE`
   default, `ALLOW_DUPLICATE`, `ALLOW_DUPLICATE_FAILED_ONLY`) lets a finished id start a new run,
   keeping the finished one as an earlier run; `id_conflict_policy` `USE_EXISTING` returns the run
@@ -52,7 +59,6 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `worker.start(type, input, { workflowId, idReusePolicy, idConflictPolicy })`, Python
   `worker.start(..., id_reuse_policy=, id_conflict_policy=)`, Java `worker.start(type, input, id,
   StartOptions)`; all return the run id and whether a run started.
-
 - **Graceful cancellation** (ADR-0014): cancel with `graceful` and the workflow code is told at
   its next wait: the steps it waits on fail with a cancellation (Go `workflow.ErrWorkflowCancelled`,
   `CancelledFailure` in TS/Python/Java), open ones are cancelled, and steps it starts afterwards

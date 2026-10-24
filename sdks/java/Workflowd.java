@@ -63,7 +63,7 @@ import javax.net.ssl.TrustManagerFactory;
  */
 public final class Workflowd {
 
-    public static final String SDK_VERSION = "java/0.2.0";
+    public static final String SDK_VERSION = "java/0.3.0";
 
     private Workflowd() {}
 
