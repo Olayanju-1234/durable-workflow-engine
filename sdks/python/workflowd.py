@@ -77,7 +77,7 @@ __all__ = [
     "decide",
 ]
 
-SDK_VERSION = "python/0.3.0"
+SDK_VERSION = "python/0.4.0"
 
 # The version get_version returns to executions that predate the change.
 DEFAULT_VERSION = -1
