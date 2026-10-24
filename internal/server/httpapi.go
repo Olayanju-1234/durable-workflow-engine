@@ -300,7 +300,8 @@ type summaryDTO struct {
 	HistoryLength int64  `json:"history_length"`
 	RunID         string `json:"run_id,omitempty"`
 	// The history's size on disk, against the engine's history size limit.
-	HistorySizeBytes int64 `json:"history_size_bytes,omitempty"`
+	HistorySizeBytes int64  `json:"history_size_bytes,omitempty"`
+	TaskQueue        string `json:"task_queue,omitempty"`
 }
 
 type stepDTO struct {
@@ -323,6 +324,8 @@ type stepDTO struct {
 	// orders results for WaitAny, and when it was recorded (ctx.now()).
 	ResolvedEventID int64  `json:"resolved_event_id,omitempty"`
 	ResolvedAt      string `json:"resolved_at,omitempty"`
+	// Activity steps: the task queue their tasks go to.
+	TaskQueue string `json:"task_queue,omitempty"`
 }
 
 type workflowDTO struct {
@@ -456,6 +459,7 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 			FireAt:       formatNanos(s.GetFireAt()),
 			SignalName:   s.GetSignalName(),
 			Marker:       s.GetMarker(),
+			TaskQueue:    s.GetTaskQueue(),
 		})
 	}
 	writeJSON(w, http.StatusOK, &workflowDTO{
@@ -518,6 +522,8 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		// "REJECT_DUPLICATE" (default); "FAIL" (default) or "USE_EXISTING".
 		IDReusePolicy    string `json:"id_reuse_policy"`
 		IDConflictPolicy string `json:"id_conflict_policy"`
+		// Optional: the task queue it runs on (default: the default queue).
+		TaskQueue string `json:"task_queue"`
 	}
 	if err := a.decodeJSON(r, &body); err != nil {
 		writeError(w, decodeStatus(err), err)
@@ -539,7 +545,7 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	started, err := e.Start(body.Type, input, body.WorkflowID,
 		WithExecutionTimeout(time.Duration(body.ExecutionTimeoutMs)*time.Millisecond),
-		WithIDReusePolicy(reuse), WithIDConflictPolicy(conflict))
+		WithIDReusePolicy(reuse), WithIDConflictPolicy(conflict), WithTaskQueue(body.TaskQueue))
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):
@@ -691,6 +697,7 @@ func toSummaryDTO(s *WorkflowSummary) *summaryDTO {
 
 		RunID:            s.GetRunId(),
 		HistorySizeBytes: s.GetHistorySizeBytes(),
+		TaskQueue:        s.GetTaskQueue(),
 	}
 }
 

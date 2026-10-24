@@ -47,6 +47,7 @@
     <h4>Building in Go</h4>
     <a href="#writing-workflows">Writing workflows</a>
     <a href="#registering">Workers &amp; clients</a>
+    <a href="#task-queues">Task queues</a>
     <a href="#workers">Activities</a>
     <a href="#retries">Retries &amp; Saga</a>
     <a href="#timeouts">Timeouts</a>
@@ -369,6 +370,23 @@ out, err := c.WaitForResult(ctx, id)     // blocks until it finishes</code></pre
       the leader hints followers return, and the worker registers its types again whenever the
       engine it talks to changes.
     </p>
+
+    <h3 id="task-queues">Task queues</h3>
+    <p>Tasks are routed by <strong>task queue</strong>, then by workflow type or activity name. A worker polls one
+      queue and never sees another's tasks, so two services can each implement an activity called
+      <code>charge</code> without taking each other's work. A workflow runs on the queue it was started on, and so do
+      its activities unless the code sends one elsewhere. Retries, restarts and continue-as-new keep the queue.
+      With no queue named anywhere, everything is on the <code>default</code> queue, as it always was.</p>
+    <pre data-lang="go"><code>w := worker.New(c, worker.Options{TaskQueue: "billing"})        // polls only "billing"
+id, _ := c.StartWorkflow(ctx, "Invoice", in, client.WithTaskQueue("billing"))
+
+// inside the workflow: this one activity runs on another queue's workers
+ctx.ExecuteActivity("send-email", msg, workflow.WithTaskQueue("email"))</code></pre>
+    <pre data-lang="js"><code>const w = new Worker({ taskQueue: 'billing' });   // its start() calls run on "billing" too
+await ctx.activity('send-email', msg, { taskQueue: 'email' });</code></pre>
+    <p>A workflow started on a queue no worker polls waits until one does; describe and the dashboard show each
+      workflow's and each activity's <code>task_queue</code>. Queue names are up to 128 letters, digits, dots,
+      underscores and hyphens. A named queue needs history format 6 (<a href="#upgrading">Upgrading</a>).</p>
 
     <h2 id="workers">Activities</h2>
     <p>
@@ -1153,13 +1171,14 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
     <h3>Start a workflow</h3>
     <pre data-lang="sh"><code>POST /api/workflows
 {"type":"OrderSaga","input":"order-42","workflow_id":"optional","execution_timeout_ms":86400000,
- "id_reuse_policy":"ALLOW_DUPLICATE_FAILED_ONLY","id_conflict_policy":"USE_EXISTING"}
+ "id_reuse_policy":"ALLOW_DUPLICATE_FAILED_ONLY","id_conflict_policy":"USE_EXISTING","task_queue":"billing"}
 → 201 {"workflow_id":"order-42","run_id":"9f3c0a51e2d47b68","started":true}</code></pre>
     <p>
       A taken <code>workflow_id</code> returns <code>409</code>, or <code>200</code> with the existing run under
       <code>"id_conflict_policy":"USE_EXISTING"</code> (<a href="#workflow-ids">Workflow ids</a>); an unregistered type
       returns <code>400</code>. <code>execution_timeout_ms</code> is optional
-      (<a href="#timeouts">Timeouts</a>).
+      (<a href="#timeouts">Timeouts</a>), and so is <code>task_queue</code> (<a href="#task-queues">Task queues</a>;
+      workers poll it with <code>GET /api/activity-tasks?task_queue=</code> and <code>/api/workflow-tasks?task_queue=</code>).
     </p>
 
     <h3>Signal a workflow</h3>

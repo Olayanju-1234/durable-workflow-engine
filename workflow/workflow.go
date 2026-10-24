@@ -58,6 +58,8 @@ type ContinueAsNewError struct {
 	WorkflowType string
 	// ExecutionTimeout bounds the next run; zero keeps this run's.
 	ExecutionTimeout time.Duration
+	// TaskQueue runs the next run on another task queue; empty keeps this one's.
+	TaskQueue string
 }
 
 func (e *ContinueAsNewError) Error() string { return "workflow: continue as new" }
@@ -88,6 +90,11 @@ func WithNewWorkflowType(workflowType string) ContinueAsNewOption {
 // WithNewExecutionTimeout gives the next run its own execution timeout.
 func WithNewExecutionTimeout(d time.Duration) ContinueAsNewOption {
 	return func(e *ContinueAsNewError) { e.ExecutionTimeout = d }
+}
+
+// WithNewTaskQueue runs the next run on another task queue.
+func WithNewTaskQueue(q string) ContinueAsNewOption {
+	return func(e *ContinueAsNewError) { e.TaskQueue = q }
 }
 
 // Func is a workflow: orchestration logic over the Context's durable primitives.
@@ -260,6 +267,13 @@ type ActivityOptions struct {
 	RetryPolicy            *RetryPolicy
 	StartToCloseTimeout    time.Duration
 	ScheduleToCloseTimeout time.Duration
+	TaskQueue              string
+}
+
+// WithTaskQueue runs the activity on a named task queue instead of the
+// workflow's own, so only workers polling that queue receive it.
+func WithTaskQueue(q string) ActivityOption {
+	return func(o *ActivityOptions) { o.TaskQueue = q }
 }
 
 // WithRetryPolicy retries the activity per p, overriding any policy the
@@ -298,4 +312,6 @@ type Info struct {
 	RunID string
 	// ContinuedFromRunID is the run this one continued from, if any.
 	ContinuedFromRunID string
+	// TaskQueue is the task queue the run is on ("default" for the default one).
+	TaskQueue string
 }

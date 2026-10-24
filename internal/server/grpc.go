@@ -66,7 +66,8 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 	}
 	started, err := e.Start(req.GetWorkflowType(), req.GetInput(), req.GetWorkflowId(),
 		WithExecutionTimeout(time.Duration(req.GetExecutionTimeoutMs())*time.Millisecond),
-		WithIDReusePolicy(req.GetIdReusePolicy()), WithIDConflictPolicy(req.GetIdConflictPolicy()))
+		WithIDReusePolicy(req.GetIdReusePolicy()), WithIDConflictPolicy(req.GetIdConflictPolicy()),
+		WithTaskQueue(req.GetTaskQueue()))
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):
@@ -89,7 +90,7 @@ func (s *GRPCServer) PollTask(ctx context.Context, req *PollTaskRequest) (*PollT
 	if err != nil {
 		return nil, err
 	}
-	task, err := e.PollTask(ctx, req.GetWorkerId(), req.GetStepNames()...)
+	task, err := e.PollTask(ctx, req.GetWorkerId(), req.GetTaskQueue(), req.GetStepNames()...)
 	if errors.Is(err, ErrNotLeader) {
 		return nil, s.notLeader(ctx, err)
 	}
@@ -200,7 +201,7 @@ func (s *GRPCServer) PollWorkflowTask(ctx context.Context, req *PollWorkflowTask
 	if err != nil {
 		return nil, err
 	}
-	task, err := e.PollWorkflowTask(ctx, req.GetWorkerId(), req.GetWorkflowTypes())
+	task, err := e.PollWorkflowTask(ctx, req.GetWorkerId(), req.GetTaskQueue(), req.GetWorkflowTypes())
 	if errors.Is(err, ErrNotLeader) {
 		return nil, s.notLeader(ctx, err)
 	}

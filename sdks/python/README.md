@@ -74,6 +74,11 @@ For an engine with auth and TLS: `Worker(address="https://…:8233", token=..., 
 (`ca_file` only for a private CA). With a namespace's token the worker works in that namespace;
 with the engine's token, pick one with `namespace="acme"` (engine 0.4.0+).
 
+Task queues (engine 0.4.0+): `Worker(task_queue="billing")` polls only the `billing` queue, and
+its `start()` calls run workflows there; their activities run there too unless a call says
+`ctx.activity("send", payload, task_queue="email")`. Without one, everything uses the default
+queue.
+
 Workflow code must be deterministic: no clocks, randomness or I/O except through `ctx`
 (`ctx.now()`, `ctx.random()`).
 How replay works, and the protocol, are in the

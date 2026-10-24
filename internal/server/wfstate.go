@@ -155,6 +155,14 @@ func (w *wfState) recordLocked(ev *history.HistoryEvent, l Limits) {
 	_ = w.fold.Apply(ev) // an invalid history is reported by the next read
 }
 
+// taskQueue is the cached run's task queue ("" is the default, or nothing is loaded).
+func (w *wfState) taskQueue() string {
+	if w.fold == nil {
+		return ""
+	}
+	return w.fold.State().TaskQueue
+}
+
 // runID is the cached run's id ("" if nothing is loaded).
 func (w *wfState) runID() string {
 	if w.fold == nil {

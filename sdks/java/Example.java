@@ -20,7 +20,10 @@ public final class Example {
         String token = System.getenv("WORKFLOWD_AUTH_TOKEN");
         String caFile = System.getenv("WORKFLOWD_CA_FILE");
         SSLContext ssl = caFile == null ? null : Workflowd.trustPem(Path.of(caFile));
-        Workflowd.Worker worker = new Workflowd.Worker(address, "java-example", token, ssl);
+        // Its own task queue, so these activities never meet another worker's of the same name
+        // (an engine with a demo worker runs reserve/charge/ship too).
+        String taskQueue = System.getenv().getOrDefault("WORKFLOWD_TASK_QUEUE", "java-orders");
+        Workflowd.Worker worker = new Workflowd.Worker(address, "java-example", token, ssl).taskQueue(taskQueue);
 
         // ---- the workflow: ordinary Java ----
         worker.workflow("JavaOrder", ctx -> {
@@ -56,7 +59,7 @@ public final class Example {
         worker.activity("ship", input -> "shipped(" + input + ")");
         worker.activity("release", input -> "released(" + input + ")");
 
-        System.out.println("[java] worker running against " + address + "; workflow type \"JavaOrder\" registered");
+        System.out.println("[java] worker running against " + address + "; workflow type \"JavaOrder\" on task queue \"" + taskQueue + "\"");
         worker.run();
     }
 }

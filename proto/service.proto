@@ -102,6 +102,8 @@ message Schedule {
   bytes input = 5;
   // Skip a fire while an earlier run of this schedule is still running.
   bool skip_if_running = 6;
+  // The task queue the runs start on; empty is the default queue.
+  string task_queue = 7;
 }
 
 message ScheduleInfo {
@@ -146,6 +148,8 @@ message PollWorkflowTaskRequest {
   // Only receive tasks for these types. A worker that registered several types
   // normally passes all of them.
   repeated string workflow_types = 2;
+  // The task queue to poll; empty is the default queue.
+  string task_queue = 3;
 }
 
 // WorkflowTask asks "given this history, what happens next?". It carries the
@@ -170,6 +174,8 @@ message WorkflowTask {
   int64 suggest_continue_as_new_at = 7;
   // The history's size in bytes, as stored.
   int64 history_size_bytes = 8;
+  // The task queue the task was routed by ("default" for the default queue).
+  string task_queue = 9;
 }
 
 message PollWorkflowTaskResponse {
@@ -195,6 +201,9 @@ message ScheduleActivityCommand {
   // the whole step's time across every attempt (see StepScheduledEvent).
   int64 start_to_close_timeout_ms = 5;
   int64 schedule_to_close_timeout_ms = 6;
+  // Optional: the task queue to run the activity on. Empty runs it on the
+  // workflow's own queue.
+  string task_queue = 7;
 }
 
 // StartTimerCommand: sleep durably. delay_ms is relative; the engine converts
@@ -253,6 +262,8 @@ message ContinueAsNewCommand {
   bytes input = 1;
   string workflow_type = 2;
   int64 execution_timeout_ms = 3;
+  // The next run's task queue; empty keeps this run's.
+  string task_queue = 4;
 }
 
 message WorkflowCommand {
@@ -318,6 +329,10 @@ message StartWorkflowRequest {
   // What to do when the workflow id is taken: a run is still going, or a
   // finished one the reuse policy does not let this start replace.
   IdConflictPolicy id_conflict_policy = 6;
+  // The task queue the workflow runs on: its workflow tasks, and its
+  // activities unless they name another. Empty is the default queue, which
+  // workers that name no queue poll.
+  string task_queue = 7;
 }
 
 // IdReusePolicy decides whether a start may begin a new run under a workflow
@@ -353,9 +368,11 @@ message PollTaskRequest {
   // Identifies the worker; recorded on the lease and in engine logs, so a lease
   // expiry names the worker that went dark.
   string worker_id = 1;
-  // Only receive tasks for these activities (step names). Empty means any task,
-  // which is only safe when a single worker implements every activity.
+  // Only receive tasks for these activities (step names). Empty means any task
+  // on the queue, which is only safe when one worker implements every activity.
   repeated string step_names = 2;
+  // The task queue to poll; empty is the default queue.
+  string task_queue = 3;
 }
 
 // Task is one unit of work dispatched to exactly one worker, under a lease.
@@ -379,6 +396,8 @@ message Task {
   // "<workflow_id>/<sequence>": the same for every attempt of the step, so a
   // good idempotency key for the side effect the activity performs.
   string activity_id = 9;
+  // The task queue the task was routed by ("default" for the default queue).
+  string task_queue = 10;
 }
 
 message PollTaskResponse {
@@ -460,6 +479,8 @@ message WorkflowSummary {
   // The run this summary describes, and its history's size in bytes.
   string run_id = 8;
   int64 history_size_bytes = 9;
+  // The run's task queue ("default" for the default queue).
+  string task_queue = 10;
 }
 
 message ListWorkflowsResponse {
@@ -493,6 +514,9 @@ message StepInfo {
   string marker = 10;
   // Failed steps: the kind of failure the worker (or engine) reported.
   string error_type = 11;
+  // Activity steps: the task queue their tasks go to ("default" for the
+  // default queue).
+  string task_queue = 12;
 }
 
 message GetWorkflowResponse {

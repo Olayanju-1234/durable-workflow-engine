@@ -423,14 +423,19 @@ class Context:
         return self._suggest_at > 0 and self._observed_event_id >= self._suggest_at
 
     def continue_as_new(
-        self, payload: Any = "", *, workflow_type: Optional[str] = None, execution_timeout: Optional[float] = None
+        self,
+        payload: Any = "",
+        *,
+        workflow_type: Optional[str] = None,
+        execution_timeout: Optional[float] = None,
+        task_queue: Optional[str] = None,
     ) -> Any:
         """End this run and start a fresh one under the same workflow id, with an
         empty history and ``payload`` as its input: ``return
         ctx.continue_as_new(state)``. It does not return. Steps started before it
         still run; signals this run has not consumed are not carried over.
-        ``workflow_type`` and ``execution_timeout`` (seconds) change the next
-        run's type and timeout (default: this run's)."""
+        ``workflow_type``, ``execution_timeout`` (seconds) and ``task_queue``
+        change the next run's type, timeout and task queue (default: this run's)."""
         if self._next < len(self._steps):
             raise _NonDeterminism(
                 f"non-determinism: continued as new after {self._next} steps, but history has {len(self._steps)}"
@@ -438,6 +443,8 @@ class Context:
         command = _put_payload({"type": "continue_as_new"}, "input", payload)
         if workflow_type:
             command["workflow_type"] = workflow_type
+        if task_queue:
+            command["task_queue"] = task_queue
         _put_timeouts(command, execution_timeout=execution_timeout)
         raise _ContinueAsNew(command)
 
@@ -486,12 +493,14 @@ class Context:
         decode: str = "text",
         start_to_close_timeout: Optional[float] = None,
         schedule_to_close_timeout: Optional[float] = None,
+        task_queue: Optional[str] = None,
     ) -> Any:
         """Run a named activity on a worker and return its output.
 
         ``start_to_close_timeout`` (seconds) fails an attempt that runs longer,
         heartbeats or not; ``schedule_to_close_timeout`` bounds every attempt
         and backoff together, from when the step is first scheduled.
+        ``task_queue`` runs it on another task queue than the workflow's.
         """
         return self.activity_async(
             name,
@@ -500,6 +509,7 @@ class Context:
             decode=decode,
             start_to_close_timeout=start_to_close_timeout,
             schedule_to_close_timeout=schedule_to_close_timeout,
+            task_queue=task_queue,
         ).result()
 
     def activity_async(
@@ -511,6 +521,7 @@ class Context:
         decode: str = "text",
         start_to_close_timeout: Optional[float] = None,
         schedule_to_close_timeout: Optional[float] = None,
+        task_queue: Optional[str] = None,
     ) -> Future:
         """Start an activity and return at once, so several run in parallel::
 
@@ -526,6 +537,8 @@ class Context:
             start_to_close_timeout=start_to_close_timeout,
             schedule_to_close_timeout=schedule_to_close_timeout,
         )
+        if task_queue:
+            command["task_queue"] = task_queue
         return self._issue("ACTIVITY", name, command, decode)
 
     def sleep(self, name: str, seconds: float) -> str:
@@ -810,16 +823,20 @@ class Worker:
         activity_concurrency: int = 4,
         workflow_concurrency: int = 2,
         namespace: Optional[str] = None,
+        task_queue: Optional[str] = None,
     ):
         """``token`` is sent as ``Authorization: Bearer <token>`` for an engine
         started with --auth-token-file, or a namespace's token. ``namespace``
         names the namespace every call works in (the default, or a namespace
-        token's own, when unset). ``ca_file`` trusts a private CA for an https
-        address; without it the system trust store is used. ``addresses`` lists
-        every cluster node (it replaces ``address``)."""
+        token's own, when unset). ``task_queue`` is the task queue the worker
+        polls, and where its start() calls run workflows by default (the default
+        queue when unset). ``ca_file`` trusts a private CA for an https address;
+        without it the system trust store is used. ``addresses`` lists every
+        cluster node (it replaces ``address``)."""
         ctx = ssl.create_default_context(cafile=ca_file) if ca_file else None
         self.conn = _Connection(addresses or [address], token, ctx, namespace)
         self.worker_id = worker_id or f"py-worker-{random.randrange(16**8):08x}"
+        self.task_queue = task_queue if task_queue and task_queue != "default" else ""
         self.sdk = sdk
         self.workflows: Dict[str, Callable[[Context], Any]] = {}
         self.activities: Dict[str, Callable[..., Any]] = {}
@@ -834,6 +851,9 @@ class Worker:
     def address(self) -> str:
         """The base URL of the node currently in use."""
         return self.conn.base
+
+    def _queue_param(self) -> str:
+        return f"&task_queue={urllib.parse.quote(self.task_queue)}" if self.task_queue else ""
 
     # -- registration (usable as decorators) --
 
@@ -887,10 +907,11 @@ class Worker:
         execution_timeout: Optional[float] = None,
         id_reuse_policy: Optional[str] = None,
         id_conflict_policy: Optional[str] = None,
+        task_queue: Optional[str] = None,
     ) -> str:
         """Start a workflow and return its id. ``execution_timeout`` (seconds)
-        ends it as TIMED_OUT if it has not finished by then; the policies are
-        as for start()."""
+        ends it as TIMED_OUT if it has not finished by then; the policies and
+        ``task_queue`` are as for start()."""
         return self.start(
             workflow_type,
             payload,
@@ -898,6 +919,7 @@ class Worker:
             execution_timeout=execution_timeout,
             id_reuse_policy=id_reuse_policy,
             id_conflict_policy=id_conflict_policy,
+            task_queue=task_queue,
         )["workflow_id"]
 
     def start(
@@ -909,13 +931,15 @@ class Worker:
         execution_timeout: Optional[float] = None,
         id_reuse_policy: Optional[str] = None,
         id_conflict_policy: Optional[str] = None,
+        task_queue: Optional[str] = None,
     ) -> dict:
         """Start a workflow and say what happened: ``{"workflow_id", "run_id",
         "started"}``. ``id_reuse_policy`` ("ALLOW_DUPLICATE",
         "ALLOW_DUPLICATE_FAILED_ONLY" or the default "REJECT_DUPLICATE") decides
         whether an id whose run has finished may start a new run;
         ``id_conflict_policy="USE_EXISTING"`` returns the run that holds a taken
-        id (started False) instead of failing with a 409."""
+        id (started False) instead of failing with a 409. ``task_queue`` runs
+        it on another task queue than this worker's."""
         # Chosen here so a retry after a lost reply cannot start a second execution.
         wid = workflow_id or f"{workflow_type}-{random.randrange(16**16):016x}"
         body = _put_payload({"type": workflow_type, "workflow_id": wid}, "input", payload)
@@ -925,6 +949,10 @@ class Worker:
             body["id_reuse_policy"] = id_reuse_policy.upper()
         if id_conflict_policy:
             body["id_conflict_policy"] = id_conflict_policy.upper()
+        # Only a named queue is sent: an engine before 0.4.0 refuses the field.
+        queue = task_queue if task_queue is not None else self.task_queue
+        if queue and queue != "default":
+            body["task_queue"] = queue
         try:
             res = self.conn.request("POST", "/api/workflows", body) or {}
         except _HTTPError as err:
@@ -976,7 +1004,9 @@ class Worker:
             try:
                 if self._registered_epoch != self.conn.epoch:
                     self.register()
-                task = self.conn.request("GET", f"/api/workflow-tasks?types={types}&worker_id={wid}", attempts=1)
+                task = self.conn.request(
+                    "GET", f"/api/workflow-tasks?types={types}&worker_id={wid}{self._queue_param()}", attempts=1
+                )
             except Exception:
                 time.sleep(0.2)  # engine unreachable or turned us away; retry
                 continue
@@ -1014,7 +1044,9 @@ class Worker:
         wid = urllib.parse.quote(self.worker_id)
         while not self._stop.is_set():
             try:
-                task = self.conn.request("GET", f"/api/activity-tasks?activities={names}&worker_id={wid}", attempts=1)
+                task = self.conn.request(
+                    "GET", f"/api/activity-tasks?activities={names}&worker_id={wid}{self._queue_param()}", attempts=1
+                )
             except Exception:
                 time.sleep(0.2)
                 continue

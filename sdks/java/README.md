@@ -71,6 +71,11 @@ For an engine with auth and TLS:
 (pass `null` for the SSLContext with a public CA). With a namespace's token the worker works in
 that namespace; with the engine's token, pick one with `.namespace("acme")` (engine 0.4.0+).
 
+Task queues (engine 0.4.0+): `worker.taskQueue("billing")` polls only the `billing` queue, and its
+`start()` calls run workflows there; their activities run there too unless a call passes
+`new Workflowd.ActivityOptions().withTaskQueue("email")`. Without one, everything uses the
+default queue.
+
 Without Maven, `Workflowd.java` is one file: copy it into your source tree. A runnable
 example is [`Example.java`](Example.java). Workflow code must be deterministic (use `ctx.now()` and `ctx.random()`); how replay
 works is in the [SDK guide](https://github.com/Olayanju-1234/durable-workflow-engine/tree/main/sdks#readme).

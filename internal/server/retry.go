@@ -114,6 +114,7 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 			RetryPolicy:              step.Retry.ToProto(),
 			StartToCloseTimeoutMs:    step.StartToClose.Milliseconds(),
 			ScheduleToCloseTimeoutMs: step.ScheduleToClose.Milliseconds(),
+			TaskQueue:                step.TaskQueue,
 		},
 	}}
 	if err := e.appendLocked(w, retry, int64(len(events)+1)); err != nil {

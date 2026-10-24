@@ -64,7 +64,9 @@ type decisionTask struct {
 type workflowTaskQueue = routedQueue[*WorkflowTask]
 
 func newWorkflowTaskQueue() *workflowTaskQueue {
-	return newRoutedQueue((*WorkflowTask).GetWorkflowType, func(t *WorkflowTask) string { return nsOf(t.GetWorkflowId()) })
+	return newRoutedQueue((*WorkflowTask).GetWorkflowType, func(t *WorkflowTask) string {
+		return routeScope(nsOf(t.GetWorkflowId()), t.GetTaskQueue())
+	})
 }
 
 // dropWorkflow removes any pending task for a workflow — used when a decision
@@ -180,6 +182,7 @@ func (e *Engine) dispatchWorkflowTaskLocked(w *wfState, workflowType string, eve
 		RunId:                  w.runID(),
 		SuggestContinueAsNewAt: w.suggestAt,
 		HistorySizeBytes:       w.bytes,
+		TaskQueue:              state.QueueName(w.taskQueue()),
 	}
 	e.pendingDecisions[workflowID] = &decisionTask{
 		token:         task.TaskToken,
@@ -240,15 +243,15 @@ func (e *Engine) onDecisionTimeout(tm timer.Timer) {
 // decision. The returned task carries the workflow's entire history — the SDK
 // replays it to work out what comes next.
 func (e *Engine) PollWorkflowTask(ctx context.Context, workerID string, workflowTypes []string) (*WorkflowTask, error) {
-	return e.pollWorkflowTask(ctx, DefaultNamespace, workerID, workflowTypes)
+	return e.pollWorkflowTask(ctx, DefaultNamespace, "", workerID, workflowTypes)
 }
 
-// pollWorkflowTask is PollWorkflowTask for a namespace; the task names its
-// workflow by store key.
-func (e *Engine) pollWorkflowTask(ctx context.Context, ns, workerID string, workflowTypes []string) (*WorkflowTask, error) {
+// pollWorkflowTask is PollWorkflowTask for a namespace's task queue; the task
+// names its workflow by store key.
+func (e *Engine) pollWorkflowTask(ctx context.Context, ns, queue, workerID string, workflowTypes []string) (*WorkflowTask, error) {
 	ctx, cancel := e.pollContext(ctx)
 	defer cancel()
-	task, err := e.workflowQueue.poll(ctx, ns, workflowTypes)
+	task, err := e.workflowQueue.poll(ctx, routeScope(ns, queue), workflowTypes)
 	if err != nil {
 		return nil, e.pollError(err)
 	}
@@ -364,11 +367,15 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 		if a.GetStartToCloseTimeoutMs() < 0 || a.GetScheduleToCloseTimeoutMs() < 0 {
 			return state.Decision{}, fmt.Errorf("%w: activity %q has a negative timeout", ErrInvalidCommand, a.GetStepName())
 		}
+		if err := checkQueue(a.GetTaskQueue()); err != nil {
+			return state.Decision{}, fmt.Errorf("%w: activity %q: %v", ErrInvalidCommand, a.GetStepName(), err)
+		}
 		return state.Decision{
 			Type: state.DecideScheduleStep, StepName: a.GetStepName(),
 			Sequence: a.GetSequence(), Input: a.GetInput(), Retry: retry,
 			StartToClose:    time.Duration(a.GetStartToCloseTimeoutMs()) * time.Millisecond,
 			ScheduleToClose: time.Duration(a.GetScheduleToCloseTimeoutMs()) * time.Millisecond,
+			TaskQueue:       a.GetTaskQueue(),
 		}, nil
 	case *WorkflowCommand_StartTimer:
 		t := c.StartTimer
@@ -403,9 +410,13 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 		if n.GetExecutionTimeoutMs() < 0 {
 			return state.Decision{}, fmt.Errorf("%w: continue-as-new has a negative execution timeout", ErrInvalidCommand)
 		}
+		if err := checkQueue(n.GetTaskQueue()); err != nil {
+			return state.Decision{}, fmt.Errorf("%w: continue-as-new: %v", ErrInvalidCommand, err)
+		}
 		return state.Decision{
 			Type: state.DecideContinueAsNew, Input: n.GetInput(), WorkflowType: n.GetWorkflowType(),
 			ExecutionTimeout: time.Duration(n.GetExecutionTimeoutMs()) * time.Millisecond,
+			TaskQueue:        n.GetTaskQueue(),
 		}, nil
 	default:
 		return state.Decision{}, fmt.Errorf("server: unknown workflow command %T", c)
@@ -448,6 +459,7 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 			StepName: d.StepName, Sequence: d.Sequence, Input: d.Input, RetryPolicy: d.Retry.ToProto(),
 			StartToCloseTimeoutMs:    d.StartToClose.Milliseconds(),
 			ScheduleToCloseTimeoutMs: d.ScheduleToClose.Milliseconds(),
+			TaskQueue:                d.TaskQueue,
 		}}}
 	case state.DecideStartTimer:
 		return &WorkflowCommand{Command: &WorkflowCommand_StartTimer{StartTimer: &StartTimerCommand{
@@ -472,6 +484,7 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 	case state.DecideContinueAsNew:
 		return &WorkflowCommand{Command: &WorkflowCommand_ContinueAsNew{ContinueAsNew: &ContinueAsNewCommand{
 			Input: d.Input, WorkflowType: d.WorkflowType, ExecutionTimeoutMs: d.ExecutionTimeout.Milliseconds(),
+			TaskQueue: d.TaskQueue,
 		}}}
 	default:
 		return nil

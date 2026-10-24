@@ -266,6 +266,7 @@ function renderDetail(w) {
     ? `${short(w.run_id)}${w.continued_from_run_id ? ` · continued from ${short(w.continued_from_run_id)}` : ''}`
     : '—';
   $('d-run').title = w.run_id || '';
+  $('d-queue').textContent = w.task_queue || 'default';
 
   $('d-error-wrap').hidden = !w.error;
   if (w.error) $('d-error').textContent = w.error;
@@ -290,6 +291,8 @@ function renderStep(s) {
   const errType = s.error_type ? `<span class="tag" title="error type">${esc(s.error_type)}</span>` : '';
   const waitingFor = s.signal_name
     ? `<span class="step-meta">parked until “${esc(s.signal_name)}” arrives</span>` : '';
+  const queue = s.task_queue && s.task_queue !== 'default'
+    ? `<span class="step-meta">on task queue “${esc(s.task_queue)}”</span>` : '';
   const fireAt = s.fire_at && s.status !== 'CANCELLED'
     ? `<span class="step-meta">pick fires ${esc(fmtTime(s.fire_at))}</span>` : '';
   const err = s.error ? `<div class="step-body"><pre class="err">${esc(s.error)}</pre></div>` : '';
@@ -311,7 +314,7 @@ function renderStep(s) {
           <span class="badge" data-s="${esc(s.status)}">${esc(s.status)}</span>
           ${retried}${errType}
         </div>
-        ${waitingFor}${fireAt}${err}${out}
+        ${waitingFor}${queue}${fireAt}${err}${out}
       </div>
     </li>`;
 }
@@ -381,6 +384,8 @@ async function startWorkflow(e) {
   if (id) payload.workflow_id = id;
   const input = $('s-input').value;
   if (input !== '') payload.input = input;
+  const queue = $('s-queue').value.trim();
+  if (queue && queue !== 'default') payload.task_queue = queue;
   try {
     const res = await api('/api/workflows', {
       method: 'POST',
