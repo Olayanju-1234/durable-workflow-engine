@@ -70,6 +70,7 @@
     <a href="#ctl">workflowd ctl</a>
     <a href="#security">Auth &amp; TLS</a>
     <a href="#namespaces">Namespaces</a>
+    <a href="#guardrails">Guardrails</a>
     <a href="#api">gRPC API</a>
     <a href="#http-api">HTTP / JSON API</a>
     <a href="#metrics">Metrics</a>
@@ -983,6 +984,10 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--auth-token-file</code></td><td><code>$WORKFLOWD_AUTH_TOKEN</code></td><td>Require the bearer token in this file on every JSON API route and every gRPC call. Unset (and no env var) leaves both open. <code>/api/health</code> and the dashboard's static assets stay open. See <a href="#security">Auth &amp; TLS</a>.</td></tr>
         <tr><td><code>--auth-token</code></td><td>empty</td><td>The same token on the command line. It shows up in <code>ps</code>; prefer the file or the env var.</td></tr>
         <tr><td><code>--namespaces</code></td><td>empty</td><td>A JSON file of <a href="#namespaces">namespaces</a>: each one's tokens and retention. The <code>default</code> namespace always exists.</td></tr>
+        <tr><td><code>--max-active-workflows</code>, <code>--max-starts-per-minute</code></td><td><code>0</code></td><td><a href="#guardrails">Quotas</a> on starts in each namespace (0: none).</td></tr>
+        <tr><td><code>--rate-limit</code>, <code>--rate-limit-burst</code></td><td><code>0</code></td><td>Client writes per minute per token or address, and how many at once (<a href="#guardrails">Guardrails</a>).</td></tr>
+        <tr><td><code>--trusted-proxies</code></td><td>empty</td><td>Proxies whose <code>X-Forwarded-For</code> names the client, e.g. <code>127.0.0.1,::1</code>.</td></tr>
+        <tr><td><code>--read-only</code>, <code>--read-only-schedules</code></td><td><code>false</code></td><td>Refuse every client write, or schedule changes only, in every namespace that does not say otherwise.</td></tr>
         <tr><td><code>--auth-public-reads</code></td><td><code>false</code></td><td>With a token set, let anyone list and describe workflows (HTTP <code>GET /api/workflows[/{id}]</code>, gRPC <code>ListWorkflows</code>/<code>GetWorkflow</code>). Starting, signalling, terminating and every worker call still need the token.</td></tr>
         <tr><td><code>--metrics-auth-token-file</code></td><td><code>$WORKFLOWD_METRICS_AUTH_TOKEN</code></td><td>Require a separate bearer token on <code>/metrics</code>, so Prometheus never holds the API token. Unset leaves <code>/metrics</code> open.</td></tr>
         <tr><td><code>--tls-cert</code>, <code>--tls-key</code></td><td>empty</td><td>Serve TLS on the gRPC, dashboard/API and metrics listeners with this PEM certificate and key. Re-read when the files change, so a renewed certificate needs no restart. Unset: plaintext.</td></tr>
@@ -1086,7 +1091,8 @@ new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORK
       id or activity name in two namespaces never collides. The <code>default</code> namespace always exists and is
       everything an engine held before namespaces: with none configured nothing changes.</p>
     <pre data-lang="json"><code>{"namespaces": [
-  {"name": "liftoff", "token_file": "/etc/workflowd/liftoff.token", "retention": "720h"},
+  {"name": "liftoff", "token_file": "/etc/workflowd/liftoff.token", "retention": "720h",
+   "max_active_workflows": 500, "rate_limit_per_minute": 600},
   {"name": "reports", "token_sha256": ["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"]},
   {"name": "default", "retention": "168h"}
 ]}</code></pre>
@@ -1094,7 +1100,10 @@ new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORK
     <p>Names are 1–63 lowercase letters, digits and hyphens. <code>token_file</code> is read at startup (a relative path is
       relative to the JSON file); <code>token_sha256</code> lists tokens by their SHA-256, so the file holds no secret.
       <code>retention</code> overrides <code>--retention</code> for the namespace (<code>"0"</code> keeps its workflows
-      forever). Change the file and restart to add a namespace or rotate a token.</p>
+      forever). The <a href="#guardrails">guardrail</a> fields (<code>max_active_workflows</code>,
+      <code>max_starts_per_minute</code>, <code>rate_limit_per_minute</code>, <code>rate_limit_burst</code>,
+      <code>read_only</code>, <code>read_only_schedules</code>) override the engine's flags for the namespace. Change the
+      file and restart to add a namespace or rotate a token.</p>
     <table>
       <thead><tr><th>Caller</th><th>Reaches</th></tr></thead>
       <tbody>
@@ -1111,7 +1120,35 @@ new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORK
       when the token can use more than one, and <code>/?namespace=liftoff</code> links straight to one.
       <code>GET /api/namespaces</code> lists the namespaces a caller can use. On disk a namespace's histories live in
       <code>namespaces/&lt;name&gt;/</code> under the data directory, which needs history format 6 (see
-      <a href="#upgrading">Upgrading</a>). Namespaces share one process, so a busy one can slow the others.</p>
+      <a href="#upgrading">Upgrading</a>). Namespaces share one process, so a busy one can slow the others; give each
+      <a href="#guardrails">quotas and rate limits</a>.</p>
+
+    <h2 id="guardrails">Guardrails</h2>
+    <p>Quotas, rate limits and read-only modes let an engine protect itself, without a proxy in front. Each is set
+      engine-wide by flag and overridden per namespace in the <code>--namespaces</code> file; a limit of
+      <code>0</code> means none, and with nothing set nothing is limited.</p>
+    <table>
+      <thead><tr><th>Guardrail</th><th>Flag</th><th>Namespace field</th><th>Refusal</th></tr></thead>
+      <tbody>
+        <tr><td>Workflows running or waiting at once</td><td><code>--max-active-workflows</code></td><td><code>max_active_workflows</code></td><td>429</td></tr>
+        <tr><td>Starts per minute (schedule fires included)</td><td><code>--max-starts-per-minute</code></td><td><code>max_starts_per_minute</code></td><td>429</td></tr>
+        <tr><td>Client writes per minute, per token or address</td><td><code>--rate-limit</code>, <code>--rate-limit-burst</code></td><td><code>rate_limit_per_minute</code>, <code>rate_limit_burst</code></td><td>429</td></tr>
+        <tr><td>No client writes at all</td><td><code>--read-only</code></td><td><code>read_only</code></td><td>403</td></tr>
+        <tr><td>No schedule changes</td><td><code>--read-only-schedules</code></td><td><code>read_only_schedules</code></td><td>403</td></tr>
+      </tbody>
+    </table>
+    <p>Quotas are the engine's own: every start counts, from any client or schedule, and concurrent starts reserve their
+      slot first, so a namespace never passes its limit. A run that continues as new is not a start. Rate limits apply to
+      client writes and worker registration; reads, long-polls, task completions and heartbeats are never limited, and
+      neither is the engine token. A caller with a namespace token is limited by its token; anyone else by address.
+      Behind a proxy, list it in <code>--trusted-proxies</code>: only then is <code>X-Forwarded-For</code> believed,
+      read from the right, so a client cannot pick its own address. Read-only refuses clients' changes (starts, signals,
+      cancels, terminations, schedule changes); workers keep running what exists and schedules keep firing. Refusals say
+      which limit was hit; a 429 carries <code>Retry-After</code>. gRPC answers <code>RESOURCE_EXHAUSTED</code> and
+      <code>PERMISSION_DENIED</code>.</p>
+    <pre data-lang="sh"><code># the public demo's settings: open, but bounded
+workflowd --serve --demo-worker --rate-limit 10 --rate-limit-burst 20 \
+  --trusted-proxies 127.0.0.1,::1 --read-only-schedules</code></pre>
 
     <h2 id="api">gRPC API</h2>
     <p>

@@ -23,6 +23,7 @@ that supersedes the old one.
 | [0015](0015-namespaces.md) | Namespaces | Accepted |
 | [0016](0016-task-queues.md) | Named task queues | Accepted |
 | [0017](0017-ctl-command-line.md) | `workflowd ctl`, the operator's command line | Accepted |
+| [0018](0018-guardrails.md) | Engine guardrails: quotas, rate limits, read-only | Accepted |
 
 ## Template
 

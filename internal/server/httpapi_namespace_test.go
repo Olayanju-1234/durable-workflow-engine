@@ -61,7 +61,7 @@ func newNSHarness(t *testing.T, adminToken string) *nsHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gs := grpc.NewServer(server.GRPCAuthorize(server.NewAuthorizer(adminToken, false, set))...)
+	gs := grpc.NewServer(server.GRPCAuthorize(server.NewAuthorizer(adminToken, false, set), nil)...)
 	server.RegisterWorkflowServiceServer(gs, server.NewGRPCServer(engine, logger))
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)

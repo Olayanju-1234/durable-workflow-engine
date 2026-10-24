@@ -187,8 +187,10 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 	if cfg.retention < 0 {
 		return fmt.Errorf("--retention must not be negative, got %s", cfg.retention)
 	}
-	engine := server.NewEngine(store, logger, server.WithLimits(cfg.limits), server.WithNamespaces(cfg.sec.namespaces))
+	engine := server.NewEngine(store, logger, server.WithLimits(cfg.limits), server.WithNamespaces(cfg.sec.namespaces),
+		server.WithGuardrails(cfg.sec.guardrails))
 	defer engine.Close()
+	cfg.sec.guard = server.NewGuard(cfg.sec.namespaces, cfg.sec.guardrails, cfg.sec.trusted, engine.Metrics())
 	registerDemoTypes(engine)
 
 	// Rebuild runtime state from disk before accepting traffic: re-enqueue steps

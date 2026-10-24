@@ -1425,7 +1425,7 @@ public final class Workflowd {
                 try {
                     register();
                 } catch (HttpError e) {
-                    if (e.status != 503) throw e; // a refused type is a bug to surface
+                    if (e.status != 503 && e.status != 429) throw e; // a refused type is a bug to surface
                 } catch (IOException e) {
                     // Not up yet: the workflow loop keeps trying.
                 }

@@ -100,6 +100,8 @@ type Engine struct {
 	done      chan struct{} // closed by Close; ends long polls
 
 	namespaces *NamespaceSet // immutable after NewEngine; nil: only default
+	guardrails Policy        // immutable after NewEngine: default quotas
+	quota      quotas
 
 	mu               sync.Mutex
 	planners         map[nsName]Planner       // workflow type -> planner
@@ -170,6 +172,7 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 		leaseTokens:      make(map[string]*lease),
 		tombstones:       make(map[string]string),
 		pendingDecisions: make(map[string]*decisionTask),
+		quota:            quotas{reserved: map[string]int{}, starts: map[string]*limiter{}},
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -328,6 +331,13 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 	}
 	localWorkflowID := workflowID
 	workflowID = history.Key(ns, workflowID)
+	// Checked before the workflow's lock: quotas may wait for the index build.
+	release, err := e.admitStart(ns)
+	if err != nil {
+		return Started{}, err
+	}
+	began := false
+	defer func() { release(began) }()
 	w := e.lockWorkflow(workflowID)
 	defer e.unlockWorkflow(w)
 	// The id is checked and the run started under the workflow's lock, so of
@@ -361,6 +371,7 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 		}
 		e.log.Info("workflow id reused", "workflow_id", workflowID, "previous_run_id", st.RunID, "run_id", runID)
 	}
+	began = true // recorded: it counts, even if what follows fails
 	if err := e.startRunLocked(w); err != nil {
 		return Started{}, err
 	}

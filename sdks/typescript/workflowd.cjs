@@ -1127,9 +1127,9 @@ class Worker {
       try {
         await this.register();
       } catch (err) {
-        // A refused type is a bug to surface; an engine that is not up yet is
-        // retried by the workflow loop.
-        if (err.status && err.status !== 503) throw err;
+        // A refused type is a bug to surface; an engine that is not up yet, or
+        // is rate-limiting us, is retried by the workflow loop.
+        if (err.status && err.status !== 503 && err.status !== 429) throw err;
       }
       for (let i = 0; i < this.workflowConcurrency; i++) loops.push(this._workflowLoop());
     }

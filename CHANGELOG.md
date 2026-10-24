@@ -38,7 +38,18 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `GET /api/admin/backup`: a tar.gz of every history, engine token only. `GET /api/workflows`
   takes `type=` (exact workflow type).
 
+- **Guardrails** (ADR-0018), engine-wide by flag and per namespace: quotas on starts
+  (`--max-active-workflows`, `--max-starts-per-minute`; checked by the engine for every start,
+  schedule fires included, race-free), per-client rate limits on writes (`--rate-limit`,
+  `--rate-limit-burst`; by namespace token, else by address, with `X-Forwarded-For` believed only
+  from `--trusted-proxies`; the engine token is exempt), and read-only modes (`--read-only`,
+  `--read-only-schedules`). Refusals are 403 (`PERMISSION_DENIED`) or 429 with `Retry-After`
+  (`RESOURCE_EXHAUSTED`). Metrics `workflowd_requests_refused_total{reason}` and
+  `workflowd_starts_refused_total{reason}`.
+
 ### Changed
+- SDK workers (TypeScript, Python, Java) retry a registration refused with 429 instead of
+  stopping; the Go worker's `Run` stops on `PERMISSION_DENIED` like an invalid token.
 - The SDK examples run on their own task queues (`ts-orders`, `py-orders`, `java-orders`), so
   they no longer share the demo worker's `reserve`/`charge`/`ship`/`release`.
 

@@ -20,6 +20,28 @@ type visibilityIndex struct {
 	entries map[string]*WorkflowSummary // nil until a build starts
 	stale   map[string]struct{}         // ids whose entry must be re-read
 	ready   chan struct{}               // closed once the first build finished
+	active  map[string]int              // namespace -> entries running or waiting (quotas)
+}
+
+func isActive(s *WorkflowSummary) bool {
+	return s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_RUNNING || s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_WAITING
+}
+
+// put sets id's entry, keeping the active counts. The caller holds x.mu.
+func (x *visibilityIndex) put(id string, sum *WorkflowSummary) {
+	x.remove(id)
+	x.entries[id] = sum
+	if isActive(sum) {
+		x.active[nsOf(id)]++
+	}
+}
+
+// remove drops id's entry, keeping the active counts. The caller holds x.mu.
+func (x *visibilityIndex) remove(id string) {
+	if old, ok := x.entries[id]; ok && isActive(old) {
+		x.active[nsOf(id)]--
+	}
+	delete(x.entries, id)
 }
 
 // reservedPrefix marks history files the engine keeps for itself (schedules),
@@ -54,7 +76,7 @@ func (e *Engine) indexLocked(w *wfState) {
 	e.idx.mu.Lock()
 	defer e.idx.mu.Unlock()
 	if e.idx.entries != nil {
-		e.idx.entries[w.id] = sum
+		e.idx.put(w.id, sum)
 		delete(e.idx.stale, w.id)
 	}
 }
@@ -63,7 +85,7 @@ func (e *Engine) indexDelete(id string) {
 	e.idx.mu.Lock()
 	defer e.idx.mu.Unlock()
 	if e.idx.entries != nil {
-		delete(e.idx.entries, id)
+		e.idx.remove(id)
 		delete(e.idx.stale, id)
 	}
 }
@@ -79,6 +101,7 @@ func (e *Engine) startIndex() (bool, chan struct{}) {
 	}
 	e.idx.entries = make(map[string]*WorkflowSummary)
 	e.idx.stale = make(map[string]struct{})
+	e.idx.active = make(map[string]int)
 	e.idx.ready = make(chan struct{})
 	return true, e.idx.ready
 }
@@ -102,7 +125,7 @@ func (e *Engine) indexWorkflow(id string) {
 	if err := w.load(e.store, e.limits); err != nil {
 		e.idx.mu.Lock()
 		if e.idx.entries != nil {
-			e.idx.entries[id] = &WorkflowSummary{WorkflowId: id, Error: fmt.Sprintf("history unreadable: %v", err)}
+			e.idx.put(id, &WorkflowSummary{WorkflowId: id, Error: fmt.Sprintf("history unreadable: %v", err)})
 		}
 		e.idx.mu.Unlock()
 		return

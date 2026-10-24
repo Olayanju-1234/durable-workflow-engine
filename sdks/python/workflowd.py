@@ -1142,8 +1142,8 @@ class Worker:
             try:
                 self.register()
             except _HTTPError as err:
-                if err.status != 503:
-                    raise  # a refused type is a bug to surface
+                if err.status not in (503, 429):
+                    raise  # a refused type is a bug to surface; busy or rate-limited is retried
             except OSError:
                 pass  # not up yet: the workflow loop keeps trying
             for i in range(self.workflow_concurrency):
