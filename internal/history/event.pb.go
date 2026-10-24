@@ -292,8 +292,12 @@ type WorkflowStartedEvent struct {
 	RunId string `protobuf:"bytes,5,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	// The run this one continued from (continue-as-new), if any.
 	ContinuedFromRunId string `protobuf:"bytes,6,opt,name=continued_from_run_id,json=continuedFromRunId,proto3" json:"continued_from_run_id,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The task queue the run's workflow tasks go to, and its activities unless
+	// they name another. Empty is the default queue. A non-default queue needs
+	// history format 6: older binaries would hand its tasks to default pollers.
+	TaskQueue     string `protobuf:"bytes,7,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WorkflowStartedEvent) Reset() {
@@ -368,6 +372,13 @@ func (x *WorkflowStartedEvent) GetContinuedFromRunId() string {
 	return ""
 }
 
+func (x *WorkflowStartedEvent) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
+}
+
 type StepScheduledEvent struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	StepName string                 `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
@@ -389,8 +400,11 @@ type StepScheduledEvent struct {
 	// means no limit. Older binaries ignore them.
 	StartToCloseTimeoutMs    int64 `protobuf:"varint,7,opt,name=start_to_close_timeout_ms,json=startToCloseTimeoutMs,proto3" json:"start_to_close_timeout_ms,omitempty"`
 	ScheduleToCloseTimeoutMs int64 `protobuf:"varint,8,opt,name=schedule_to_close_timeout_ms,json=scheduleToCloseTimeoutMs,proto3" json:"schedule_to_close_timeout_ms,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// The task queue the activity's tasks go to: the workflow code's choice, or
+	// the workflow's queue. Empty is the default queue. Copied onto every retry.
+	TaskQueue     string `protobuf:"bytes,9,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StepScheduledEvent) Reset() {
@@ -477,6 +491,13 @@ func (x *StepScheduledEvent) GetScheduleToCloseTimeoutMs() int64 {
 		return x.ScheduleToCloseTimeoutMs
 	}
 	return 0
+}
+
+func (x *StepScheduledEvent) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
 }
 
 // RetryPolicy re-runs a failed activity before the workflow sees the error.
@@ -785,8 +806,10 @@ type ContinuedAsNew struct {
 	WorkflowType       string                 `protobuf:"bytes,2,opt,name=workflow_type,json=workflowType,proto3" json:"workflow_type,omitempty"`
 	Input              []byte                 `protobuf:"bytes,3,opt,name=input,proto3" json:"input,omitempty"`
 	ExecutionTimeoutMs int64                  `protobuf:"varint,4,opt,name=execution_timeout_ms,json=executionTimeoutMs,proto3" json:"execution_timeout_ms,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The next run's task queue (empty: the default queue).
+	TaskQueue     string `protobuf:"bytes,5,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ContinuedAsNew) Reset() {
@@ -845,6 +868,13 @@ func (x *ContinuedAsNew) GetExecutionTimeoutMs() int64 {
 		return x.ExecutionTimeoutMs
 	}
 	return 0
+}
+
+func (x *ContinuedAsNew) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
 }
 
 type WorkflowFailedEvent struct {
@@ -1230,7 +1260,7 @@ const file_event_proto_rawDesc = "" +
 	"\x0fsignal_received\x18\x12 \x01(\v2\x1f.history.v1.SignalReceivedEventH\x00R\x0esignalReceived\x12J\n" +
 	"\x0fmarker_recorded\x18\x13 \x01(\v2\x1f.history.v1.MarkerRecordedEventH\x00R\x0emarkerRecordedB\f\n" +
 	"\n" +
-	"attributes\"\xee\x01\n" +
+	"attributes\"\x8d\x02\n" +
 	"\x14WorkflowStartedEvent\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12#\n" +
@@ -1238,7 +1268,9 @@ const file_event_proto_rawDesc = "" +
 	"\x05input\x18\x03 \x01(\fR\x05input\x120\n" +
 	"\x14execution_timeout_ms\x18\x04 \x01(\x03R\x12executionTimeoutMs\x12\x15\n" +
 	"\x06run_id\x18\x05 \x01(\tR\x05runId\x121\n" +
-	"\x15continued_from_run_id\x18\x06 \x01(\tR\x12continuedFromRunId\"\xdf\x02\n" +
+	"\x15continued_from_run_id\x18\x06 \x01(\tR\x12continuedFromRunId\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\a \x01(\tR\ttaskQueue\"\xfe\x02\n" +
 	"\x12StepScheduledEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1a\n" +
@@ -1248,7 +1280,9 @@ const file_event_proto_rawDesc = "" +
 	"signalName\x12:\n" +
 	"\fretry_policy\x18\x06 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\x128\n" +
 	"\x19start_to_close_timeout_ms\x18\a \x01(\x03R\x15startToCloseTimeoutMs\x12>\n" +
-	"\x1cschedule_to_close_timeout_ms\x18\b \x01(\x03R\x18scheduleToCloseTimeoutMs\"\xbf\x01\n" +
+	"\x1cschedule_to_close_timeout_ms\x18\b \x01(\x03R\x18scheduleToCloseTimeoutMs\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\t \x01(\tR\ttaskQueue\"\xbf\x01\n" +
 	"\vRetryPolicy\x12!\n" +
 	"\fmax_attempts\x18\x01 \x01(\x05R\vmaxAttempts\x12,\n" +
 	"\x12initial_backoff_ms\x18\x02 \x01(\x03R\x10initialBackoffMs\x12$\n" +
@@ -1272,12 +1306,14 @@ const file_event_proto_rawDesc = "" +
 	"\rnon_retryable\x18\b \x01(\bR\fnonRetryable\"v\n" +
 	"\x16WorkflowCompletedEvent\x12\x16\n" +
 	"\x06output\x18\x01 \x01(\fR\x06output\x12D\n" +
-	"\x10continued_as_new\x18\x02 \x01(\v2\x1a.history.v1.ContinuedAsNewR\x0econtinuedAsNew\"\x94\x01\n" +
+	"\x10continued_as_new\x18\x02 \x01(\v2\x1a.history.v1.ContinuedAsNewR\x0econtinuedAsNew\"\xb3\x01\n" +
 	"\x0eContinuedAsNew\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12#\n" +
 	"\rworkflow_type\x18\x02 \x01(\tR\fworkflowType\x12\x14\n" +
 	"\x05input\x18\x03 \x01(\fR\x05input\x120\n" +
-	"\x14execution_timeout_ms\x18\x04 \x01(\x03R\x12executionTimeoutMs\"\x86\x01\n" +
+	"\x14execution_timeout_ms\x18\x04 \x01(\x03R\x12executionTimeoutMs\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\x05 \x01(\tR\ttaskQueue\"\x86\x01\n" +
 	"\x13WorkflowFailedEvent\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1e\n" +
 	"\n" +

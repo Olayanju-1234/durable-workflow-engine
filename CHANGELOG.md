@@ -18,6 +18,19 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   dashboard. The `default` namespace is everything that existed before: histories, URLs, clients
   and the open demo are unchanged. A namespace's histories live in `namespaces/<name>/` and need
   history format 6.
+- **Named task queues** (ADR-0016): workflow and activity tasks are routed by queue, then by type
+  or step name, so two workers can implement the same activity name for different apps. A
+  workflow runs on the queue it was started on (`task_queue`; Go `client.WithTaskQueue`), and its
+  activities do too unless the code names another (`workflow.WithTaskQueue`, TS/Python/Java
+  activity options); retries, recovery and continue-as-new keep the queue. Workers poll one queue
+  (Go `worker.Options.TaskQueue`, TS `taskQueue`, Python `task_queue`, Java `.taskQueue()`), and the
+  SDK workers start workflows on their own queue by default. The default queue is what every
+  existing worker and start uses. Schedules name theirs. Describe, the dashboard and tasks show
+  `task_queue`. A named queue needs history format 6.
+
+### Changed
+- The SDK examples run on their own task queues (`ts-orders`, `py-orders`, `java-orders`), so
+  they no longer share the demo worker's `reserve`/`charge`/`ship`/`release`.
 
 ## [0.3.0] - 2026-10-24
 

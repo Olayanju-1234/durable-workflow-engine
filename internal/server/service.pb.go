@@ -216,6 +216,8 @@ type Schedule struct {
 	Input        []byte `protobuf:"bytes,5,opt,name=input,proto3" json:"input,omitempty"`
 	// Skip a fire while an earlier run of this schedule is still running.
 	SkipIfRunning bool `protobuf:"varint,6,opt,name=skip_if_running,json=skipIfRunning,proto3" json:"skip_if_running,omitempty"`
+	// The task queue the runs start on; empty is the default queue.
+	TaskQueue     string `protobuf:"bytes,7,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -290,6 +292,13 @@ func (x *Schedule) GetSkipIfRunning() bool {
 		return x.SkipIfRunning
 	}
 	return false
+}
+
+func (x *Schedule) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
 }
 
 type ScheduleInfo struct {
@@ -699,6 +708,8 @@ type PollWorkflowTaskRequest struct {
 	// Only receive tasks for these types. A worker that registered several types
 	// normally passes all of them.
 	WorkflowTypes []string `protobuf:"bytes,2,rep,name=workflow_types,json=workflowTypes,proto3" json:"workflow_types,omitempty"`
+	// The task queue to poll; empty is the default queue.
+	TaskQueue     string `protobuf:"bytes,3,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -747,6 +758,13 @@ func (x *PollWorkflowTaskRequest) GetWorkflowTypes() []string {
 	return nil
 }
 
+func (x *PollWorkflowTaskRequest) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
+}
+
 // WorkflowTask asks "given this history, what happens next?". It carries the
 // workflow's ENTIRE history: the SDK is stateless, so everything it needs to
 // reconstruct the workflow's position is in this message.
@@ -770,8 +788,10 @@ type WorkflowTask struct {
 	SuggestContinueAsNewAt int64 `protobuf:"varint,7,opt,name=suggest_continue_as_new_at,json=suggestContinueAsNewAt,proto3" json:"suggest_continue_as_new_at,omitempty"`
 	// The history's size in bytes, as stored.
 	HistorySizeBytes int64 `protobuf:"varint,8,opt,name=history_size_bytes,json=historySizeBytes,proto3" json:"history_size_bytes,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// The task queue the task was routed by ("default" for the default queue).
+	TaskQueue     string `protobuf:"bytes,9,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WorkflowTask) Reset() {
@@ -860,6 +880,13 @@ func (x *WorkflowTask) GetHistorySizeBytes() int64 {
 	return 0
 }
 
+func (x *WorkflowTask) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
+}
+
 type PollWorkflowTaskResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Task          *WorkflowTask          `protobuf:"bytes,1,opt,name=task,proto3" json:"task,omitempty"`
@@ -917,8 +944,11 @@ type ScheduleActivityCommand struct {
 	// the whole step's time across every attempt (see StepScheduledEvent).
 	StartToCloseTimeoutMs    int64 `protobuf:"varint,5,opt,name=start_to_close_timeout_ms,json=startToCloseTimeoutMs,proto3" json:"start_to_close_timeout_ms,omitempty"`
 	ScheduleToCloseTimeoutMs int64 `protobuf:"varint,6,opt,name=schedule_to_close_timeout_ms,json=scheduleToCloseTimeoutMs,proto3" json:"schedule_to_close_timeout_ms,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// Optional: the task queue to run the activity on. Empty runs it on the
+	// workflow's own queue.
+	TaskQueue     string `protobuf:"bytes,7,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ScheduleActivityCommand) Reset() {
@@ -991,6 +1021,13 @@ func (x *ScheduleActivityCommand) GetScheduleToCloseTimeoutMs() int64 {
 		return x.ScheduleToCloseTimeoutMs
 	}
 	return 0
+}
+
+func (x *ScheduleActivityCommand) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
 }
 
 // StartTimerCommand: sleep durably. delay_ms is relative; the engine converts
@@ -1374,8 +1411,10 @@ type ContinueAsNewCommand struct {
 	Input              []byte                 `protobuf:"bytes,1,opt,name=input,proto3" json:"input,omitempty"`
 	WorkflowType       string                 `protobuf:"bytes,2,opt,name=workflow_type,json=workflowType,proto3" json:"workflow_type,omitempty"`
 	ExecutionTimeoutMs int64                  `protobuf:"varint,3,opt,name=execution_timeout_ms,json=executionTimeoutMs,proto3" json:"execution_timeout_ms,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The next run's task queue; empty keeps this run's.
+	TaskQueue     string `protobuf:"bytes,4,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ContinueAsNewCommand) Reset() {
@@ -1427,6 +1466,13 @@ func (x *ContinueAsNewCommand) GetExecutionTimeoutMs() int64 {
 		return x.ExecutionTimeoutMs
 	}
 	return 0
+}
+
+func (x *ContinueAsNewCommand) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
 }
 
 type WorkflowCommand struct {
@@ -1743,8 +1789,12 @@ type StartWorkflowRequest struct {
 	// What to do when the workflow id is taken: a run is still going, or a
 	// finished one the reuse policy does not let this start replace.
 	IdConflictPolicy IdConflictPolicy `protobuf:"varint,6,opt,name=id_conflict_policy,json=idConflictPolicy,proto3,enum=workflow.v1.IdConflictPolicy" json:"id_conflict_policy,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// The task queue the workflow runs on: its workflow tasks, and its
+	// activities unless they name another. Empty is the default queue, which
+	// workers that name no queue poll.
+	TaskQueue     string `protobuf:"bytes,7,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StartWorkflowRequest) Reset() {
@@ -1819,6 +1869,13 @@ func (x *StartWorkflowRequest) GetIdConflictPolicy() IdConflictPolicy {
 	return IdConflictPolicy_ID_CONFLICT_POLICY_UNSPECIFIED
 }
 
+func (x *StartWorkflowRequest) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
+}
+
 type StartWorkflowResponse struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	WorkflowId string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
@@ -1886,9 +1943,11 @@ type PollTaskRequest struct {
 	// Identifies the worker; recorded on the lease and in engine logs, so a lease
 	// expiry names the worker that went dark.
 	WorkerId string `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
-	// Only receive tasks for these activities (step names). Empty means any task,
-	// which is only safe when a single worker implements every activity.
-	StepNames     []string `protobuf:"bytes,2,rep,name=step_names,json=stepNames,proto3" json:"step_names,omitempty"`
+	// Only receive tasks for these activities (step names). Empty means any task
+	// on the queue, which is only safe when one worker implements every activity.
+	StepNames []string `protobuf:"bytes,2,rep,name=step_names,json=stepNames,proto3" json:"step_names,omitempty"`
+	// The task queue to poll; empty is the default queue.
+	TaskQueue     string `protobuf:"bytes,3,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1937,6 +1996,13 @@ func (x *PollTaskRequest) GetStepNames() []string {
 	return nil
 }
 
+func (x *PollTaskRequest) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
+}
+
 // Task is one unit of work dispatched to exactly one worker, under a lease.
 type Task struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
@@ -1958,7 +2024,9 @@ type Task struct {
 	Attempt int32 `protobuf:"varint,8,opt,name=attempt,proto3" json:"attempt,omitempty"`
 	// "<workflow_id>/<sequence>": the same for every attempt of the step, so a
 	// good idempotency key for the side effect the activity performs.
-	ActivityId    string `protobuf:"bytes,9,opt,name=activity_id,json=activityId,proto3" json:"activity_id,omitempty"`
+	ActivityId string `protobuf:"bytes,9,opt,name=activity_id,json=activityId,proto3" json:"activity_id,omitempty"`
+	// The task queue the task was routed by ("default" for the default queue).
+	TaskQueue     string `protobuf:"bytes,10,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2052,6 +2120,13 @@ func (x *Task) GetAttempt() int32 {
 func (x *Task) GetActivityId() string {
 	if x != nil {
 		return x.ActivityId
+	}
+	return ""
+}
+
+func (x *Task) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
 	}
 	return ""
 }
@@ -2591,8 +2666,10 @@ type WorkflowSummary struct {
 	// The run this summary describes, and its history's size in bytes.
 	RunId            string `protobuf:"bytes,8,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	HistorySizeBytes int64  `protobuf:"varint,9,opt,name=history_size_bytes,json=historySizeBytes,proto3" json:"history_size_bytes,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// The run's task queue ("default" for the default queue).
+	TaskQueue     string `protobuf:"bytes,10,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WorkflowSummary) Reset() {
@@ -2686,6 +2763,13 @@ func (x *WorkflowSummary) GetHistorySizeBytes() int64 {
 		return x.HistorySizeBytes
 	}
 	return 0
+}
+
+func (x *WorkflowSummary) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
+	}
+	return ""
 }
 
 type ListWorkflowsResponse struct {
@@ -2806,7 +2890,10 @@ type StepInfo struct {
 	// Marker steps: "version" or "side_effect".
 	Marker string `protobuf:"bytes,10,opt,name=marker,proto3" json:"marker,omitempty"`
 	// Failed steps: the kind of failure the worker (or engine) reported.
-	ErrorType     string `protobuf:"bytes,11,opt,name=error_type,json=errorType,proto3" json:"error_type,omitempty"`
+	ErrorType string `protobuf:"bytes,11,opt,name=error_type,json=errorType,proto3" json:"error_type,omitempty"`
+	// Activity steps: the task queue their tasks go to ("default" for the
+	// default queue).
+	TaskQueue     string `protobuf:"bytes,12,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2914,6 +3001,13 @@ func (x *StepInfo) GetMarker() string {
 func (x *StepInfo) GetErrorType() string {
 	if x != nil {
 		return x.ErrorType
+	}
+	return ""
+}
+
+func (x *StepInfo) GetTaskQueue() string {
+	if x != nil {
+		return x.TaskQueue
 	}
 	return ""
 }
@@ -3382,7 +3476,7 @@ var File_service_proto protoreflect.FileDescriptor
 
 const file_service_proto_rawDesc = "" +
 	"\n" +
-	"\rservice.proto\x12\vworkflow.v1\x1a\vevent.proto\"\xbe\x01\n" +
+	"\rservice.proto\x12\vworkflow.v1\x1a\vevent.proto\"\xdd\x01\n" +
 	"\bSchedule\x12\x1f\n" +
 	"\vschedule_id\x18\x01 \x01(\tR\n" +
 	"scheduleId\x12\x12\n" +
@@ -3390,7 +3484,9 @@ const file_service_proto_rawDesc = "" +
 	"\btimezone\x18\x03 \x01(\tR\btimezone\x12#\n" +
 	"\rworkflow_type\x18\x04 \x01(\tR\fworkflowType\x12\x14\n" +
 	"\x05input\x18\x05 \x01(\fR\x05input\x12&\n" +
-	"\x0fskip_if_running\x18\x06 \x01(\bR\rskipIfRunning\"\x82\x01\n" +
+	"\x0fskip_if_running\x18\x06 \x01(\bR\rskipIfRunning\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\a \x01(\tR\ttaskQueue\"\x82\x01\n" +
 	"\fScheduleInfo\x121\n" +
 	"\bschedule\x18\x01 \x01(\v2\x15.workflow.v1.ScheduleR\bschedule\x12\x1d\n" +
 	"\n" +
@@ -3411,10 +3507,12 @@ const file_service_proto_rawDesc = "" +
 	"\x0eworkflow_types\x18\x01 \x03(\tR\rworkflowTypes\x12\x1b\n" +
 	"\tworker_id\x18\x02 \x01(\tR\bworkerId\x12\x10\n" +
 	"\x03sdk\x18\x03 \x01(\tR\x03sdk\"\x1e\n" +
-	"\x1cRegisterWorkflowTypeResponse\"]\n" +
+	"\x1cRegisterWorkflowTypeResponse\"|\n" +
 	"\x17PollWorkflowTaskRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12%\n" +
-	"\x0eworkflow_types\x18\x02 \x03(\tR\rworkflowTypes\"\xcf\x02\n" +
+	"\x0eworkflow_types\x18\x02 \x03(\tR\rworkflowTypes\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\x03 \x01(\tR\ttaskQueue\"\xee\x02\n" +
 	"\fWorkflowTask\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12#\n" +
@@ -3425,16 +3523,20 @@ const file_service_proto_rawDesc = "" +
 	"\x0ehistory_length\x18\x05 \x01(\x03R\rhistoryLength\x12\x15\n" +
 	"\x06run_id\x18\x06 \x01(\tR\x05runId\x12:\n" +
 	"\x1asuggest_continue_as_new_at\x18\a \x01(\x03R\x16suggestContinueAsNewAt\x12,\n" +
-	"\x12history_size_bytes\x18\b \x01(\x03R\x10historySizeBytes\"I\n" +
+	"\x12history_size_bytes\x18\b \x01(\x03R\x10historySizeBytes\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\t \x01(\tR\ttaskQueue\"I\n" +
 	"\x18PollWorkflowTaskResponse\x12-\n" +
-	"\x04task\x18\x01 \x01(\v2\x19.workflow.v1.WorkflowTaskR\x04task\"\x9e\x02\n" +
+	"\x04task\x18\x01 \x01(\v2\x19.workflow.v1.WorkflowTaskR\x04task\"\xbd\x02\n" +
 	"\x17ScheduleActivityCommand\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x14\n" +
 	"\x05input\x18\x03 \x01(\fR\x05input\x12:\n" +
 	"\fretry_policy\x18\x04 \x01(\v2\x17.history.v1.RetryPolicyR\vretryPolicy\x128\n" +
 	"\x19start_to_close_timeout_ms\x18\x05 \x01(\x03R\x15startToCloseTimeoutMs\x12>\n" +
-	"\x1cschedule_to_close_timeout_ms\x18\x06 \x01(\x03R\x18scheduleToCloseTimeoutMs\"}\n" +
+	"\x1cschedule_to_close_timeout_ms\x18\x06 \x01(\x03R\x18scheduleToCloseTimeoutMs\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\a \x01(\tR\ttaskQueue\"}\n" +
 	"\x11StartTimerCommand\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x19\n" +
@@ -3459,11 +3561,13 @@ const file_service_proto_rawDesc = "" +
 	"\x06output\x18\x01 \x01(\fR\x06output\"I\n" +
 	"\x13FailWorkflowCommand\x12\x14\n" +
 	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1c\n" +
-	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"\x83\x01\n" +
+	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"\xa2\x01\n" +
 	"\x14ContinueAsNewCommand\x12\x14\n" +
 	"\x05input\x18\x01 \x01(\fR\x05input\x12#\n" +
 	"\rworkflow_type\x18\x02 \x01(\tR\fworkflowType\x120\n" +
-	"\x14execution_timeout_ms\x18\x03 \x01(\x03R\x12executionTimeoutMs\"\xf1\x04\n" +
+	"\x14execution_timeout_ms\x18\x03 \x01(\x03R\x12executionTimeoutMs\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\x04 \x01(\tR\ttaskQueue\"\xf1\x04\n" +
 	"\x0fWorkflowCommand\x12S\n" +
 	"\x11schedule_activity\x18\x01 \x01(\v2$.workflow.v1.ScheduleActivityCommandH\x00R\x10scheduleActivity\x12A\n" +
 	"\vstart_timer\x18\x02 \x01(\v2\x1e.workflow.v1.StartTimerCommandH\x00R\n" +
@@ -3484,7 +3588,7 @@ const file_service_proto_rawDesc = "" +
 	"\acommand\x18\x03 \x01(\v2\x1c.workflow.v1.WorkflowCommandR\acommand\x12!\n" +
 	"\freplay_error\x18\x04 \x01(\tR\vreplayError\x128\n" +
 	"\bcommands\x18\x05 \x03(\v2\x1c.workflow.v1.WorkflowCommandR\bcommands\"\x1e\n" +
-	"\x1cCompleteWorkflowTaskResponse\"\xb5\x02\n" +
+	"\x1cCompleteWorkflowTaskResponse\"\xd4\x02\n" +
 	"\x14StartWorkflowRequest\x12#\n" +
 	"\rworkflow_type\x18\x01 \x01(\tR\fworkflowType\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1f\n" +
@@ -3492,16 +3596,20 @@ const file_service_proto_rawDesc = "" +
 	"workflowId\x120\n" +
 	"\x14execution_timeout_ms\x18\x04 \x01(\x03R\x12executionTimeoutMs\x12B\n" +
 	"\x0fid_reuse_policy\x18\x05 \x01(\x0e2\x1a.workflow.v1.IdReusePolicyR\ridReusePolicy\x12K\n" +
-	"\x12id_conflict_policy\x18\x06 \x01(\x0e2\x1d.workflow.v1.IdConflictPolicyR\x10idConflictPolicy\"i\n" +
+	"\x12id_conflict_policy\x18\x06 \x01(\x0e2\x1d.workflow.v1.IdConflictPolicyR\x10idConflictPolicy\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\a \x01(\tR\ttaskQueue\"i\n" +
 	"\x15StartWorkflowResponse\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x18\n" +
-	"\astarted\x18\x03 \x01(\bR\astarted\"M\n" +
+	"\astarted\x18\x03 \x01(\bR\astarted\"l\n" +
 	"\x0fPollTaskRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1d\n" +
 	"\n" +
-	"step_names\x18\x02 \x03(\tR\tstepNames\"\xb8\x02\n" +
+	"step_names\x18\x02 \x03(\tR\tstepNames\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\x03 \x01(\tR\ttaskQueue\"\xd7\x02\n" +
 	"\x04Task\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1b\n" +
@@ -3514,7 +3622,10 @@ const file_service_proto_rawDesc = "" +
 	"\x19start_to_close_timeout_ms\x18\a \x01(\x03R\x15startToCloseTimeoutMs\x12\x18\n" +
 	"\aattempt\x18\b \x01(\x05R\aattempt\x12\x1f\n" +
 	"\vactivity_id\x18\t \x01(\tR\n" +
-	"activityId\"9\n" +
+	"activityId\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\n" +
+	" \x01(\tR\ttaskQueue\"9\n" +
 	"\x10PollTaskResponse\x12%\n" +
 	"\x04task\x18\x01 \x01(\v2\x11.workflow.v1.TaskR\x04task\"\x90\x02\n" +
 	"\x13CompleteTaskRequest\x12\x1f\n" +
@@ -3550,7 +3661,7 @@ const file_service_proto_rawDesc = "" +
 	"request_id\x18\x04 \x01(\tR\trequestId\"\x18\n" +
 	"\x16SignalWorkflowResponse\"X\n" +
 	"\x14ListWorkflowsRequest\x12@\n" +
-	"\rstatus_filter\x18\x01 \x01(\x0e2\x1b.workflow.v1.WorkflowStatusR\fstatusFilter\"\xcc\x02\n" +
+	"\rstatus_filter\x18\x01 \x01(\x0e2\x1b.workflow.v1.WorkflowStatusR\fstatusFilter\"\xeb\x02\n" +
 	"\x0fWorkflowSummary\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12#\n" +
@@ -3563,13 +3674,16 @@ const file_service_proto_rawDesc = "" +
 	"\x05error\x18\x06 \x01(\tR\x05error\x12%\n" +
 	"\x0ehistory_length\x18\a \x01(\x03R\rhistoryLength\x12\x15\n" +
 	"\x06run_id\x18\b \x01(\tR\x05runId\x12,\n" +
-	"\x12history_size_bytes\x18\t \x01(\x03R\x10historySizeBytes\"S\n" +
+	"\x12history_size_bytes\x18\t \x01(\x03R\x10historySizeBytes\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\n" +
+	" \x01(\tR\ttaskQueue\"S\n" +
 	"\x15ListWorkflowsResponse\x12:\n" +
 	"\tworkflows\x18\x01 \x03(\v2\x1c.workflow.v1.WorkflowSummaryR\tworkflows\"L\n" +
 	"\x12GetWorkflowRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x15\n" +
-	"\x06run_id\x18\x02 \x01(\tR\x05runId\"\xaa\x02\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\"\xc9\x02\n" +
 	"\bStepInfo\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x12\n" +
@@ -3584,7 +3698,9 @@ const file_service_proto_rawDesc = "" +
 	"\x06marker\x18\n" +
 	" \x01(\tR\x06marker\x12\x1d\n" +
 	"\n" +
-	"error_type\x18\v \x01(\tR\terrorType\"\xe1\x02\n" +
+	"error_type\x18\v \x01(\tR\terrorType\x12\x1d\n" +
+	"\n" +
+	"task_queue\x18\f \x01(\tR\ttaskQueue\"\xe1\x02\n" +
 	"\x13GetWorkflowResponse\x126\n" +
 	"\asummary\x18\x01 \x01(\v2\x1c.workflow.v1.WorkflowSummaryR\asummary\x12+\n" +
 	"\x05steps\x18\x02 \x03(\v2\x15.workflow.v1.StepInfoR\x05steps\x12\x14\n" +

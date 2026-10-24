@@ -326,8 +326,8 @@ class Context {
    * End this run and start a fresh one under the same workflow id, with an
    * empty history and `input`: `return ctx.continueAsNew(state)`. Steps the code
    * started before it still run; signals this run has not consumed are not
-   * carried over. opts.workflowType and opts.executionTimeoutMs change the next
-   * run's type and timeout (default: this run's).
+   * carried over. opts.workflowType, opts.executionTimeoutMs and opts.taskQueue
+   * change the next run's type, timeout and task queue (default: this run's).
    */
   continueAsNew(input = '', opts = {}) {
     if (this._continueAsNew) return FOREVER();
@@ -338,6 +338,7 @@ class Context {
     }
     const command = putPayload({ type: 'continue_as_new' }, 'input', input);
     if (opts.workflowType) command.workflow_type = opts.workflowType;
+    if (opts.taskQueue) command.task_queue = opts.taskQueue;
     putTimeouts(command, { execution_timeout_ms: opts.executionTimeoutMs });
     this._continueAsNew = { command, pendingAt: this._pending.length };
     return FOREVER(); // nothing after it runs, however the code handles errors
@@ -391,7 +392,8 @@ class Context {
    * failed attempt first (backoff doubles each time); opts.as decodes the result.
    * opts.startToCloseTimeoutMs fails an attempt that runs longer (heartbeats do
    * not extend it); opts.scheduleToCloseTimeoutMs bounds every attempt and
-   * backoff together. Not awaiting it at once runs activities in parallel:
+   * backoff together. opts.taskQueue runs it on another task queue than the
+   * workflow's. Not awaiting it at once runs activities in parallel:
    *
    *   const [a, b] = await Promise.all([ctx.activity('a'), ctx.activity('b')]);
    */
@@ -403,6 +405,7 @@ class Context {
       start_to_close_timeout_ms: opts.startToCloseTimeoutMs,
       schedule_to_close_timeout_ms: opts.scheduleToCloseTimeoutMs,
     });
+    if (opts.taskQueue) command.task_queue = opts.taskQueue;
     return this._command('ACTIVITY', name, command, opts.as);
   }
 
@@ -854,8 +857,10 @@ class Worker {
    * `token` is sent as `Authorization: Bearer <token>` for an engine started
    * with --auth-token-file, or a namespace's token. `namespace` names the
    * namespace every call works in (unset: the default, or a namespace token's
-   * own). An https address uses Node's trust store; for a private CA, start
-   * Node with NODE_EXTRA_CA_CERTS=/path/to/ca.pem.
+   * own). `taskQueue` is the task queue the worker polls, and where its
+   * start() calls run workflows by default (unset: the default queue). An
+   * https address uses Node's trust store; for a private CA, start Node with
+   * NODE_EXTRA_CA_CERTS=/path/to/ca.pem.
    */
   constructor({
     address = 'http://localhost:8233',
@@ -864,11 +869,13 @@ class Worker {
     sdk = 'typescript/0.3.0',
     token,
     namespace,
+    taskQueue,
     activityConcurrency = 4,
     workflowConcurrency = 2,
   } = {}) {
     this.conn = new Connection(addresses ?? [address], token, namespace);
     this.workerId = workerId ?? `ts-worker-${Math.random().toString(16).slice(2, 10)}`;
+    this.taskQueue = taskQueue && taskQueue !== 'default' ? taskQueue : '';
     this.sdk = sdk;
     this.workflows = new Map();
     this.activities = new Map();
@@ -932,6 +939,7 @@ class Worker {
    * default 'REJECT_DUPLICATE') decides whether an id whose run has finished
    * may start a new run. opts.idConflictPolicy 'USE_EXISTING' returns the run
    * that holds a taken id (started: false) instead of failing with a 409.
+   * opts.taskQueue runs it on another task queue than this worker's.
    */
   async start(type, input = '', opts = {}) {
     // Chosen here so a retry after a lost reply cannot start a second execution.
@@ -941,6 +949,9 @@ class Worker {
     // Only when set: an engine before 0.3.0 refuses the fields.
     if (opts.idReusePolicy) body.id_reuse_policy = String(opts.idReusePolicy).toUpperCase();
     if (opts.idConflictPolicy) body.id_conflict_policy = String(opts.idConflictPolicy).toUpperCase();
+    // Only a named queue is sent: an engine before 0.4.0 refuses the field.
+    const queue = opts.taskQueue ?? this.taskQueue;
+    if (queue && queue !== 'default') body.task_queue = queue;
     try {
       const res = await this.conn.request('/api/workflows', { method: 'POST', body });
       return { workflowId: id, runId: res?.run_id ?? '', started: res?.started !== false };
@@ -987,6 +998,10 @@ class Worker {
     return this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}/runs`);
   }
 
+  _queueParam() {
+    return this.taskQueue ? `&task_queue=${encodeURIComponent(this.taskQueue)}` : '';
+  }
+
   async _workflowLoop() {
     const types = [...this.workflows.keys()].join(',');
     while (!this._stop) {
@@ -994,7 +1009,7 @@ class Worker {
       try {
         if (this._registeredEpoch !== this.conn.epoch) await this.register();
         task = await this.conn.request(
-          `/api/workflow-tasks?types=${encodeURIComponent(types)}&worker_id=${encodeURIComponent(this.workerId)}`,
+          `/api/workflow-tasks?types=${encodeURIComponent(types)}&worker_id=${encodeURIComponent(this.workerId)}${this._queueParam()}`,
           { attempts: 1 },
         );
       } catch {
@@ -1029,7 +1044,7 @@ class Worker {
       let task;
       try {
         task = await this.conn.request(
-          `/api/activity-tasks?activities=${encodeURIComponent(names)}&worker_id=${encodeURIComponent(this.workerId)}`,
+          `/api/activity-tasks?activities=${encodeURIComponent(names)}&worker_id=${encodeURIComponent(this.workerId)}${this._queueParam()}`,
           { attempts: 1 },
         );
       } catch {

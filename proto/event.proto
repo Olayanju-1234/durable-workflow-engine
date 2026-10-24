@@ -53,6 +53,10 @@ message WorkflowStartedEvent {
   string run_id = 5;
   // The run this one continued from (continue-as-new), if any.
   string continued_from_run_id = 6;
+  // The task queue the run's workflow tasks go to, and its activities unless
+  // they name another. Empty is the default queue. A non-default queue needs
+  // history format 6: older binaries would hand its tasks to default pollers.
+  string task_queue = 7;
 }
 
 message StepScheduledEvent {
@@ -75,6 +79,9 @@ message StepScheduledEvent {
   // means no limit. Older binaries ignore them.
   int64 start_to_close_timeout_ms = 7;
   int64 schedule_to_close_timeout_ms = 8;
+  // The task queue the activity's tasks go to: the workflow code's choice, or
+  // the workflow's queue. Empty is the default queue. Copied onto every retry.
+  string task_queue = 9;
 }
 
 // RetryPolicy re-runs a failed activity before the workflow sees the error.
@@ -131,6 +138,8 @@ message ContinuedAsNew {
   string workflow_type = 2;
   bytes input = 3;
   int64 execution_timeout_ms = 4;
+  // The next run's task queue (empty: the default queue).
+  string task_queue = 5;
 }
 
 message WorkflowFailedEvent {

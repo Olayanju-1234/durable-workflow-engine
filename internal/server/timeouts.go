@@ -56,6 +56,7 @@ func activityTask(workflowID string, s *state.Step) *Task {
 		StartToCloseTimeoutMs: s.StartToClose.Milliseconds(),
 		Attempt:               int32(max(s.Attempts, 1)),
 		ActivityId:            fmt.Sprintf("%s/%d", localID(workflowID), s.Sequence),
+		TaskQueue:             state.QueueName(s.TaskQueue),
 	}
 }
 

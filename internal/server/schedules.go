@@ -155,6 +155,9 @@ func newScheduleEntry(ns string, spec *Schedule, now time.Time) (*scheduleEntry,
 	if spec.GetWorkflowType() == "" {
 		return nil, fmt.Errorf("%w: schedule %q needs a workflow type", ErrInvalidArgument, id)
 	}
+	if err := checkQueue(spec.GetTaskQueue()); err != nil {
+		return nil, fmt.Errorf("schedule %q: %w", id, err)
+	}
 	loc, err := time.LoadLocation(spec.GetTimezone()) // "" is UTC
 	if err != nil {
 		return nil, fmt.Errorf("%w: schedule %q: time zone: %v", ErrInvalidArgument, id, err)
@@ -346,7 +349,7 @@ func (e *Engine) fireLocked(ent *scheduleEntry, at time.Time) (retry bool) {
 			return false
 		}
 	}
-	_, err := e.StartWorkflow(spec.GetWorkflowType(), spec.GetInput(), runID, inNamespace(ent.ns))
+	_, err := e.StartWorkflow(spec.GetWorkflowType(), spec.GetInput(), runID, inNamespace(ent.ns), WithTaskQueue(spec.GetTaskQueue()))
 	switch {
 	case err == nil:
 		e.metrics.schedulesFired.Inc()

@@ -581,7 +581,7 @@ func TestClusterReplicatesNamespaces(t *testing.T) {
 				continue
 			}
 			pctx, pcancel := context.WithTimeout(ctx, 100*time.Millisecond)
-			task, err := e.In("acme").PollTask(pctx, "acme-worker")
+			task, err := e.In("acme").PollTask(pctx, "acme-worker", "")
 			pcancel()
 			if err == nil {
 				_ = e.In("acme").CompleteTask(task.GetWorkflowId(), task.GetStepName(), task.GetSequence(), task.GetLeaseToken(), nil)

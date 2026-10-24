@@ -50,6 +50,13 @@ public final class E2E {
     }
 
     @SuppressWarnings("unchecked")
+    private static List<String> stepQueues(Map<String, Object> wf) {
+        List<String> out = new java.util.ArrayList<>();
+        for (Object o : (List<Object>) wf.get("steps")) out.add(String.valueOf(((Map<String, Object>) o).get("task_queue")));
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
     private static String steps(Map<String, Object> wf) {
         StringBuilder b = new StringBuilder();
         for (Object o : (List<Object>) wf.get("steps")) {
@@ -168,6 +175,9 @@ public final class E2E {
         });
 
         worker.workflow("JavaAfterRestart", ctx -> ctx.activity("java-tick", ""));
+        // The same activity name as the task-queue worker below: each queue's worker must get
+        // only its own queue's tasks.
+        worker.activity("java-shared", input -> "default worker");
         worker.start();
 
         String parallelId = worker.startWorkflow("JavaParallel", "", "");
@@ -261,6 +271,22 @@ public final class E2E {
                     + ", token outside its namespace " + elsewhere);
         }
         nsWorker.stop();
+
+        // Task queues: a worker on its own queue runs its workflow's activities there, even though
+        // the main worker implements the same activity name, unless the workflow sends one to the
+        // default queue on purpose.
+        Workflowd.Worker qWorker = new Workflowd.Worker(List.of(follower), "java-e2e-q", null, null).taskQueue("java-e2e-q");
+        qWorker.workflow("JavaQueued", ctx -> ctx.activity("java-shared", "") + " / "
+                + ctx.activity("java-shared", "", new Workflowd.ActivityOptions().withTaskQueue("default")));
+        qWorker.activity("java-shared", input -> "queue worker");
+        qWorker.start();
+        Map<String, Object> queued = waitDone(qWorker, qWorker.startWorkflow("JavaQueued", "", ""));
+        String queuedSteps = String.join(",", stepQueues(queued));
+        if (!"queue worker / default worker".equals(queued.get("output")) || !"java-e2e-q".equals(queued.get("task_queue"))
+                || !"java-e2e-q,default".equals(queuedSteps)) {
+            fail("task queues: output " + queued.get("output") + ", queue " + queued.get("task_queue") + ", steps " + queuedSteps);
+        }
+        qWorker.stop();
 
         // A restarted engine has forgotten every registration: the worker must notice and
         // register again before this workflow can be dispatched.

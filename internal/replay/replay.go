@@ -140,7 +140,7 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 		st: st,
 		info: workflow.Info{
 			WorkflowID: events[0].GetWorkflowStarted().GetWorkflowId(), WorkflowType: st.WorkflowType,
-			RunID: st.RunID, ContinuedFromRunID: st.ContinuedFromRunID,
+			RunID: st.RunID, ContinuedFromRunID: st.ContinuedFromRunID, TaskQueue: state.QueueName(st.TaskQueue),
 		},
 		resolvedAt: make(map[int64]int64),
 		now:        events[0].GetTimestamp(),
@@ -227,6 +227,7 @@ func (c *replayContext) run(fn workflow.Func) ([]state.Decision, error) {
 			return append(c.pending, state.Decision{
 				Type: state.DecideContinueAsNew, Input: next.Input,
 				WorkflowType: next.WorkflowType, ExecutionTimeout: max(next.ExecutionTimeout, 0),
+				TaskQueue: next.TaskQueue,
 			}), nil
 		}
 		return append(c.pending, state.Decision{Type: state.DecideFailWorkflow, Error: fnErr.Error()}), nil
@@ -296,6 +297,7 @@ func (c *replayContext) ExecuteActivityAsync(name string, input []byte, opts ...
 	return c.issue(state.Decision{
 		Type: state.DecideScheduleStep, StepName: name, Input: input, Retry: retryPolicy(o.RetryPolicy),
 		StartToClose: max(o.StartToCloseTimeout, 0), ScheduleToClose: max(o.ScheduleToCloseTimeout, 0),
+		TaskQueue: o.TaskQueue,
 	})
 }
 

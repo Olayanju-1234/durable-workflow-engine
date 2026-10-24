@@ -258,31 +258,39 @@ public final class Workflowd {
         final RetryPolicy retry;
         final Duration startToClose;
         final Duration scheduleToClose;
+        final String taskQueue;
 
-        public ActivityOptions() { this(null, null, null); }
+        public ActivityOptions() { this(null, null, null, null); }
 
-        private ActivityOptions(RetryPolicy retry, Duration startToClose, Duration scheduleToClose) {
+        private ActivityOptions(RetryPolicy retry, Duration startToClose, Duration scheduleToClose, String taskQueue) {
             this.retry = retry;
             this.startToClose = startToClose;
             this.scheduleToClose = scheduleToClose;
+            this.taskQueue = taskQueue;
         }
 
         public ActivityOptions withRetry(RetryPolicy retry) {
-            return new ActivityOptions(retry, startToClose, scheduleToClose);
+            return new ActivityOptions(retry, startToClose, scheduleToClose, taskQueue);
         }
 
         public ActivityOptions withStartToCloseTimeout(Duration d) {
-            return new ActivityOptions(retry, d, scheduleToClose);
+            return new ActivityOptions(retry, d, scheduleToClose, taskQueue);
         }
 
         public ActivityOptions withScheduleToCloseTimeout(Duration d) {
-            return new ActivityOptions(retry, startToClose, d);
+            return new ActivityOptions(retry, startToClose, d, taskQueue);
+        }
+
+        /** Run the activity on this task queue instead of the workflow's. */
+        public ActivityOptions withTaskQueue(String q) {
+            return new ActivityOptions(retry, startToClose, scheduleToClose, q);
         }
 
         void putOn(Map<String, Object> cmd) {
             if (retry != null) cmd.put("retry_policy", retry.toWire());
             putMillis(cmd, "start_to_close_timeout_ms", startToClose);
             putMillis(cmd, "schedule_to_close_timeout_ms", scheduleToClose);
+            if (taskQueue != null && !taskQueue.isEmpty()) cmd.put("task_queue", taskQueue);
         }
     }
 
@@ -309,19 +317,23 @@ public final class Workflowd {
         final Duration executionTimeout;
         final IdReusePolicy reuse;
         final IdConflictPolicy conflict;
+        final String taskQueue;
 
-        public StartOptions() { this(null, null, null); }
+        public StartOptions() { this(null, null, null, null); }
 
-        private StartOptions(Duration executionTimeout, IdReusePolicy reuse, IdConflictPolicy conflict) {
+        private StartOptions(Duration executionTimeout, IdReusePolicy reuse, IdConflictPolicy conflict, String taskQueue) {
             this.executionTimeout = executionTimeout;
             this.reuse = reuse;
             this.conflict = conflict;
+            this.taskQueue = taskQueue;
         }
 
         /** End the workflow as TIMED_OUT if it has not finished this long after it starts. */
-        public StartOptions withExecutionTimeout(Duration d) { return new StartOptions(d, reuse, conflict); }
-        public StartOptions withIdReusePolicy(IdReusePolicy p) { return new StartOptions(executionTimeout, p, conflict); }
-        public StartOptions withIdConflictPolicy(IdConflictPolicy p) { return new StartOptions(executionTimeout, reuse, p); }
+        public StartOptions withExecutionTimeout(Duration d) { return new StartOptions(d, reuse, conflict, taskQueue); }
+        public StartOptions withIdReusePolicy(IdReusePolicy p) { return new StartOptions(executionTimeout, p, conflict, taskQueue); }
+        public StartOptions withIdConflictPolicy(IdConflictPolicy p) { return new StartOptions(executionTimeout, reuse, p, taskQueue); }
+        /** Run the workflow on this task queue instead of the worker's own. */
+        public StartOptions withTaskQueue(String q) { return new StartOptions(executionTimeout, reuse, conflict, q); }
     }
 
     /** What {@link Worker#start} did: the run it began, or with USE_EXISTING the run that held the id. */
@@ -438,6 +450,11 @@ public final class Workflowd {
 
         /** {@link #continueAsNew(String)} as another workflow type and/or with a new execution timeout (null: this run's). */
         public String continueAsNew(String input, String workflowType, Duration executionTimeout) {
+            return continueAsNew(input, workflowType, executionTimeout, null);
+        }
+
+        /** {@link #continueAsNew(String, String, Duration)}, and on another task queue (null: this run's). */
+        public String continueAsNew(String input, String workflowType, Duration executionTimeout, String taskQueue) {
             if (next < steps.size()) {
                 throw new NonDeterminism("non-determinism: continued as new after " + next
                         + " steps, but history has " + steps.size());
@@ -446,6 +463,7 @@ public final class Workflowd {
             cmd.put("type", "continue_as_new");
             cmd.put("input", input == null ? "" : input);
             if (workflowType != null && !workflowType.isEmpty()) cmd.put("workflow_type", workflowType);
+            if (taskQueue != null && !taskQueue.isEmpty()) cmd.put("task_queue", taskQueue);
             putMillis(cmd, "execution_timeout_ms", executionTimeout);
             throw new ContinueAsNew(cmd);
         }
@@ -960,6 +978,7 @@ public final class Workflowd {
         private final String workerId;
         private final String authToken;
         private volatile String namespace;
+        private volatile String taskQueue = "";
         private final HttpClient http;
         private final Map<String, WorkflowFunction> workflows = new ConcurrentHashMap<>();
         private final Map<String, ActivityRunner> activities = new ConcurrentHashMap<>();
@@ -1007,6 +1026,20 @@ public final class Workflowd {
         public Worker namespace(String namespace) {
             this.namespace = namespace;
             return this;
+        }
+
+        /**
+         * The task queue this worker polls, and where its {@link #start} calls run workflows unless
+         * their options name another. Unset, it is the default queue. Set it before {@link #start}.
+         */
+        public Worker taskQueue(String taskQueue) {
+            this.taskQueue = taskQueue == null || taskQueue.equals("default") ? "" : taskQueue;
+            return this;
+        }
+
+        private String queueParam() {
+            String q = taskQueue;
+            return q.isEmpty() ? "" : "&task_queue=" + enc(q);
         }
 
         public Worker workflow(String type, WorkflowFunction fn) {
@@ -1173,6 +1206,9 @@ public final class Workflowd {
                 if (opts.reuse != null) body.put("id_reuse_policy", opts.reuse.name());
                 if (opts.conflict != null) body.put("id_conflict_policy", opts.conflict.name());
             }
+            // Only a named queue is sent: an engine before 0.4.0 refuses the field.
+            String queue = opts != null && opts.taskQueue != null ? opts.taskQueue : taskQueue;
+            if (!queue.isEmpty() && !queue.equals("default")) body.put("task_queue", queue);
             try {
                 Object res = request("POST", "/api/workflows", body);
                 Map<String, Object> m = res instanceof Map ? (Map<String, Object>) res : Map.of();
@@ -1248,7 +1284,7 @@ public final class Workflowd {
                 try {
                     if (registeredEpoch != epoch()) register();
                     Object res = request("GET",
-                            "/api/workflow-tasks?types=" + enc(types) + "&worker_id=" + enc(workerId), null, 1);
+                            "/api/workflow-tasks?types=" + enc(types) + "&worker_id=" + enc(workerId) + queueParam(), null, 1);
                     if (res == null) continue; // long-poll expired
                     task = (Map<String, Object>) res;
                 } catch (Exception e) {
@@ -1289,7 +1325,7 @@ public final class Workflowd {
                 Map<String, Object> task;
                 try {
                     Object res = request("GET",
-                            "/api/activity-tasks?activities=" + enc(names) + "&worker_id=" + enc(workerId), null, 1);
+                            "/api/activity-tasks?activities=" + enc(names) + "&worker_id=" + enc(workerId) + queueParam(), null, 1);
                     if (res == null) continue;
                     task = (Map<String, Object>) res;
                 } catch (Exception e) {

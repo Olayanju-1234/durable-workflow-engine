@@ -66,6 +66,8 @@ export interface ActivityOptions {
   startToCloseTimeoutMs?: number;
   /** Fail the step this long after it is first scheduled, every attempt and backoff included. */
   scheduleToCloseTimeoutMs?: number;
+  /** Run it on this task queue instead of the workflow's. */
+  taskQueue?: string;
 }
 
 export interface StartWorkflowOptions {
@@ -75,6 +77,8 @@ export interface StartWorkflowOptions {
   idReusePolicy?: 'ALLOW_DUPLICATE' | 'ALLOW_DUPLICATE_FAILED_ONLY' | 'REJECT_DUPLICATE';
   /** USE_EXISTING returns the run that holds a taken id instead of failing (default: FAIL). */
   idConflictPolicy?: 'FAIL' | 'USE_EXISTING';
+  /** The task queue it runs on (default: the worker's own). */
+  taskQueue?: string;
 }
 
 /** What start() did: the run it began, or with USE_EXISTING the run that held the id. */
@@ -102,7 +106,7 @@ export interface Context {
    * End this run and start a fresh one under the same workflow id with an empty history:
    * `return ctx.continueAsNew(state)`. Unconsumed signals are not carried over.
    */
-  continueAsNew(input?: Payload, opts?: { workflowType?: string; executionTimeoutMs?: number }): Promise<never>;
+  continueAsNew(input?: Payload, opts?: { workflowType?: string; executionTimeoutMs?: number; taskQueue?: string }): Promise<never>;
   /** The input decoded as text, JSON or bytes. */
   inputAs(as?: 'text'): string;
   inputAs(as: 'bytes'): Uint8Array;
@@ -242,6 +246,8 @@ export interface WorkerOptions {
   token?: string;
   /** The namespace every call works in. Unset: the default, or a namespace token's own. */
   namespace?: string;
+  /** The task queue this worker polls, and where its start() calls run workflows (default: the default queue). */
+  taskQueue?: string;
   /** Activities run at once. Default 4. */
   activityConcurrency?: number;
   /** Workflow tasks decided at once. Default 2. */

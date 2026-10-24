@@ -108,6 +108,8 @@ type Step struct {
 	StartToClose    time.Duration
 	ScheduleToClose time.Duration
 	ScheduledAt     int64
+	// TaskQueue is an activity's task queue ("" is the default queue).
+	TaskQueue string
 	// Retrying: the latest attempt failed and the engine will run another, so
 	// the failure is not the step's result; workflow code still waits on it.
 	Retrying bool
@@ -159,7 +161,9 @@ type State struct {
 	// ExecutionTimeout is how long after StartedAt the workflow times out
 	// (zero = never).
 	ExecutionTimeout time.Duration
-	LastEventID      int64 // EventId of the final event consumed
+	// TaskQueue is the run's task queue ("" is the default queue).
+	TaskQueue   string
+	LastEventID int64 // EventId of the final event consumed
 	// LastEventResolves: the latest event gave a step its result (or started
 	// the workflow), so the workflow code may have more to do.
 	LastEventResolves bool
@@ -242,6 +246,10 @@ func (f *Folder) Format() uint32 { return max(f.format, history.FormatBase) }
 func (f *Folder) FormatOf(ev *history.HistoryEvent) uint32 {
 	need := max(ev.GetMinReaderFormat(), history.FormatBase)
 	switch attr := ev.GetAttributes().(type) {
+	case *history.HistoryEvent_WorkflowStarted:
+		if NamedQueue(attr.WorkflowStarted.GetTaskQueue()) {
+			need = max(need, history.FormatNamespaces)
+		}
 	case *history.HistoryEvent_MarkerRecorded:
 		need = max(need, history.FormatMarkers)
 		if attr.MarkerRecorded.GetMarker() == MarkerCancel {
@@ -255,6 +263,9 @@ func (f *Folder) FormatOf(ev *history.HistoryEvent) uint32 {
 		if attr.StepScheduled.GetSequence() > f.lastSeq && f.open+f.retrying > 0 {
 			need = max(need, history.FormatParallelSteps)
 		}
+		if NamedQueue(attr.StepScheduled.GetTaskQueue()) {
+			need = max(need, history.FormatNamespaces)
+		}
 	case *history.HistoryEvent_TimerStarted:
 		if f.open+f.retrying > 0 {
 			need = max(need, history.FormatParallelSteps)
@@ -265,12 +276,31 @@ func (f *Folder) FormatOf(ev *history.HistoryEvent) uint32 {
 			need = max(need, history.FormatClosedSteps)
 		}
 	case *history.HistoryEvent_WorkflowCompleted:
-		if attr.WorkflowCompleted.GetContinuedAsNew() != nil {
+		if next := attr.WorkflowCompleted.GetContinuedAsNew(); next != nil {
 			need = max(need, history.FormatRuns)
+			if NamedQueue(next.GetTaskQueue()) {
+				need = max(need, history.FormatNamespaces)
+			}
 		}
 	}
 	return need
 }
+
+// DefaultTaskQueue names the queue workers that name none poll. History
+// records it as "", so a history that uses no named queue is unchanged.
+const DefaultTaskQueue = "default"
+
+// QueueName is a task queue's name as workers and clients see it.
+func QueueName(q string) string {
+	if q == "" {
+		return DefaultTaskQueue
+	}
+	return q
+}
+
+// NamedQueue reports whether q is a queue other than the default one: one an
+// older binary would route to default pollers (history format 6).
+func NamedQueue(q string) bool { return q != "" && q != DefaultTaskQueue }
 
 // LegacyRunID is the run id of a history recorded before run ids existed:
 // its start time in hex, which is fixed once recorded.
@@ -327,6 +357,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		st.StartedAt = ev.GetTimestamp()
 		st.ExecutionTimeout = time.Duration(ws.GetExecutionTimeoutMs()) * time.Millisecond
 		st.RunID, st.ContinuedFromRunID = ws.GetRunId(), ws.GetContinuedFromRunId()
+		st.TaskQueue = ws.GetTaskQueue()
 		if st.RunID == "" {
 			st.RunID = LegacyRunID(ev.GetTimestamp())
 		}
@@ -359,6 +390,9 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			if d := msDuration(ss.GetScheduleToCloseTimeoutMs()); d > 0 {
 				s.ScheduleToClose = d
 			}
+			if q := ss.GetTaskQueue(); q != "" {
+				s.TaskQueue = q
+			}
 			f.open++
 			break
 		}
@@ -384,6 +418,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 			StartToClose:    msDuration(ss.GetStartToCloseTimeoutMs()),
 			ScheduleToClose: msDuration(ss.GetScheduleToCloseTimeoutMs()),
 			ScheduledAt:     ev.GetTimestamp(),
+			TaskQueue:       ss.GetTaskQueue(),
 		})
 		f.open++
 		f.lastSeq = seq

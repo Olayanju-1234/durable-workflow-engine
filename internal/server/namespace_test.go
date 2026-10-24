@@ -38,7 +38,7 @@ func pollIn(t *testing.T, sc *Scope, d time.Duration, steps ...string) (*Task, e
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
-	return sc.PollTask(ctx, "worker-"+sc.Namespace(), steps...)
+	return sc.PollTask(ctx, "worker-"+sc.Namespace(), "", steps...)
 }
 
 func statusIn(t *testing.T, sc *Scope, id string) string {
@@ -176,12 +176,12 @@ func TestNamespacesIsolateWorkflowTypes(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if task, err := e.In("beta").PollWorkflowTask(ctx, "sdk-beta", []string{"Remote"}); err == nil {
+	if task, err := e.In("beta").PollWorkflowTask(ctx, "sdk-beta", "", []string{"Remote"}); err == nil {
 		t.Fatalf("beta received acme's decision for %s", task.GetWorkflowId())
 	}
 	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
 	defer cancel2()
-	task, err := e.In("acme").PollWorkflowTask(ctx2, "sdk-acme", nil)
+	task, err := e.In("acme").PollWorkflowTask(ctx2, "sdk-acme", "", nil)
 	if err != nil || task.GetWorkflowId() != "r1" {
 		t.Fatalf("acme's decision = %v, %v", task, err)
 	}

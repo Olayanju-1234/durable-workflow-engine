@@ -266,6 +266,12 @@ def wait_done(wid):
     fail(f"workflow {wid} did not complete")
 
 
+@worker.activity("py-shared")
+def py_shared_default(_payload):
+    # The same name as the task-queue worker's: each queue's worker gets only its own.
+    return "default worker"
+
+
 worker.run(block=False)
 
 wid = worker.start_workflow("PyE2E", {"n": 1})
@@ -450,6 +456,32 @@ except Exception as err:
 if ns_done.get("output") != "in e2e: HELLO" or default_side.get("output") == ns_done.get("output") or elsewhere != 403:
     fail(f"namespace: output {ns_done.get('output')}, default's {default_side.get('output')}, token outside its namespace {elsewhere}")
 ns_worker.stop()
+
+# Task queues: a worker on its own queue runs its workflow's activities there,
+# even though the main worker implements the same activity name, unless the
+# workflow sends one to the default queue on purpose.
+q_worker = Worker(addresses=[follower], worker_id="py-e2e-q", task_queue="py-e2e-q")
+
+
+@q_worker.workflow("PyQueued")
+def py_queued(ctx):
+    return ctx.activity("py-shared") + " / " + ctx.activity("py-shared", task_queue="default")
+
+
+@q_worker.activity("py-shared")
+def py_shared_queue(_payload):
+    return "queue worker"
+
+
+q_worker.run(block=False)
+queued_id = q_worker.start_workflow("PyQueued")
+queued = wait_done(queued_id)
+queued_steps = ",".join(s.get("task_queue", "") for s in queued["steps"])
+if queued.get("output") != "queue worker / default worker" or queued.get("task_queue") != "py-e2e-q" or (
+    queued_steps != "py-e2e-q,default"
+):
+    fail(f"task queues: output {queued.get('output')}, queue {queued.get('task_queue')}, steps {queued_steps}")
+q_worker.stop()
 
 # A restarted engine has forgotten every registration: the worker must notice
 # and register again before this workflow can be dispatched.

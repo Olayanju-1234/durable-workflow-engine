@@ -33,7 +33,8 @@ import (
 // exactly). Requests may send either form; the base64 one wins when present.
 //
 // Routing: a worker passes ?types=A,B on workflow-tasks and ?activities=x,y on
-// activity-tasks to receive only work it can do. Omitting the filter means any.
+// activity-tasks to receive only work it can do. Omitting the filter means any
+// on its task queue (?task_queue=, default "default").
 //
 // Long-polling: poll endpoints block up to pollTimeout, then return 204 so the
 // client loops. Standard long-poll, and it keeps a dead connection from looking
@@ -62,6 +63,7 @@ type workflowTaskDTO struct {
 	// When the workflow started (RFC 3339): the workflow clock's first reading.
 	StartedAt string `json:"started_at,omitempty"`
 	RunID     string `json:"run_id,omitempty"`
+	TaskQueue string `json:"task_queue,omitempty"`
 	// The event id at which the history crossed the limits' warning share
 	// (absent: not yet). Code that has seen a result at or after it should
 	// continue as new; it is an event id, so every replay agrees.
@@ -98,6 +100,7 @@ type activityTaskDTO struct {
 	// for every attempt: an idempotency key for the activity's side effect.
 	Attempt    int32  `json:"attempt"`
 	ActivityID string `json:"activity_id"`
+	TaskQueue  string `json:"task_queue,omitempty"`
 }
 
 func (a *HTTPAPI) registerWorkflowTypes(w http.ResponseWriter, r *http.Request) {
@@ -136,9 +139,13 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithPollTimeout(r)
 	defer cancel()
 
-	task, err := e.PollWorkflowTask(ctx, workerID, types)
+	task, err := e.PollWorkflowTask(ctx, workerID, r.URL.Query().Get("task_queue"), types)
 	if errors.Is(err, ErrNotLeader) {
 		a.writeNotLeader(w, err)
+		return
+	}
+	if errors.Is(err, ErrInvalidArgument) {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	if err != nil {
@@ -162,6 +169,7 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		HistoryLength: task.GetHistoryLength(),
 		StartedAt:     formatNanos(st.StartedAt),
 		RunID:         task.GetRunId(),
+		TaskQueue:     task.GetTaskQueue(),
 
 		SuggestContinueAsNewAt: task.GetSuggestContinueAsNewAt(),
 		HistorySizeBytes:       task.GetHistorySizeBytes(),
@@ -222,6 +230,9 @@ type commandDTO struct {
 	// this run's); its input travels in input.
 	WorkflowType       string `json:"workflow_type,omitempty"`
 	ExecutionTimeoutMs int64  `json:"execution_timeout_ms,omitempty"`
+	// schedule_activity: the task queue to run it on (absent: the
+	// workflow's); continue_as_new: the next run's (absent: this run's).
+	TaskQueue string `json:"task_queue,omitempty"`
 	// record_marker: "version" or "side_effect", and the recorded value.
 	Marker     string  `json:"marker,omitempty"`
 	Data       string  `json:"data,omitempty"`
@@ -316,6 +327,7 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 				StepName: c.StepName, Sequence: c.Sequence, Input: input, RetryPolicy: retry,
 				StartToCloseTimeoutMs:    c.StartToCloseTimeoutMs,
 				ScheduleToCloseTimeoutMs: c.ScheduleToCloseTimeoutMs,
+				TaskQueue:                c.TaskQueue,
 			}}}, nil
 	case "start_timer":
 		return &WorkflowCommand{Command: &WorkflowCommand_StartTimer{
@@ -356,7 +368,8 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 		}}, nil
 	case "continue_as_new":
 		return &WorkflowCommand{Command: &WorkflowCommand_ContinueAsNew{
-			ContinueAsNew: &ContinueAsNewCommand{Input: input, WorkflowType: c.WorkflowType, ExecutionTimeoutMs: c.ExecutionTimeoutMs},
+			ContinueAsNew: &ContinueAsNewCommand{Input: input, WorkflowType: c.WorkflowType, ExecutionTimeoutMs: c.ExecutionTimeoutMs,
+				TaskQueue: c.TaskQueue},
 		}}, nil
 	default:
 		return nil, fmt.Errorf("unknown command type %q", c.Type)
@@ -371,10 +384,14 @@ func (a *HTTPAPI) pollActivityTask(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithPollTimeout(r)
 	defer cancel()
 
-	task, err := e.PollTask(ctx, r.URL.Query().Get("worker_id"),
+	task, err := e.PollTask(ctx, r.URL.Query().Get("worker_id"), r.URL.Query().Get("task_queue"),
 		splitCSV(r.URL.Query().Get("activities"))...)
 	if errors.Is(err, ErrNotLeader) {
 		a.writeNotLeader(w, err)
+		return
+	}
+	if errors.Is(err, ErrInvalidArgument) {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	if err != nil {
@@ -393,6 +410,7 @@ func (a *HTTPAPI) pollActivityTask(w http.ResponseWriter, r *http.Request) {
 		StartToCloseTimeoutMs: task.GetStartToCloseTimeoutMs(),
 		Attempt:               task.GetAttempt(),
 		ActivityID:            task.GetActivityId(),
+		TaskQueue:             task.GetTaskQueue(),
 	})
 }
 

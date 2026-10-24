@@ -26,6 +26,8 @@ type Schedule struct {
 	Input        []byte
 	// SkipIfRunning skips a fire while an earlier run is still going.
 	SkipIfRunning bool
+	// TaskQueue is the task queue the runs start on; empty is the default.
+	TaskQueue string
 }
 
 // ScheduleDescription is a schedule as the engine reports it.
@@ -41,7 +43,7 @@ type ScheduleDescription struct {
 func (c *Client) CreateSchedule(ctx context.Context, s Schedule) error {
 	req := &server.CreateScheduleRequest{Schedule: &server.Schedule{
 		ScheduleId: s.ID, Cron: s.Cron, Timezone: s.Timezone,
-		WorkflowType: s.WorkflowType, Input: s.Input, SkipIfRunning: s.SkipIfRunning,
+		WorkflowType: s.WorkflowType, Input: s.Input, SkipIfRunning: s.SkipIfRunning, TaskQueue: s.TaskQueue,
 	}}
 	_, err := c.conn.Call(ctx, func(ctx context.Context, stub server.WorkflowServiceClient, opt grpc.CallOption) error {
 		_, err := stub.CreateSchedule(ctx, req, opt)
@@ -80,6 +82,7 @@ func (c *Client) ListSchedules(ctx context.Context) ([]ScheduleDescription, erro
 			Schedule: Schedule{
 				ID: s.GetScheduleId(), Cron: s.GetCron(), Timezone: s.GetTimezone(),
 				WorkflowType: s.GetWorkflowType(), Input: s.GetInput(), SkipIfRunning: s.GetSkipIfRunning(),
+				TaskQueue: s.GetTaskQueue(),
 			},
 			CreatedAt: time.Unix(0, info.GetCreatedAt()).UTC(),
 		}

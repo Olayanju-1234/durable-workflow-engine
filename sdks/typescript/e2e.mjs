@@ -184,6 +184,10 @@ worker.activity('ts-release', async () => {
   return 'released';
 });
 
+// The same activity name as the task-queue worker below: each queue's worker
+// must get only its own queue's tasks.
+worker.activity('ts-shared', async () => 'default worker');
+
 // Registered before anything starts, so the first start can't race it.
 await worker.register();
 worker.run().catch((err) => fail(`worker: ${err.message}`));
@@ -344,6 +348,22 @@ if (nsDone.output !== 'in e2e: HELLO' || defaultSide.output === nsDone.output ||
   fail(`namespace: output ${nsDone.output}, default's ${defaultSide.output}, token outside its namespace ${elsewhere}`);
 }
 nsWorker.stop();
+
+// Task queues: a worker on its own queue runs its workflow's activities there,
+// even though the main worker implements the same activity name, unless the
+// workflow sends one to the default queue on purpose.
+const qWorker = new Worker({ addresses: [follower], workerId: 'ts-e2e-q', taskQueue: 'ts-e2e-q' });
+qWorker.workflow('TsQueued', async (ctx) =>
+  `${await ctx.activity('ts-shared')} / ${await ctx.activity('ts-shared', '', { taskQueue: 'default' })}`);
+qWorker.activity('ts-shared', async () => 'queue worker');
+await qWorker.register();
+qWorker.run().catch((err) => fail(`queue worker: ${err.message}`));
+const queued = await waitDone(await qWorker.startWorkflow('TsQueued'));
+const queuedSteps = queued.steps.map((s) => s.task_queue).join();
+if (queued.output !== 'queue worker / default worker' || queued.task_queue !== 'ts-e2e-q' || queuedSteps !== 'ts-e2e-q,default') {
+  fail(`task queues: output ${queued.output}, queue ${queued.task_queue}, steps ${queuedSteps}`);
+}
+qWorker.stop();
 
 // A restarted engine has forgotten every registration: the worker must notice
 // and register again before this workflow can be dispatched.

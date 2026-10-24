@@ -196,6 +196,11 @@ type Decision struct {
 	StartToClose    time.Duration
 	ScheduleToClose time.Duration
 
+	// Optionally set when Type == DecideScheduleStep (the activity's task
+	// queue; empty is the workflow's) or DecideContinueAsNew (the next run's;
+	// empty keeps this run's).
+	TaskQueue string
+
 	// Set when Type == DecideRecordMarker: the marker kind ("version" or
 	// "side_effect"); its data rides in Output.
 	Marker string

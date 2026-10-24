@@ -240,6 +240,7 @@ type StartOption func(*startOptions)
 
 type startOptions struct {
 	namespace        string
+	taskQueue        string
 	executionTimeout time.Duration
 	reuse            IdReusePolicy
 	conflict         IdConflictPolicy
@@ -256,6 +257,13 @@ func WithIDReusePolicy(p IdReusePolicy) StartOption {
 // (the default), or return the run that holds it (USE_EXISTING).
 func WithIDConflictPolicy(p IdConflictPolicy) StartOption {
 	return func(o *startOptions) { o.conflict = p }
+}
+
+// WithTaskQueue runs the workflow on a named task queue: its workflow tasks,
+// and its activities unless they name another, go only to workers polling it.
+// Empty (or "default") is the default queue.
+func WithTaskQueue(q string) StartOption {
+	return func(o *startOptions) { o.taskQueue = q }
 }
 
 // inNamespace starts the workflow in ns (Scope.Start).
@@ -294,6 +302,9 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 	if err := checkNamespace(ns); err != nil {
 		return Started{}, err
 	}
+	if err := checkQueue(so.taskQueue); err != nil {
+		return Started{}, err
+	}
 	if _, ok := e.planner(ns, workflowType); !ok {
 		where := "on this node"
 		if ns != DefaultNamespace {
@@ -330,6 +341,7 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 		WorkflowStarted: &history.WorkflowStartedEvent{
 			WorkflowId: localWorkflowID, WorkflowType: workflowType, Input: input,
 			ExecutionTimeoutMs: so.executionTimeout.Milliseconds(), RunId: runID,
+			TaskQueue: recordedQueue(so.taskQueue),
 		},
 	}}
 	if len(existing) == 0 {
@@ -655,15 +667,15 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 // token that CompleteTask and Heartbeat must present, and a deadline after
 // which the engine assumes the worker died and reassigns the work.
 func (e *Engine) PollTask(ctx context.Context, workerID string, stepNames ...string) (*Task, error) {
-	return e.pollTask(ctx, DefaultNamespace, workerID, stepNames)
+	return e.pollTask(ctx, DefaultNamespace, "", workerID, stepNames)
 }
 
-// pollTask is PollTask for a namespace: only its tasks are handed out, and
-// the task names the workflow by its store key.
-func (e *Engine) pollTask(ctx context.Context, ns, workerID string, stepNames []string) (*Task, error) {
+// pollTask is PollTask for a namespace's task queue: only its tasks are
+// handed out, and the task names the workflow by its store key.
+func (e *Engine) pollTask(ctx context.Context, ns, queue, workerID string, stepNames []string) (*Task, error) {
 	ctx, cancel := e.pollContext(ctx)
 	defer cancel()
-	t, err := e.queue.poll(ctx, ns, stepNames)
+	t, err := e.queue.poll(ctx, routeScope(ns, queue), stepNames)
 	if err != nil {
 		return nil, e.pollError(err)
 	}
@@ -932,12 +944,18 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 		}
 		switch decision.Type {
 		case state.DecideScheduleStep:
+			// An activity runs on its workflow's queue unless the code named one.
+			queue := recordedQueue(decision.TaskQueue)
+			if decision.TaskQueue == "" {
+				queue = w.taskQueue()
+			}
 			scheduled := &history.HistoryEvent{Attributes: &history.HistoryEvent_StepScheduled{
 				StepScheduled: &history.StepScheduledEvent{
 					StepName: decision.StepName, Sequence: decision.Sequence, Input: decision.Input,
 					RetryPolicy:              decision.Retry.ToProto(),
 					StartToCloseTimeoutMs:    decision.StartToClose.Milliseconds(),
 					ScheduleToCloseTimeoutMs: decision.ScheduleToClose.Milliseconds(),
+					TaskQueue:                queue,
 				},
 			}}
 			if err := e.appendLocked(w, scheduled, nextID); err != nil {
@@ -946,7 +964,7 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 			step := &state.Step{
 				Name: decision.StepName, Sequence: decision.Sequence, Input: decision.Input, Attempts: 1,
 				StartToClose: decision.StartToClose, ScheduleToClose: decision.ScheduleToClose,
-				ScheduledAt: scheduled.GetTimestamp(),
+				ScheduledAt: scheduled.GetTimestamp(), TaskQueue: queue,
 			}
 			e.armStepDeadline(workflowID, w.runID(), step)
 			// Record-then-enqueue: the step is durable before any worker can see it,

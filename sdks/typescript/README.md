@@ -85,6 +85,11 @@ For an engine with auth and TLS: `new Worker({ address: 'https://…:8233', toke
 `NODE_EXTRA_CA_CERTS=/path/ca.pem` for a private CA. With a namespace's token the worker works in
 that namespace; with the engine's token, pick one with `namespace: 'acme'` (engine 0.4.0+).
 
+Task queues (engine 0.4.0+): `new Worker({ taskQueue: 'billing' })` polls only the `billing`
+queue, and its `start()` calls run workflows there; their activities run there too unless a call
+says `ctx.activity('send', input, { taskQueue: 'email' })`. Without one, everything uses the
+default queue.
+
 Workflow code must be deterministic: no clocks, randomness or I/O except through `ctx`.
 How replay works, and the protocol, are in the
 [SDK guide](https://github.com/Olayanju-1234/durable-workflow-engine/tree/main/sdks#readme).

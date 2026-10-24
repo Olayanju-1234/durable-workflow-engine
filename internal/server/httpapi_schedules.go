@@ -24,6 +24,7 @@ type scheduleDTO struct {
 	Input         string `json:"input,omitempty"`
 	InputBase64   string `json:"input_base64,omitempty"`
 	SkipIfRunning bool   `json:"skip_if_running,omitempty"`
+	TaskQueue     string `json:"task_queue,omitempty"`
 	CreatedAt     string `json:"created_at,omitempty"`
 	NextFireAt    string `json:"next_fire_at,omitempty"`
 }
@@ -44,8 +45,8 @@ func (a *HTTPAPI) listSchedules(w http.ResponseWriter, r *http.Request) {
 		out = append(out, &scheduleDTO{
 			ScheduleID: sp.GetScheduleId(), Cron: sp.GetCron(), Timezone: sp.GetTimezone(),
 			WorkflowType: sp.GetWorkflowType(), Input: string(sp.GetInput()), InputBase64: base64Twin(sp.GetInput()),
-			SkipIfRunning: sp.GetSkipIfRunning(),
-			CreatedAt:     formatNanos(s.GetCreatedAt()), NextFireAt: formatNanos(s.GetNextFireAt()),
+			SkipIfRunning: sp.GetSkipIfRunning(), TaskQueue: sp.GetTaskQueue(),
+			CreatedAt: formatNanos(s.GetCreatedAt()), NextFireAt: formatNanos(s.GetNextFireAt()),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"schedules": out})
@@ -60,6 +61,7 @@ func (a *HTTPAPI) createSchedule(w http.ResponseWriter, r *http.Request) {
 		Input         string  `json:"input"`
 		InputBase64   *string `json:"input_base64"`
 		SkipIfRunning bool    `json:"skip_if_running"`
+		TaskQueue     string  `json:"task_queue"`
 	}
 	if err := a.decodeJSON(r, &body); err != nil {
 		writeError(w, decodeStatus(err), err)
@@ -76,7 +78,7 @@ func (a *HTTPAPI) createSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := e.CreateSchedule(&Schedule{
 		ScheduleId: body.ScheduleID, Cron: body.Cron, Timezone: body.Timezone,
-		WorkflowType: body.WorkflowType, Input: input, SkipIfRunning: body.SkipIfRunning,
+		WorkflowType: body.WorkflowType, Input: input, SkipIfRunning: body.SkipIfRunning, TaskQueue: body.TaskQueue,
 	}); err != nil {
 		a.writeScheduleError(w, err)
 		return

@@ -82,10 +82,13 @@ func (q *routedQueue[T]) poll(ctx context.Context, scope string, routes []string
 	}
 }
 
-// taskQueue holds activity tasks, routed by step name within a namespace.
+// taskQueue holds activity tasks, routed by step name within a namespace's
+// task queue.
 // Tasks name their workflow by its store key until they leave the engine.
 type taskQueue = routedQueue[*Task]
 
 func newTaskQueue() *taskQueue {
-	return newRoutedQueue((*Task).GetStepName, func(t *Task) string { return nsOf(t.GetWorkflowId()) })
+	return newRoutedQueue((*Task).GetStepName, func(t *Task) string {
+		return routeScope(nsOf(t.GetWorkflowId()), t.GetTaskQueue())
+	})
 }

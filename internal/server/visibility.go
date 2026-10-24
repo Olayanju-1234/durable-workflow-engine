@@ -98,7 +98,12 @@ func describeRun(workflowID string, events []*history.HistoryEvent, st *state.St
 			// Abandoned: a race's loser, say. Nothing will ever use it.
 			status, stepErr = state.StepCancelled.String(), "not needed: the workflow is "+protoStatusName(st)
 		}
+		queue := ""
+		if s.Kind == state.KindActivity {
+			queue = state.QueueName(s.TaskQueue)
+		}
 		steps = append(steps, &StepInfo{
+			TaskQueue:  queue,
 			StepName:   s.Name,
 			Sequence:   s.Sequence,
 			Kind:       s.Kind.String(),
@@ -154,6 +159,7 @@ func summaryFrom(workflowID string, events []*history.HistoryEvent, st *state.St
 		HistoryLength:    int64(len(events)),
 		RunId:            st.RunID,
 		HistorySizeBytes: bytes,
+		TaskQueue:        state.QueueName(st.TaskQueue),
 	}
 	if len(events) > 0 {
 		sum.StartedAt = events[0].GetTimestamp()

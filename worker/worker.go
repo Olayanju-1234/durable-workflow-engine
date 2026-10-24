@@ -130,6 +130,10 @@ type Options struct {
 	WorkflowConcurrency int
 	// PollTimeout bounds each long poll. Default 30s.
 	PollTimeout time.Duration
+	// TaskQueue is the task queue the worker polls, for workflow and activity
+	// tasks alike. Empty is the default queue. Start workflows meant for this
+	// worker on the same queue (client.WithTaskQueue).
+	TaskQueue string
 	// Logger receives worker logs and is the base of workflow.Context.Logger.
 	// Default slog.Default().
 	Logger *slog.Logger
@@ -318,7 +322,7 @@ func (w *Worker) register(ctx context.Context, types []string) error {
 }
 
 func (w *Worker) pollWorkflowTasks(ctx context.Context, types []string) {
-	req := &server.PollWorkflowTaskRequest{WorkerId: w.opts.ID, WorkflowTypes: types}
+	req := &server.PollWorkflowTaskRequest{WorkerId: w.opts.ID, WorkflowTypes: types, TaskQueue: w.opts.TaskQueue}
 	for ctx.Err() == nil {
 		if err := w.register(ctx, types); err != nil {
 			w.pause(ctx, err)
@@ -379,7 +383,7 @@ func (w *Worker) decide(ctx context.Context, task *server.WorkflowTask) {
 }
 
 func (w *Worker) pollActivityTasks(ctx context.Context, names []string) {
-	req := &server.PollTaskRequest{WorkerId: w.opts.ID, StepNames: names}
+	req := &server.PollTaskRequest{WorkerId: w.opts.ID, StepNames: names, TaskQueue: w.opts.TaskQueue}
 	for ctx.Err() == nil {
 		var task *server.Task
 		err := w.poll(ctx, func(ctx context.Context, s server.WorkflowServiceClient, opt grpc.CallOption) error {

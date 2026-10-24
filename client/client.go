@@ -132,6 +132,7 @@ type StartOption func(*startOptions)
 
 type startOptions struct {
 	id               string
+	taskQueue        string
 	executionTimeout time.Duration
 	reuse            server.IdReusePolicy
 	conflict         server.IdConflictPolicy
@@ -199,6 +200,12 @@ func WithWorkflowID(id string) StartOption {
 	return func(o *startOptions) { o.id = id }
 }
 
+// WithTaskQueue runs the workflow on a named task queue: only workers polling
+// it (worker.Options.TaskQueue) receive its tasks. Default: the default queue.
+func WithTaskQueue(q string) StartOption {
+	return func(o *startOptions) { o.taskQueue = q }
+}
+
 // WithExecutionTimeout ends the workflow with StatusTimedOut if it has not
 // finished d after it starts. Whatever it has in flight is abandoned.
 func WithExecutionTimeout(d time.Duration) StartOption {
@@ -222,6 +229,7 @@ func (c *Client) Start(ctx context.Context, workflowType string, input []byte, o
 		WorkflowType: workflowType, Input: input, WorkflowId: so.id,
 		ExecutionTimeoutMs: so.executionTimeout.Milliseconds(),
 		IdReusePolicy:      so.reuse, IdConflictPolicy: so.conflict,
+		TaskQueue: so.taskQueue,
 	}
 	generated := req.WorkflowId == ""
 	if generated {

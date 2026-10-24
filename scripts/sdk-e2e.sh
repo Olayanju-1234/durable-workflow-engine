@@ -70,17 +70,18 @@ if [ "$scheme" = https ]; then
   log "token-less and plaintext requests refused"
 fi
 
+# Each example polls its own task queue (ts-orders, py-orders, java-orders).
 case "$lang" in
   typescript)
-    type=TsOrder
+    type=TsOrder queue=ts-orders
     (cd "$root/sdks/typescript" && exec env WORKFLOWD_ADDR="$addr" ${worker_env[@]+"${worker_env[@]}"} node example.mjs) >"$work/worker.log" 2>&1 &
     ;;
   python)
-    type=PyOrder
+    type=PyOrder queue=py-orders
     (cd "$root/sdks/python" && exec env WORKFLOWD_ADDR="$addr" ${worker_env[@]+"${worker_env[@]}"} python3 -u example.py) >"$work/worker.log" 2>&1 &
     ;;
   java)
-    type=JavaOrder
+    type=JavaOrder queue=java-orders
     javac --release 11 -Xlint:all,-serial -Werror -d "$work/classes" "$root/sdks/java/Workflowd.java" "$root/sdks/java/Example.java"
     (exec env WORKFLOWD_ADDR="$addr" ${worker_env[@]+"${worker_env[@]}"} java -cp "$work/classes" Example) >"$work/worker.log" 2>&1 &
     ;;
@@ -93,7 +94,7 @@ start() {
   local code=""
   for _ in $(seq 100); do
     code=$(api -o "$work/start.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-      -d "{\"type\":\"$type\",\"input\":\"$1\",\"workflow_id\":\"$1\"}" "$addr/api/workflows") || true
+      -d "{\"type\":\"$type\",\"input\":\"$1\",\"workflow_id\":\"$1\",\"task_queue\":\"$queue\"}" "$addr/api/workflows") || true
     [ "$code" = 201 ] && return 0
     sleep 0.3
   done
@@ -122,7 +123,9 @@ signal "$lang-ok" yes
 await "$lang-ok" COMPLETED
 out=$(jq -r .output "$work/wf.json")
 [ "$out" = "shipped(reserved($lang-ok))" ] || fail "$lang-ok output = $out"
-log "approved order completed: $out"
+jq -e --arg q "$queue" '.task_queue == $q and all(.steps[] | select(.kind == "ACTIVITY"); .task_queue == $q)' "$work/wf.json" >/dev/null ||
+  fail "$lang-ok did not run on task queue $queue: $(cat "$work/wf.json")"
+log "approved order completed on task queue $queue: $out"
 
 start "$lang-no"
 signal "$lang-no" no

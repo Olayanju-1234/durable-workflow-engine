@@ -9,8 +9,11 @@
 import { Worker, WorkflowFailure } from './workflowd.mjs';
 
 const address = process.env.WORKFLOWD_ADDR ?? 'http://localhost:8233';
+// Its own task queue, so these activities never meet another worker's of the
+// same name (an engine with a demo worker runs reserve/charge/ship too).
+const taskQueue = process.env.WORKFLOWD_TASK_QUEUE ?? 'ts-orders';
 // For an engine with auth on; for a private CA, set NODE_EXTRA_CA_CERTS.
-const worker = new Worker({ address, workerId: 'ts-example', token: process.env.WORKFLOWD_AUTH_TOKEN });
+const worker = new Worker({ address, workerId: 'ts-example', token: process.env.WORKFLOWD_AUTH_TOKEN, taskQueue });
 
 // ---- the workflow: ordinary async JavaScript ----
 worker.workflow('TsOrder', async (ctx) => {
@@ -47,4 +50,4 @@ worker.run().catch((err) => {
   process.exit(1);
 });
 
-console.log(`[ts] worker running against ${address}; workflow type "TsOrder" registered`);
+console.log(`[ts] worker running against ${address}; workflow type "TsOrder" on task queue "${taskQueue}"`);

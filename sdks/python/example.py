@@ -15,6 +15,9 @@ worker = Worker(
     worker_id="py-example",
     token=os.environ.get("WORKFLOWD_AUTH_TOKEN"),  # for an engine with auth on
     ca_file=os.environ.get("WORKFLOWD_CA_FILE"),  # for a private CA over https
+    # Its own task queue, so these activities never meet another worker's of the
+    # same name (an engine with a demo worker runs reserve/charge/ship too).
+    task_queue=os.environ.get("WORKFLOWD_TASK_QUEUE", "py-orders"),
 )
 
 
@@ -61,5 +64,5 @@ def release(payload):
 
 
 if __name__ == "__main__":
-    print(f'[py] worker running against {ADDRESS}; workflow type "PyOrder" registered')
+    print(f'[py] worker running against {ADDRESS}; workflow type "PyOrder" on task queue "{worker.task_queue}"')
     worker.run()

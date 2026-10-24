@@ -147,14 +147,17 @@ func (s *Scope) RegisterWorkflow(workflowType string, planner Planner) {
 	s.e.registerWorkflow(s.ns, workflowType, planner)
 }
 
-// PollWorkflowTask waits for a decision in the namespace; see
-// Engine.PollWorkflowTask. The engine hands the task over: nothing else
-// holds it, so it is renamed in place.
-func (s *Scope) PollWorkflowTask(ctx context.Context, workerID string, workflowTypes []string) (*WorkflowTask, error) {
+// PollWorkflowTask waits for a decision on one of the namespace's task
+// queues ("" is the default); see Engine.PollWorkflowTask. The engine hands
+// the task over: nothing else holds it, so it is renamed in place.
+func (s *Scope) PollWorkflowTask(ctx context.Context, workerID, taskQueue string, workflowTypes []string) (*WorkflowTask, error) {
 	if err := checkNamespace(s.ns); err != nil {
 		return nil, err
 	}
-	t, err := s.e.pollWorkflowTask(ctx, s.ns, workerID, workflowTypes)
+	if err := checkQueue(taskQueue); err != nil {
+		return nil, err
+	}
+	t, err := s.e.pollWorkflowTask(ctx, s.ns, taskQueue, workerID, workflowTypes)
 	if t != nil {
 		t.WorkflowId = localID(t.WorkflowId)
 	}
@@ -171,12 +174,16 @@ func (s *Scope) CompleteWorkflowTask(workflowID, taskToken string, cmds []*Workf
 	return s.e.CompleteWorkflowTask(k, taskToken, cmds, replayError)
 }
 
-// PollTask waits for an activity task in the namespace; see Engine.PollTask.
-func (s *Scope) PollTask(ctx context.Context, workerID string, stepNames ...string) (*Task, error) {
+// PollTask waits for an activity task on one of the namespace's task queues
+// ("" is the default); see Engine.PollTask.
+func (s *Scope) PollTask(ctx context.Context, workerID, taskQueue string, stepNames ...string) (*Task, error) {
 	if err := checkNamespace(s.ns); err != nil {
 		return nil, err
 	}
-	t, err := s.e.pollTask(ctx, s.ns, workerID, stepNames)
+	if err := checkQueue(taskQueue); err != nil {
+		return nil, err
+	}
+	t, err := s.e.pollTask(ctx, s.ns, taskQueue, workerID, stepNames)
 	if t != nil {
 		t.WorkflowId = localID(t.WorkflowId)
 	}

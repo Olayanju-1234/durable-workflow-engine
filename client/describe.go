@@ -49,6 +49,8 @@ type WorkflowDescription struct {
 	ContinuedAsNewRunID string
 	// HistorySizeBytes is the run's history size on disk.
 	HistorySizeBytes int64
+	// TaskQueue is the task queue the run is on ("default" for the default one).
+	TaskQueue string
 }
 
 // Run is one run of a workflow id (see ListWorkflowRuns).
@@ -67,12 +69,13 @@ type Step struct {
 	Kind     string // "ACTIVITY", "TIMER", "SIGNAL" or "MARKER"
 	// "SCHEDULED", "COMPLETED", "FAILED" or "CANCELLED" (cancelled by the
 	// workflow code, or still open when the workflow finished).
-	Status   string
-	Attempts int // more than 1 means the engine retried it
-	Output   []byte
-	Error    string
-	FireAt   time.Time // timers only
-	Signal   string    // signal waits only
+	Status    string
+	Attempts  int // more than 1 means the engine retried it
+	Output    []byte
+	Error     string
+	FireAt    time.Time // timers only
+	Signal    string    // signal waits only
+	TaskQueue string    // activities only: the queue their tasks go to
 }
 
 var statuses = map[server.WorkflowStatus]Status{
@@ -101,12 +104,13 @@ func describe(r *server.GetWorkflowResponse) *WorkflowDescription {
 
 		RunID: sum.GetRunId(), ContinuedFromRunID: r.GetContinuedFromRunId(),
 		ContinuedAsNewRunID: r.GetContinuedAsNewRunId(), HistorySizeBytes: sum.GetHistorySizeBytes(),
+		TaskQueue: sum.GetTaskQueue(),
 	}
 	for _, s := range r.GetSteps() {
 		d.Steps = append(d.Steps, Step{
 			Name: s.GetStepName(), Sequence: s.GetSequence(), Kind: s.GetKind(), Status: s.GetStatus(),
 			Attempts: int(s.GetAttempts()), Output: s.GetOutput(), Error: s.GetError(),
-			FireAt: unixNanos(s.GetFireAt()), Signal: s.GetSignalName(),
+			FireAt: unixNanos(s.GetFireAt()), Signal: s.GetSignalName(), TaskQueue: s.GetTaskQueue(),
 		})
 	}
 	return d
