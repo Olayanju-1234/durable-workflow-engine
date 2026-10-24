@@ -48,6 +48,7 @@ schedule next step → record result.** Four components, built across phases:
 | Schedules        | `internal/cron`, `internal/server/schedules.go` | backlog ✅ | Durable cron schedules, leader-only, idempotent per fire (Session 24). |
 | Auth + TLS       | `internal/tlsconfig`, `internal/server/auth.go`, `cmd/workflowd/security.go` | — ✅ | Opt-in TLS on every listener, bearer token on HTTP + gRPC, metrics token, Raft mTLS. |
 | Formats + runs   | `internal/history/format.go`, `internal/server/runs.go`, `limits.go`, `cancel.go` | 0.3.0 ✅ | History formats/`FORMAT` (ADR-0011), continue-as-new + archived runs + limits (ADR-0012), id reuse (ADR-0013), graceful cancel (ADR-0014). |
+| Tenancy + ops    | `internal/server/{namespace,scope,taskqueue,guard,quota,archive,schedule_controls}.go`, `internal/archive`, `internal/ctl` | 0.4.0 ✅ | Namespaces (ADR-0015), named task queues (ADR-0016), `workflowd ctl` + backup/restore (ADR-0017), quotas/rate limits/read-only (ADR-0018), archiving to a dir or S3/R2 (ADR-0019), schedule controls (ADR-0020). |
 
 ## Build / test / regenerate
 
@@ -87,6 +88,12 @@ This is how context survives across sessions and machines. The in-repo docs are 
 source of truth because they travel with `git clone`; the global memory is the local cache.
 
 ## Current status
+
+**Session 28 (0.4.0, SDKs 0.4.0):** namespaces (ADR-0015), named task queues (ADR-0016),
+`workflowd ctl` (ADR-0017), guardrails (ADR-0018), archiving (ADR-0019), schedule controls
+(ADR-0020); history format 6. Demo and liftoff engines run `4d9ac4c`; the demo adds
+`--rate-limit 10 --rate-limit-burst 20 --trusted-proxies 127.0.0.1,::1 --read-only-schedules`;
+npm + PyPI `workflowd` 0.4.0.
 
 **Session 27 (0.3.0, SDKs 0.3.0):** history formats + an upgrade/rollback contract (ADR-0011,
 `docs/UPGRADING.md`), Python/Java parity, continue-as-new with runs and history/payload limits
@@ -182,6 +189,21 @@ refuses a newer directory before reading any history. A run's swap (`NewRun`) le
 timers carry the run id; never archive an unfinished run. `continueAsNewSuggested` and graceful
 cancel delivery are functions of what the code has observed (event ids, the cancel marker's
 cutoff), never of when a replay runs. Id checks and starts happen under the workflow lock.
+
+**Namespace/queue invariants worth not breaking (0.4.0):** the APIs reach the engine only
+through `Engine.In(ns)` (a `Scope`): it rejects ids holding `/` and maps every output back to a
+local id; history events hold local ids, never `<ns>/<id>` keys. Default-namespace keys are bare ids,
+so 0.3.0 data is untouched; the store raises `FORMAT` to 6 before making a namespace dir. A named
+queue is recorded on the event that schedules the work and the default queue is recorded as empty;
+a route is (namespace, queue, name), so a poll never crosses namespaces. A namespace token never
+reaches another namespace (403), and only the engine token reaches admin routes.
+
+**Guard/archive/schedule invariants worth not breaking (0.4.0):** quotas reserve a slot under the
+quota lock before the start and refund it if nothing started; the limiter sweeps idle buckets
+before it looks up or makes one; `X-Forwarded-For` is read right to left and only from
+`--trusted-proxies`. A finished run is deleted only after its archive copy is confirmed (a failed
+upload keeps it). A paused schedule arms no timer; jitter is a hash of (schedule, fire time); a
+`BUFFER_ONE` held fire starts before any newer one; backfill reuses fire ids, so it is idempotent.
 
 **Timeout/cancel invariants worth not breaking:** every deadline is a duration recorded next to
 the event it starts from, and recovery re-arms it; heartbeats extend the lease, never

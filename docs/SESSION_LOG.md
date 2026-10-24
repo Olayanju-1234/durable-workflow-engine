@@ -5,6 +5,86 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-24 — Session 28: 0.4.0, one engine for several apps (SDKs 0.4.0)
+
+A product review after 0.3.0 listed four pains: liftoff needed a whole second engine to stay
+private, the SDK examples' activities collided with the demo worker's, every operation was
+hand-written `curl`, and the demo's safety lived in nginx (shared with three other apps). Six
+feature PRs and a release, each squash-merged on green CI, then both deploys.
+
+**Done:**
+- #49 **Namespaces** (ADR-0015): keys are the bare id in `default`, `<ns>/<id>` elsewhere
+  (`data/namespaces/<ns>/<id>.history`, format 6, raised before the dir is made). `Engine.In(ns)`
+  returns a `Scope`, the only door the APIs use: it rejects ids with `/` and maps every output back
+  to local ids; polls, planners, retry policies, queues, schedules, index and retention are all
+  per namespace. `--namespaces FILE` (JSON: tokens by file or SHA-256, retention). One `Authorizer`
+  for HTTP and gRPC: engine token = all namespaces, namespace token = its own (403 elsewhere), no
+  token = an open default only. `X-Workflowd-Namespace` / `?namespace=` / gRPC `workflowd-namespace`.
+- #50 **Named task queues** (ADR-0016): routes are (namespace, queue, name); workers poll one
+  queue; activities inherit the workflow's queue unless told otherwise; the resolved queue is
+  recorded on `WorkflowStarted` / `StepScheduled` / `ContinuedAsNew` (only when not default, format
+  6). Every SDK; examples on `ts-orders` / `py-orders` / `java-orders`, so they no longer collide
+  with the demo worker.
+- #51 **`workflowd ctl`** (ADR-0017): a subcommand over the HTTP API (health, namespaces, list,
+  describe, history, runs, start, signal, cancel, terminate, schedule ..., backup, restore,
+  archive ...), human tables or `--json`, exit codes 0/1/2, token from `WORKFLOWD_TOKEN_FILE` /
+  env. New API: `GET /api/workflows/{id}/history` (protojson), `GET /api/admin/backup` (engine
+  token only, tar.gz with `FORMAT` last). `ctl restore` writes only into a new, empty dir, checks
+  every record, renames into place.
+- #52 **Guardrails** (ADR-0018): per-namespace `max_active_workflows` / `max_starts_per_minute`
+  (reserved under a lock before the start, refunded if it doesn't start); per-client token-bucket
+  write limits (token, else IP; `X-Forwarded-For` read right to left only from
+  `--trusted-proxies`); `--read-only` / `--read-only-schedules` (or per namespace). 429 with
+  `Retry-After`, 403 with a reason; `workflowd_requests_refused_total{reason}`.
+- #53 **Archiving** (ADR-0019): `--archive <dir> | file:///dir | s3://bucket/prefix?endpoint=&region=`
+  (R2, S3) with hand-rolled SigV4 (botocore's aws4_testsuite vectors), Content-MD5 + ETag check;
+  a run is deleted only after its archive copy is confirmed; `GET /api/archive/workflows[...]`,
+  `ctl archive ...`.
+- #54 **Schedule controls** (ADR-0020): pause/resume with a note, overlap `SKIP` / `BUFFER_ONE` /
+  `ALLOW_ALL`, deterministic jitter (FNV of schedule + fire time), idempotent backfill (≤ 1000
+  fires), preview of the next N (also for an unsaved spec); API, CLI and the dashboard's schedules
+  panel. Paused/jitter/`BUFFER_ONE` specs are format 6.
+- #55 release 0.4.0: npm dry run 40127281371, publish 40127369923; PyPI 40127527352; tag
+  `sdks-v0.4.0` @ `4d9ac4c`. Clean installs (npm `require`, PyPI venv) ran a workflow whose
+  `charge` activity sat on its own queue (`verify-040-ts` / `verify-040-py`) next to the demo
+  worker's `charge` on the default queue; both COMPLETED with the SDK worker's output.
+- **Deployed `4d9ac4c`** (fresh backups first; `.prev` = `83a1640` on both):
+  - demo, 19:59 UTC, with `--rate-limit 10 --rate-limit-burst 20 --trusted-proxies 127.0.0.1,::1
+    --read-only-schedules` (unit backup `/root/workflowd.service.20261024-1956`). From the box,
+    30 parallel writes under one `X-Forwarded-For`: 20 through, 10 × 429 with `Retry-After`; another
+    client still served; `POST /api/schedules` 403 from the engine; OrderSaga
+    `verify-040-saga-200155` COMPLETED; Hookdash fine. Site redeployed (byte-identical).
+  - workflowd-liftoff, 20:04 UTC: 0 open workflows, format 1. liftoff's worker re-registered both
+    types 0.2 s after the restart; API `/health` 200; smoke `liftoff-webhook-smoke-20261024200500`
+    COMPLETED "no webhook configured" (started with `workflowd ctl` on the box).
+  - nginx untouched. Its demo write limit and read-only schedules are now redundant with the
+    engine's own (same numbers); left in place. Its `client_max_body_size 16k` is stricter than the
+    engine's 1 MiB request limit.
+
+**Teeth:** 76 mutations across #49, #50, #52, #53, #54: 74 caught, 2 equivalent (the retry event's
+queue, which the fold already carries; a paused check a pause already makes unreachable).
+
+**Bugs found on the way:** continue-as-new wrote the namespaced key into the next run's
+`WorkflowStarted` (Go code would have seen `acme/order-1` as its id); the rate limiter's sweep ran
+after a new client's bucket was made and deleted it (every client's first write was free); a
+`BUFFER_ONE` held fire could be starved by newer fires; `ArchivedHistory` passed a `/` prefix to a
+validated lookup.
+
+**Next:** liftoff could move from its own engine to a namespace (its call; the demo engine is
+public, so a private namespace there trades isolation for one less unit). Archiving to R2 needs a
+bucket and credentials (owner); it was verified with signing test vectors and a fake S3 only.
+Maven Central (owner). Per-user auth/RBAC beyond namespace tokens.
+
+**Gotchas:**
+- The demo data dir is format 6 now (the verify runs used named queues). Rolling back below 0.4.0
+  needs them purged (retention, from 2026-10-31 ~20:05 UTC), then `--rescan-format`. liftoff is 1.
+- `--trusted-proxies` must list only the proxy's address: XFF from anyone else is ignored, and
+  nginx's `$proxy_add_x_forwarded_for` appends the real peer, so each visitor gets their own bucket.
+- A `BUFFER_ONE` held fire lives in memory; after a restart, catch-up takes the latest missed fire.
+- liftoff's "token file is readable by other users" warning is expected (root:deploy 640, since #18).
+
+---
+
 ## 2026-10-23 — Chaos tests keep their ports (CI flake on #40)
 
 `TestChaosKillLeaderMidWorkflow` failed on CI run 39924292452 (docs-only #40): `reservePort`
