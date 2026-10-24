@@ -227,6 +227,21 @@ type StartOption func(*startOptions)
 
 type startOptions struct {
 	executionTimeout time.Duration
+	reuse            IdReusePolicy
+	conflict         IdConflictPolicy
+}
+
+// WithIDReusePolicy decides whether a workflow id whose run has finished may
+// start a new run (the finished one is kept as an earlier run). The default
+// rejects it, as every engine before 0.3.0 did.
+func WithIDReusePolicy(p IdReusePolicy) StartOption {
+	return func(o *startOptions) { o.reuse = p }
+}
+
+// WithIDConflictPolicy decides what a start does when its id is taken: fail
+// (the default), or return the run that holds it (USE_EXISTING).
+func WithIDConflictPolicy(p IdConflictPolicy) StartOption {
+	return func(o *startOptions) { o.conflict = p }
 }
 
 // WithExecutionTimeout ends the workflow as TIMED_OUT if it has not finished d
@@ -272,14 +287,12 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 	}
 	w := e.lockWorkflow(workflowID)
 	defer e.unlockWorkflow(w)
-	existing, _, err := e.historyLocked(w)
-	if len(existing) > 0 {
-		return Started{}, fmt.Errorf("%w: %q already has history", ErrAlreadyExists, workflowID)
-	}
+	// The id is checked and the run started under the workflow's lock, so of
+	// two starts racing for one id exactly one begins a run.
+	existing, st, err := e.historyLocked(w)
 	if err != nil {
 		return Started{}, err
 	}
-
 	runID := newRunID()
 	started := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
 		WorkflowStarted: &history.WorkflowStartedEvent{
@@ -287,13 +300,45 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 			ExecutionTimeoutMs: so.executionTimeout.Milliseconds(), RunId: runID,
 		},
 	}}
-	if err := e.appendLocked(w, started, 1); err != nil {
-		return Started{}, err
+	if len(existing) == 0 {
+		if err := e.appendLocked(w, started, 1); err != nil {
+			return Started{}, err
+		}
+	} else {
+		taken := idTaken(st, so.reuse)
+		if taken != "" && so.conflict == IdConflictPolicy_ID_CONFLICT_POLICY_USE_EXISTING {
+			return Started{WorkflowID: workflowID, RunID: st.RunID, Existing: true}, nil
+		}
+		if taken != "" {
+			return Started{}, fmt.Errorf("%w: %q %s", ErrAlreadyExists, workflowID, taken)
+		}
+		if err := e.newRunLocked(w, started); err != nil {
+			return Started{}, err
+		}
+		e.log.Info("workflow id reused", "workflow_id", workflowID, "previous_run_id", st.RunID, "run_id", runID)
 	}
 	if err := e.startRunLocked(w); err != nil {
 		return Started{}, err
 	}
 	return Started{WorkflowID: workflowID, RunID: runID}, nil
+}
+
+// idTaken says why a start may not begin a new run under an id whose current
+// run is st, or "" if it may (the run finished and the policy allows reuse).
+func idTaken(st *state.State, reuse IdReusePolicy) string {
+	switch {
+	case !st.Status.IsTerminal() || st.Status == state.StatusContinuedAsNew:
+		return "is already running"
+	case reuse == IdReusePolicy_ID_REUSE_POLICY_ALLOW_DUPLICATE:
+		return ""
+	case reuse == IdReusePolicy_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY:
+		if st.Status == state.StatusCompleted {
+			return "completed, and the id reuse policy allows a new run only after a failure"
+		}
+		return ""
+	default:
+		return fmt.Sprintf("has a finished run (%s); its id may be reused only with an id reuse policy that allows it", st.Status)
+	}
 }
 
 // Recover rebuilds runtime state from durable history after a restart. The task

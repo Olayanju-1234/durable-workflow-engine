@@ -759,20 +759,59 @@ class Worker:
         self._registered_epoch = epoch
 
     def start_workflow(
-        self, workflow_type: str, payload: Any = "", workflow_id: str = "", *, execution_timeout: Optional[float] = None
+        self,
+        workflow_type: str,
+        payload: Any = "",
+        workflow_id: str = "",
+        *,
+        execution_timeout: Optional[float] = None,
+        id_reuse_policy: Optional[str] = None,
+        id_conflict_policy: Optional[str] = None,
     ) -> str:
         """Start a workflow and return its id. ``execution_timeout`` (seconds)
-        ends it as TIMED_OUT if it has not finished by then."""
+        ends it as TIMED_OUT if it has not finished by then; the policies are
+        as for start()."""
+        return self.start(
+            workflow_type,
+            payload,
+            workflow_id,
+            execution_timeout=execution_timeout,
+            id_reuse_policy=id_reuse_policy,
+            id_conflict_policy=id_conflict_policy,
+        )["workflow_id"]
+
+    def start(
+        self,
+        workflow_type: str,
+        payload: Any = "",
+        workflow_id: str = "",
+        *,
+        execution_timeout: Optional[float] = None,
+        id_reuse_policy: Optional[str] = None,
+        id_conflict_policy: Optional[str] = None,
+    ) -> dict:
+        """Start a workflow and say what happened: ``{"workflow_id", "run_id",
+        "started"}``. ``id_reuse_policy`` ("ALLOW_DUPLICATE",
+        "ALLOW_DUPLICATE_FAILED_ONLY" or the default "REJECT_DUPLICATE") decides
+        whether an id whose run has finished may start a new run;
+        ``id_conflict_policy="USE_EXISTING"`` returns the run that holds a taken
+        id (started False) instead of failing with a 409."""
         # Chosen here so a retry after a lost reply cannot start a second execution.
         wid = workflow_id or f"{workflow_type}-{random.randrange(16**16):016x}"
         body = _put_payload({"type": workflow_type, "workflow_id": wid}, "input", payload)
         _put_timeouts(body, execution_timeout=execution_timeout)
+        # Only when set: an engine before 0.3.0 refuses the fields.
+        if id_reuse_policy:
+            body["id_reuse_policy"] = id_reuse_policy.upper()
+        if id_conflict_policy:
+            body["id_conflict_policy"] = id_conflict_policy.upper()
         try:
-            self.conn.request("POST", "/api/workflows", body)
+            res = self.conn.request("POST", "/api/workflows", body) or {}
         except _HTTPError as err:
             if not (err.status == 409 and not workflow_id):
                 raise
-        return wid
+            res = {}
+        return {"workflow_id": wid, "run_id": res.get("run_id", ""), "started": res.get("started") is not False}
 
     def signal(self, workflow_id: str, name: str, payload: Any = "", request_id: Optional[str] = None) -> None:
         """Send a signal. It is recorded once even if the request is retried

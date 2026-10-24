@@ -44,6 +44,15 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   or the workflow. Metric `workflowd_history_limit_total{kind}`; `history_size_bytes` on workflows.
   Workflow tasks carry `run_id`, `history_size_bytes` and `suggest_continue_as_new_at`.
 
+- **Workflow id reuse and conflict policies** (ADR-0013): `id_reuse_policy` (`REJECT_DUPLICATE`
+  default, `ALLOW_DUPLICATE`, `ALLOW_DUPLICATE_FAILED_ONLY`) lets a finished id start a new run,
+  keeping the finished one as an earlier run; `id_conflict_policy` `USE_EXISTING` returns the run
+  that holds a taken id instead of a 409 (HTTP 200, `started: false`). Concurrent starts for one id
+  begin exactly one run. Go `client.Start` + `WithIDReusePolicy` / `WithIDConflictPolicy`, TS
+  `worker.start(type, input, { workflowId, idReusePolicy, idConflictPolicy })`, Python
+  `worker.start(..., id_reuse_policy=, id_conflict_policy=)`, Java `worker.start(type, input, id,
+  StartOptions)`; all return the run id and whether a run started.
+
 ### Changed
 - HTTP request bodies may be up to four payloads plus 1 MiB (9 MiB by default; was 1 MiB), the
   same as gRPC messages; the Go client accepts replies up to 128 MiB, so a large history reaches it.

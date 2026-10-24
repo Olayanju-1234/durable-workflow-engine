@@ -56,6 +56,9 @@ func parseArchiveID(id string) (workflowID, runID string, closedAt int64, ok boo
 type Started struct {
 	WorkflowID string
 	RunID      string
+	// Existing: the id was taken and IdConflictPolicy USE_EXISTING returned
+	// the run that holds it instead of starting one.
+	Existing bool
 }
 
 // newRunLocked replaces the workflow's finished history with first, keeping
@@ -70,6 +73,9 @@ func (e *Engine) newRunLocked(w *wfState, first *history.HistoryEvent) error {
 	events, st, err := e.historyLocked(w)
 	if err != nil {
 		return err
+	}
+	if !st.Status.IsTerminal() {
+		return fmt.Errorf("server: new run of %s: its current run %s is still %s", w.id, st.RunID, st.Status)
 	}
 	archive := archiveID(w.id, st.RunID, events[len(events)-1].GetTimestamp())
 	first.EventId, first.Timestamp = 1, time.Now().UnixNano()

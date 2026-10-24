@@ -45,6 +45,8 @@ worker.activity('deliver', async (event) => {
 // Bound one attempt and the whole step; bound a whole run when you start it.
 await ctx.activity('render', doc, { startToCloseTimeoutMs: 30_000, scheduleToCloseTimeoutMs: 300_000 });
 await worker.startWorkflow('Order', order, `order-${order.id}`, { executionTimeoutMs: 86_400_000 });
+// Idempotent start: the run already holding the id comes back instead of a 409.
+const { runId, started } = await worker.start('Order', order, { workflowId: `order-${order.id}`, idConflictPolicy: 'USE_EXISTING' });
 
 // Time and randomness that replay the same: no Date.now() or Math.random() in workflow code.
 const due = new Date(ctx.now().getTime() + 24 * 3600_000);

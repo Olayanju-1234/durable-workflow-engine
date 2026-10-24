@@ -814,20 +814,36 @@ class Worker {
 
   /**
    * Start a workflow. Returns its id. opts.executionTimeoutMs ends it as
-   * TIMED_OUT if it has not finished by then.
+   * TIMED_OUT if it has not finished by then; opts.idReusePolicy and
+   * opts.idConflictPolicy are as for start().
    */
   async startWorkflow(type, input = '', workflowId = '', opts = {}) {
+    return (await this.start(type, input, { ...opts, workflowId })).workflowId;
+  }
+
+  /**
+   * Start a workflow and say what happened: `{ workflowId, runId, started }`.
+   * opts.idReusePolicy ('ALLOW_DUPLICATE', 'ALLOW_DUPLICATE_FAILED_ONLY' or the
+   * default 'REJECT_DUPLICATE') decides whether an id whose run has finished
+   * may start a new run. opts.idConflictPolicy 'USE_EXISTING' returns the run
+   * that holds a taken id (started: false) instead of failing with a 409.
+   */
+  async start(type, input = '', opts = {}) {
     // Chosen here so a retry after a lost reply cannot start a second execution.
-    const id = workflowId || `${type}-${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+    const id = opts.workflowId || `${type}-${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
     const body = putPayload({ type, workflow_id: id }, 'input', input);
     putTimeouts(body, { execution_timeout_ms: opts.executionTimeoutMs });
+    // Only when set: an engine before 0.3.0 refuses the fields.
+    if (opts.idReusePolicy) body.id_reuse_policy = String(opts.idReusePolicy).toUpperCase();
+    if (opts.idConflictPolicy) body.id_conflict_policy = String(opts.idConflictPolicy).toUpperCase();
     try {
-      await this.conn.request('/api/workflows', { method: 'POST', body });
+      const res = await this.conn.request('/api/workflows', { method: 'POST', body });
+      return { workflowId: id, runId: res?.run_id ?? '', started: res?.started !== false };
     } catch (err) {
       // Only an earlier attempt of this call can hold a fresh generated id.
-      if (!(err.status === 409 && !workflowId)) throw err;
+      if (!(err.status === 409 && !opts.workflowId)) throw err;
+      return { workflowId: id, runId: '', started: true };
     }
-    return id;
   }
 
   /**

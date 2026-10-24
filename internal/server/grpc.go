@@ -65,7 +65,8 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 		return nil, err
 	}
 	started, err := e.Start(req.GetWorkflowType(), req.GetInput(), req.GetWorkflowId(),
-		WithExecutionTimeout(time.Duration(req.GetExecutionTimeoutMs())*time.Millisecond))
+		WithExecutionTimeout(time.Duration(req.GetExecutionTimeoutMs())*time.Millisecond),
+		WithIDReusePolicy(req.GetIdReusePolicy()), WithIDConflictPolicy(req.GetIdConflictPolicy()))
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):
@@ -80,7 +81,7 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 		// History I/O failed server-side; a retry may succeed.
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	return &StartWorkflowResponse{WorkflowId: started.WorkflowID, RunId: started.RunID}, nil
+	return &StartWorkflowResponse{WorkflowId: started.WorkflowID, RunId: started.RunID, Started: !started.Existing}, nil
 }
 
 func (s *GRPCServer) PollTask(ctx context.Context, req *PollTaskRequest) (*PollTaskResponse, error) {
