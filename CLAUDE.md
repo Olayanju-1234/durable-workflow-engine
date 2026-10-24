@@ -47,6 +47,7 @@ schedule next step → record result.** Four components, built across phases:
 | Locking + cache + index | `internal/server` (`wfstate.go`, `index.go`) | backlog ✅ | Per-workflow locks, in-memory history + `state.Folder` state, visibility index (Session 24). |
 | Schedules        | `internal/cron`, `internal/server/schedules.go` | backlog ✅ | Durable cron schedules, leader-only, idempotent per fire (Session 24). |
 | Auth + TLS       | `internal/tlsconfig`, `internal/server/auth.go`, `cmd/workflowd/security.go` | — ✅ | Opt-in TLS on every listener, bearer token on HTTP + gRPC, metrics token, Raft mTLS. |
+| Formats + runs   | `internal/history/format.go`, `internal/server/runs.go`, `limits.go`, `cancel.go` | 0.3.0 ✅ | History formats/`FORMAT` (ADR-0011), continue-as-new + archived runs + limits (ADR-0012), id reuse (ADR-0013), graceful cancel (ADR-0014). |
 
 ## Build / test / regenerate
 
@@ -86,6 +87,11 @@ This is how context survives across sessions and machines. The in-repo docs are 
 source of truth because they travel with `git clone`; the global memory is the local cache.
 
 ## Current status
+
+**Session 27 (0.3.0, SDKs 0.3.0):** history formats + an upgrade/rollback contract (ADR-0011,
+`docs/UPGRADING.md`), Python/Java parity, continue-as-new with runs and history/payload limits
+(ADR-0012), id reuse/conflict policies (ADR-0013), graceful cancellation (ADR-0014). Demo and
+liftoff engines run `83a1640`; npm + PyPI `workflowd` 0.3.0.
 
 **Session 26 (correctness release, SDKs 0.2.0):** from running liftoff in production:
 timeouts (ADR-0008), cancellation of workflows and steps with workers told (ADR-0009),
@@ -168,6 +174,14 @@ then `Engine.mu`, never two workflow locks; `Engine.mu` is never held across I/O
 failed append drops the cached history (the write may have landed). The engine is the
 only writer of its histories; a closed engine refuses writes. Never wait on the index
 build while holding a workflow lock (Recover builds it).
+
+**Format/run invariants worth not breaking (0.3.0):** raise the data dir's `FORMAT` before
+writing the event that needs it, and stamp every event an older binary would misread; a binary
+refuses a newer directory before reading any history. A run's swap (`NewRun`) leaves
+`<id>.history` always one whole run; recovery finishes a current run that ended continued-as-new;
+timers carry the run id; never archive an unfinished run. `continueAsNewSuggested` and graceful
+cancel delivery are functions of what the code has observed (event ids, the cancel marker's
+cutoff), never of when a replay runs. Id checks and starts happen under the workflow lock.
 
 **Timeout/cancel invariants worth not breaking:** every deadline is a duration recorded next to
 the event it starts from, and recovery re-arms it; heartbeats extend the lease, never

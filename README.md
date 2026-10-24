@@ -214,7 +214,8 @@ Followers answer with the leader's address, and the Go client follows it: give
 
 ## Limitations
 
-- **Pre-alpha.** No real production traffic yet; APIs may still change.
+- **Pre-alpha.** One production user so far (liftoff's webhooks and custom steps); APIs may
+  still change.
 - **Auth and TLS are opt-in, and one token.** `--tls-cert`/`--tls-key` and `--auth-token-file`
   cover gRPC, the JSON API and metrics; `--raft-tls-*` gives cluster members mutual TLS. With
   none set, every port is open plaintext, and there are no per-user identities or roles yet.
@@ -224,8 +225,12 @@ Followers answer with the leader's address, and the Go client follows it: give
 - **At-least-once activities.** An activity can run twice if a worker dies after doing the work
   but before reporting it. Make activities idempotent (`worker.GetActivityInfo` gives a key).
   Signals are exactly-once: each carries an idempotency key.
-- **Rolling back** to an older binary: binaries before the version markers can't read histories
-  that contain one, and binaries before parallel steps can't read histories that ran some.
+- **Rolling back** to an older binary is safe only while it reads the data directory's history
+  format. From 0.3.0 a binary checks this itself and refuses to start otherwise; for older ones,
+  run `workflowd --check-format` first ([docs/UPGRADING.md](docs/UPGRADING.md)).
+- **Long-running workflows should continue as new.** Each run's history is capped (51,200 events,
+  50 MiB by default) and each payload at 2 MiB; `continueAsNewSuggested()` says when to start a
+  fresh run.
 
 ## Project layout
 

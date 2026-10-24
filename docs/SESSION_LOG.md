@@ -37,6 +37,73 @@ n3 exited on `bind: address already in use`, and killing the leader left one liv
 
 ---
 
+## 2026-10-24 — Session 27: 0.3.0, workflows that run forever (SDKs 0.3.0)
+
+A product review after 0.2.0 ranked the remaining P0 gaps; all five shipped as separate PRs,
+each squash-merged on green CI, then a release and both deploys.
+
+**Done:**
+- #42 **History formats + upgrade/rollback contract** (ADR-0011, `docs/UPGRADING.md`): formats
+  1 base, 2 markers, 3 parallel steps, 4 closed steps (0.2.0), 5 runs/graceful cancel (0.3.0).
+  `HistoryEvent.min_reader_format` stamps; data-dir `FORMAT` raised by the store before the first
+  event that needs it (engine, cluster apply, snapshot install); `NewHistoryStore` refuses a newer
+  directory; recovery refuses a newer history naming the workflow; unstamped histories classified
+  by the Folder; `--check-format` / `--rescan-format`; `/api/health` `history_format`.
+- #43 **SDK parity**: Python `ctx.now()`/`random()`/`sleep_until`/`wait_for_signal(timeout=)`;
+  Java rebuilt on pending commands + `Workflowd.Future` (parallel steps, `waitAll`/`waitAny`,
+  `future.cancel()`), `now()`/`random()`/`sleepUntil`/signal timeouts, `activityWithContext`
+  (`isCancelled()`), `worker.start()`/`describe`. `TestJavaSDK` (sdks/) runs `E2E.java` when a JDK
+  exists and **fails, not skips, when `CI` is set**.
+- #44 **Continue-as-new + limits** (ADR-0012): `WorkflowCompleted.continued_as_new` (format 5);
+  `HistoryLog.NewRun` = link old file to `__workflowd-run~<closed hex>~<run>~<id>`, write
+  `<id>.history.next`, rename, fsync dir (Raft `NewRun` command, skipped on replay); recovery
+  finishes an interrupted rotation; run ids on `WorkflowStarted` (legacy = `%016x` of start ts);
+  timers carry `RunID`; `ListWorkflowRuns` / `?run_id=`; retention purges archives (and now
+  CANCELLED). Limits 51,200 events / 50 MiB / 2 MiB payload (flags), warn at 80% with a
+  deterministic `continueAsNewSuggested()` (task carries the event id that crossed); request limit
+  4 payloads + 1 MiB on HTTP and gRPC; Go client receives 128 MiB; workflow ids ≤ 190 bytes.
+- #45 **Id reuse/conflict policies** (ADR-0013): `REJECT_DUPLICATE` (default) /
+  `ALLOW_DUPLICATE` / `ALLOW_DUPLICATE_FAILED_ONLY`; `USE_EXISTING` returns the holder (HTTP 200,
+  `started:false`). Decided under the workflow lock; `NewRun` refuses an unfinished run.
+- #46 **Graceful cancellation** (ADR-0014): `SignalReceived{cancel_request}` (reserved
+  `__workflowd.cancel`, format 5); SDKs tell the code at its first wait, interrupt what it waits on
+  (cancel_step for open ones), let new steps run; a `cancel` marker records the history length the
+  delivering decision saw and replays hide later results until they reach it. `fail_workflow
+  {cancelled}` → CANCELLED only if requested. `ctx.CancelRequested()`; dashboard *Request cancel*;
+  demo `OrderSaga` releases on cancel; `resumeType` now resumes WAITING workflows that owe a decision.
+- #47 release 0.3.0: npm dry run 40114017252, publish 40114071888; PyPI 40114139024; tag
+  `sdks-v0.3.0` @ `83a1640`. Clean installs (npm `require`, PyPI venv) ran continue-as-new,
+  `USE_EXISTING` and a graceful cancel with compensation on the public demo.
+- **Deployed `83a1640`** to the demo (site too) and to `workflowd-liftoff` (23 COMPLETED, 0 open
+  before the swap; fresh backups first; `.prev` = `81c98f8` on both). Prod data copies recovered
+  locally first (demo format 4, liftoff format 1). liftoff's worker re-registered in 0.2 s; API
+  `/health` 200; smoke webhook `liftoff-webhook-smoke-20261024165831` COMPLETED "no webhook
+  configured".
+
+**Teeth:** ~60 mutations across the five PRs, all caught in the end. Survivors fixed: weak clock /
+timeout checks in the Python e2e (presentation masked an uncancelled wait), a duplicated retention
+guard (made one authoritative), two graceful-cancel replay rules without a test.
+
+**Bugs found on the way:** `GetWorkflowRun` read cached state after unlocking (race, caught by
+`-race`); graceful delivery first computed the interrupted set after flipping `delivered`; two
+pre-existing timing flakes (100–150 ms timers racing the test's own calls) widened.
+
+**Next:** 0.4.0: namespaces, named task queues, `workflowd ctl`, quotas and a read-only mode,
+archiving, schedule controls. liftoff could adopt 0.3.0 (`USE_EXISTING` instead of catching 409s,
+graceful cancel for custom steps). Maven Central (owner).
+
+**Gotchas:**
+- The graceful-cancel marker is load-bearing for determinism; a new SDK must implement the
+  cutoff rule (sdks/README.md) or ignore cancel requests.
+- `isTerminalStatus` now includes CONTINUED_AS_NEW; the only guard against purging a run mid
+  continue-as-new is in `purgeIfExpired` (tested).
+- Rollback below 0.3.0: check `--check-format` first; a directory where anything continued as new
+  or was gracefully cancelled is format 5. Today: liftoff 1; demo 5 (the verification runs used
+  both features; retention purges them from 2026-10-31, then `--rescan-format`).
+- `/usr/bin/javac` on the laptop is the macOS stub; Docker isn't running. Java only compiles in CI.
+
+---
+
 ## 2026-10-23 — Session 26: the correctness release (SDKs 0.2.0), from running liftoff
 
 liftoff (NestJS) began running webhooks and custom steps on a private workflowd on 2026-10-22;
