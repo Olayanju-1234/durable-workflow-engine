@@ -53,6 +53,7 @@ type HTTPAPI struct {
 	publicReads bool
 	namespaces  *NamespaceSet
 	authz       *Authorizer
+	guard       *Guard // read-only namespaces and rate limits; nil admits all
 	// demoWorker is reported by /api/health so the dashboard can guide visitors.
 	demoWorker bool
 	// clusterStatus, when set, is reported by /api/health under "cluster".
@@ -89,6 +90,11 @@ func WithAuthToken(token string) HTTPOption {
 // still required to start, signal or terminate them and to run workers.
 func WithPublicReads() HTTPOption {
 	return func(a *HTTPAPI) { a.publicReads = true }
+}
+
+// WithGuard applies read-only namespaces and rate limits to API calls.
+func WithGuard(g *Guard) HTTPOption {
+	return func(a *HTTPAPI) { a.guard = g }
 }
 
 // WithNamespaceSet gives the API the configured namespaces and their tokens.
@@ -233,6 +239,10 @@ func (a *HTTPAPI) authorize(next http.Handler) http.Handler {
 			writeAuthError(w, err)
 			return
 		}
+		if err := a.guard.admit(g, httpOp(r), a.guard.clientIP(r.RemoteAddr, r.Header.Values("X-Forwarded-For"))); err != nil {
+			writeAuthError(w, err)
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), grantKey{}, g)))
 	})
 }
@@ -240,8 +250,10 @@ func (a *HTTPAPI) authorize(next http.Handler) http.Handler {
 // writeAuthError answers a refused request.
 func writeAuthError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrForbidden):
+	case errors.Is(err, ErrForbidden), errors.Is(err, ErrReadOnly):
 		writeError(w, http.StatusForbidden, err)
+	case errors.Is(err, ErrRateLimited), errors.Is(err, ErrQuotaExceeded):
+		writeTooMany(w, err)
 	case errors.Is(err, ErrInvalidArgument):
 		writeError(w, http.StatusBadRequest, err)
 	default:
@@ -616,6 +628,9 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrPayloadTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, err)
 		return
+	case errors.Is(err, ErrQuotaExceeded):
+		writeTooMany(w, err)
+		return
 	case errors.Is(err, ErrAlreadyExists):
 		// A supplied id collided with an existing workflow — a conflict, not a
 		// malformed request; the caller picks a new id (or reuses the workflow).
@@ -811,6 +826,12 @@ func decodeStatus(err error) int {
 		return http.StatusRequestEntityTooLarge
 	}
 	return http.StatusBadRequest
+}
+
+// writeTooMany answers 429 with when to try again.
+func writeTooMany(w http.ResponseWriter, err error) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterOf(err)))
+	writeError(w, http.StatusTooManyRequests, err)
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {

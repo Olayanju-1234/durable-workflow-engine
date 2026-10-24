@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -29,6 +30,8 @@ const (
 type securityFlags struct {
 	authToken, authTokenFile, metricsTokenFile string
 	namespacesFile                             string
+	guardrails                                 server.Policy
+	trustedProxies                             string
 	publicReads                                bool
 	tlsCert, tlsKey                            string
 	raftCert, raftKey, raftCA                  string
@@ -40,6 +43,13 @@ func registerSecurityFlags(fs *flag.FlagSet) *securityFlags {
 	fs.StringVar(&f.authTokenFile, "auth-token-file", "", "read the API/gRPC bearer token from this file (default: $"+envAuthToken+")")
 	fs.BoolVar(&f.publicReads, "auth-public-reads", false, "with a token set, let anyone list and describe workflows; starting, signalling, terminating and workers still need the token")
 	fs.StringVar(&f.namespacesFile, "namespaces", "", "JSON file of namespaces: each one's tokens, retention and limits (docs: Namespaces). The default namespace always exists; --auth-token reaches every namespace")
+	fs.BoolVar(&f.guardrails.ReadOnly, "read-only", false, "refuse every client write in every namespace: starts, signals, cancels, terminations, schedule changes (workers keep running what exists)")
+	fs.BoolVar(&f.guardrails.ReadOnlySchedules, "read-only-schedules", false, "refuse schedule changes in every namespace that does not say otherwise")
+	fs.IntVar(&f.guardrails.RateLimitPerMinute, "rate-limit", 0, "client writes per minute per token (or per IP without one) in each namespace; the engine token is not limited (0: no limit)")
+	fs.IntVar(&f.guardrails.RateLimitBurst, "rate-limit-burst", 0, "client writes allowed at once before --rate-limit applies (default: the rate)")
+	fs.StringVar(&f.trustedProxies, "trusted-proxies", "", "addresses or CIDR ranges of proxies whose X-Forwarded-For names the client, e.g. 127.0.0.1,::1")
+	fs.IntVar(&f.guardrails.MaxActiveWorkflows, "max-active-workflows", 0, "workflows running or waiting at once in each namespace (0: no limit)")
+	fs.IntVar(&f.guardrails.MaxStartsPerMinute, "max-starts-per-minute", 0, "workflow starts per minute in each namespace, schedule fires included (0: no limit)")
 	fs.StringVar(&f.metricsTokenFile, "metrics-auth-token-file", "", "require the bearer token in this file on /metrics (default: $"+envMetricsAuthToken+"; unset leaves /metrics open)")
 	fs.StringVar(&f.tlsCert, "tls-cert", "", "PEM certificate for TLS on the gRPC, dashboard/API and metrics listeners (reloaded when the file changes)")
 	fs.StringVar(&f.tlsKey, "tls-key", "", "PEM private key for --tls-cert")
@@ -54,8 +64,11 @@ type security struct {
 	authToken, metricsToken string
 	publicReads             bool
 	namespaces              *server.NamespaceSet // nil: only default
-	tls                     *tls.Config          // client-facing listeners; nil = plaintext
-	peerTLS                 *tls.Config          // Raft peers; nil = plaintext
+	guardrails              server.Policy        // defaults for every namespace
+	trusted                 []netip.Prefix
+	guard                   *server.Guard // built with the engine's metrics; nil admits all
+	tls                     *tls.Config   // client-facing listeners; nil = plaintext
+	peerTLS                 *tls.Config   // Raft peers; nil = plaintext
 }
 
 func (f *securityFlags) resolve(logger *slog.Logger) (security, error) {
@@ -77,6 +90,14 @@ func (f *securityFlags) resolve(logger *slog.Logger) (security, error) {
 		if s.namespaces, err = server.LoadNamespaces(f.namespacesFile); err != nil {
 			return s, err
 		}
+	}
+	g := f.guardrails
+	if g.RateLimitPerMinute < 0 || g.RateLimitBurst < 0 || g.MaxActiveWorkflows < 0 || g.MaxStartsPerMinute < 0 {
+		return s, errors.New("--rate-limit, --rate-limit-burst, --max-active-workflows and --max-starts-per-minute must not be negative (0 means no limit)")
+	}
+	s.guardrails = g
+	if s.trusted, err = server.ParseTrustedProxies(f.trustedProxies); err != nil {
+		return s, err
 	}
 
 	if f.tlsCert != "" || f.tlsKey != "" {
@@ -133,7 +154,7 @@ func (s security) authorizer() *server.Authorizer {
 
 // grpcServerOptions are the TLS and auth options for the client-facing gRPC server.
 func (s security) grpcServerOptions() []grpc.ServerOption {
-	opts := server.GRPCAuthorize(s.authorizer())
+	opts := server.GRPCAuthorize(s.authorizer(), s.guard)
 	if s.tls != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(s.tls)))
 	}
@@ -142,7 +163,7 @@ func (s security) grpcServerOptions() []grpc.ServerOption {
 
 // httpOptions are the auth options for the JSON API.
 func (s security) httpOptions() []server.HTTPOption {
-	opts := []server.HTTPOption{server.WithAuthToken(s.authToken), server.WithNamespaceSet(s.namespaces)}
+	opts := []server.HTTPOption{server.WithAuthToken(s.authToken), server.WithNamespaceSet(s.namespaces), server.WithGuard(s.guard)}
 	if s.publicReads {
 		opts = append(opts, server.WithPublicReads())
 	}
@@ -162,6 +183,12 @@ func (s security) logPosture(logger *slog.Logger, httpOn bool) {
 	}
 	if names := s.namespaces.Names(); len(names) > 1 {
 		logger.Info("namespaces configured", "namespaces", names)
+	}
+	if g := s.guardrails; g != (server.Policy{}) {
+		logger.Info("guardrails", "read_only", g.ReadOnly, "read_only_schedules", g.ReadOnlySchedules,
+			"rate_limit_per_minute", g.RateLimitPerMinute, "rate_limit_burst", g.RateLimitBurst,
+			"max_active_workflows", g.MaxActiveWorkflows, "max_starts_per_minute", g.MaxStartsPerMinute,
+			"trusted_proxies", len(s.trusted))
 	}
 	if s.tls == nil {
 		logger.Info("client listeners are plaintext", "hint", "set --tls-cert/--tls-key, or terminate TLS in a proxy")

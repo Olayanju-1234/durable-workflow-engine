@@ -74,7 +74,7 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 		return nil, s.notLeader(ctx, err)
 	case errors.Is(err, ErrUnknownType), errors.Is(err, ErrInvalidArgument):
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
-	case errors.Is(err, ErrPayloadTooLarge):
+	case errors.Is(err, ErrPayloadTooLarge), errors.Is(err, ErrQuotaExceeded):
 		return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
 	case errors.Is(err, ErrAlreadyExists):
 		return nil, status.Errorf(codes.AlreadyExists, "%v", err)

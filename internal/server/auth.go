@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -60,7 +61,7 @@ func GRPCAuth(token string, publicReads bool) []grpc.ServerOption {
 	if token == "" {
 		return nil
 	}
-	return GRPCAuthorize(NewAuthorizer(token, publicReads, nil))
+	return GRPCAuthorize(NewAuthorizer(token, publicReads, nil), nil)
 }
 
 // MetadataNamespace is the gRPC metadata key that names a call's namespace.
@@ -68,8 +69,10 @@ const MetadataNamespace = "workflowd-namespace"
 
 // GRPCAuthorize returns server options that resolve every call's namespace
 // and token into a Grant the way the JSON API does, refusing calls a grant
-// does not allow. A server without them serves the default namespace only.
-func GRPCAuthorize(authz *Authorizer) []grpc.ServerOption {
+// does not allow, then applies the guard's read-only namespaces and rate
+// limits (nil admits all). A server without them serves the default
+// namespace only.
+func GRPCAuthorize(authz *Authorizer, guard *Guard) []grpc.ServerOption {
 	check := func(ctx context.Context, method string) (context.Context, error) {
 		md, _ := metadata.FromIncomingContext(ctx)
 		token := ""
@@ -84,10 +87,19 @@ func GRPCAuthorize(authz *Authorizer) []grpc.ServerOption {
 			requested = v[0]
 		}
 		g, err := authz.Authorize(token, requested, readMethods[method])
+		if err == nil {
+			remote := ""
+			if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+				remote = p.Addr.String()
+			}
+			err = guard.admit(g, grpcOps[method], guard.clientIP(remote, md.Get("x-forwarded-for")))
+		}
 		switch {
 		case err == nil:
 			return context.WithValue(ctx, grantKey{}, g), nil
-		case errors.Is(err, ErrForbidden):
+		case errors.Is(err, ErrRateLimited):
+			return nil, status.Error(codes.ResourceExhausted, err.Error())
+		case errors.Is(err, ErrForbidden), errors.Is(err, ErrReadOnly):
 			return nil, status.Error(codes.PermissionDenied, err.Error())
 		case errors.Is(err, ErrInvalidArgument):
 			return nil, status.Error(codes.InvalidArgument, err.Error())

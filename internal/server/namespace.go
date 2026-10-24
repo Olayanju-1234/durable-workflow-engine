@@ -66,6 +66,14 @@ type NamespaceConfig struct {
 	// Retention overrides the engine's --retention for this namespace's
 	// finished workflows; nil inherits it, and zero keeps them forever.
 	Retention *time.Duration
+	// Guardrails override the engine's for this namespace (ADR-0018); a nil
+	// field inherits the engine's, and a zero limit means no limit.
+	MaxActiveWorkflows *int
+	MaxStartsPerMinute *int
+	RateLimitPerMinute *int
+	RateLimitBurst     *int
+	ReadOnly           *bool
+	ReadOnlySchedules  *bool
 }
 
 // Namespace is a configured namespace.
@@ -73,6 +81,7 @@ type Namespace struct {
 	Name      string
 	Retention *time.Duration
 	tokens    [][sha256.Size]byte
+	cfg       NamespaceConfig
 }
 
 // NamespaceSet is the engine's configured namespaces. It always holds default.
@@ -97,7 +106,12 @@ func NewNamespaceSet(cfgs []NamespaceConfig) (*NamespaceSet, error) {
 		if c.Retention != nil && *c.Retention < 0 {
 			return nil, fmt.Errorf("namespace %q: retention must not be negative", c.Name)
 		}
-		ns := &Namespace{Name: c.Name, Retention: c.Retention}
+		for _, n := range []*int{c.MaxActiveWorkflows, c.MaxStartsPerMinute, c.RateLimitPerMinute, c.RateLimitBurst} {
+			if n != nil && *n < 0 {
+				return nil, fmt.Errorf("namespace %q: limits must not be negative (0 means no limit)", c.Name)
+			}
+		}
+		ns := &Namespace{Name: c.Name, Retention: c.Retention, cfg: c}
 		for _, t := range c.Tokens {
 			if strings.TrimSpace(t) == "" {
 				return nil, fmt.Errorf("namespace %q: empty token", c.Name)
@@ -125,10 +139,16 @@ func NewNamespaceSet(cfgs []NamespaceConfig) (*NamespaceSet, error) {
 // namespaceFile is the JSON form of --namespaces.
 type namespaceFile struct {
 	Namespaces []struct {
-		Name        string   `json:"name"`
-		TokenFile   string   `json:"token_file"`
-		TokenSHA256 []string `json:"token_sha256"`
-		Retention   *string  `json:"retention"`
+		Name               string   `json:"name"`
+		TokenFile          string   `json:"token_file"`
+		TokenSHA256        []string `json:"token_sha256"`
+		Retention          *string  `json:"retention"`
+		MaxActiveWorkflows *int     `json:"max_active_workflows"`
+		MaxStartsPerMinute *int     `json:"max_starts_per_minute"`
+		RateLimitPerMinute *int     `json:"rate_limit_per_minute"`
+		RateLimitBurst     *int     `json:"rate_limit_burst"`
+		ReadOnly           *bool    `json:"read_only"`
+		ReadOnlySchedules  *bool    `json:"read_only_schedules"`
 	} `json:"namespaces"`
 }
 
@@ -147,7 +167,10 @@ func LoadNamespaces(path string) (*NamespaceSet, error) {
 	}
 	cfgs := make([]NamespaceConfig, 0, len(f.Namespaces))
 	for _, n := range f.Namespaces {
-		c := NamespaceConfig{Name: n.Name, TokenSHA256: n.TokenSHA256}
+		c := NamespaceConfig{Name: n.Name, TokenSHA256: n.TokenSHA256,
+			MaxActiveWorkflows: n.MaxActiveWorkflows, MaxStartsPerMinute: n.MaxStartsPerMinute,
+			RateLimitPerMinute: n.RateLimitPerMinute, RateLimitBurst: n.RateLimitBurst,
+			ReadOnly: n.ReadOnly, ReadOnlySchedules: n.ReadOnlySchedules}
 		if n.TokenFile != "" {
 			tf := n.TokenFile
 			if !filepath.IsAbs(tf) {
@@ -219,12 +242,58 @@ func (s *NamespaceSet) byToken(token string) *Namespace {
 	return found
 }
 
+// Policy is a namespace's guardrails (ADR-0018): the engine's, with the
+// namespace's own overrides. A zero limit means no limit.
+type Policy struct {
+	// Workflows running or waiting at once, and starts per minute (schedule
+	// fires included; continue-as-new is not a start).
+	MaxActiveWorkflows int
+	MaxStartsPerMinute int
+	// Client writes per minute per token (or per IP without one), and how
+	// many may come at once. The engine token is not limited.
+	RateLimitPerMinute int
+	RateLimitBurst     int
+	// ReadOnly refuses every client write: starts, signals, cancels,
+	// terminations and schedule changes. Workers keep running what exists.
+	ReadOnly bool
+	// ReadOnlySchedules refuses schedule changes only.
+	ReadOnlySchedules bool
+}
+
+// Policy resolves a namespace's guardrails over the engine's defaults.
+func (s *NamespaceSet) Policy(ns string, defaults Policy) Policy {
+	p := defaults
+	n := s.Get(ns)
+	if n == nil {
+		return p
+	}
+	c := n.cfg
+	for _, o := range []struct {
+		from *int
+		to   *int
+	}{{c.MaxActiveWorkflows, &p.MaxActiveWorkflows}, {c.MaxStartsPerMinute, &p.MaxStartsPerMinute},
+		{c.RateLimitPerMinute, &p.RateLimitPerMinute}, {c.RateLimitBurst, &p.RateLimitBurst}} {
+		if o.from != nil {
+			*o.to = *o.from
+		}
+	}
+	if c.ReadOnly != nil {
+		p.ReadOnly = *c.ReadOnly
+	}
+	if c.ReadOnlySchedules != nil {
+		p.ReadOnlySchedules = *c.ReadOnlySchedules
+	}
+	return p
+}
+
 // Grant is what a caller may do: one namespace, and whether it holds the
-// engine's own token (every namespace) or no token at all.
+// engine's own token (every namespace) or no token at all. Client names the
+// caller's token for rate limits ("" without one: the limit uses its address).
 type Grant struct {
 	Namespace string
 	Admin     bool
 	Anonymous bool
+	Client    string
 }
 
 // Authorizer turns a call's bearer token and requested namespace into a
@@ -297,7 +366,8 @@ func (a *Authorizer) Authorize(token, requested string, read bool) (Grant, error
 		if requested != "" && requested != ns.Name {
 			return Grant{}, fmt.Errorf("%w: this token is for namespace %q, not %q", ErrForbidden, ns.Name, requested)
 		}
-		return Grant{Namespace: ns.Name}, nil
+		h := sha256.Sum256([]byte(token))
+		return Grant{Namespace: ns.Name, Client: "token:" + hex.EncodeToString(h[:8])}, nil
 	}
 	if requested == "" {
 		requested = DefaultNamespace

@@ -25,6 +25,7 @@ type engineMetrics struct {
 	stepsCancelled      *metrics.Counter    // open steps workflow code cancelled
 	historyLimit        *metrics.CounterVec // kind: warned | failed
 	cancelRequests      *metrics.Counter    // graceful cancels requested
+	startsRefused       *metrics.CounterVec // reason: max_active_workflows | max_starts_per_minute
 
 	// Polyglot: workflow decisions made by external SDK workers.
 	workflowTasksDispatched  *metrics.Counter
@@ -71,6 +72,8 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func
 			"Open steps (activities, timers, signal waits) cancelled by workflow code."),
 		cancelRequests: reg.Counter("workflowd_cancel_requests_total",
 			"Graceful cancels requested: the workflow code was told, and may compensate before it ends."),
+		startsRefused: reg.CounterVec("workflowd_starts_refused_total",
+			"Workflow starts refused by a namespace quota, by quota.", "reason"),
 		historyLimit: reg.CounterVec("workflowd_history_limit_total",
 			"Histories that crossed the warning share of their event or size limit (warned) or reached it and failed their workflow (failed).", "kind"),
 		activityTimeouts: reg.CounterVec("workflowd_activity_timeouts_total",

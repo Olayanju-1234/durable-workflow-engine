@@ -107,7 +107,7 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 		DataDir: dataDir, Store: store, Logger: logger, TickInterval: cc.tick, PeerTLS: cfg.sec.peerTLS,
 		NewEngine: func(hl server.HistoryLog) *server.Engine {
 			e := server.NewEngine(store, logger, server.WithHistoryLog(hl), server.WithLimits(cfg.limits),
-				server.WithNamespaces(cfg.sec.namespaces))
+				server.WithNamespaces(cfg.sec.namespaces), server.WithGuardrails(cfg.sec.guardrails))
 			registerDemoTypes(e)
 			return e
 		},
@@ -125,6 +125,8 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 	logger.Info("cluster member running", "node_id", cc.nodeID, "raft_addr", cc.raftAddr, "version", version.Version)
 
 	var httpSrvs []*http.Server
+	// The guard outlives every term's engine, so it has no metrics registry.
+	cfg.sec.guard = server.NewGuard(cfg.sec.namespaces, cfg.sec.guardrails, cfg.sec.trusted, nil)
 	cfg.sec.logPosture(logger, cfg.httpAddr != "")
 	if cfg.sec.peerTLS == nil {
 		logger.Warn("Raft peer traffic is plaintext and unauthenticated", "hint", "set --raft-tls-cert, --raft-tls-key and --raft-tls-ca")

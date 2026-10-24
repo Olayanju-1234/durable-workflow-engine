@@ -229,9 +229,10 @@ func (w *Worker) Start(ctx context.Context) error {
 	return nil
 }
 
-// Run is Start that tolerates an engine that is not up yet (it keeps trying),
-// then blocks until ctx is cancelled and stops. It returns an error only if
-// nothing is registered, the engine refuses a type, or it rejects the token.
+// Run is Start that tolerates an engine that is not up yet or rate-limits it
+// (it keeps trying), then blocks until ctx is cancelled and stops. It returns
+// an error only if nothing is registered, the engine refuses a type, or it
+// rejects the token or its namespace.
 func (w *Worker) Run(ctx context.Context) error {
 	types, acts, err := w.begin()
 	if err != nil {
@@ -239,7 +240,8 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	if len(types) > 0 {
 		err := w.register(ctx, types)
-		if code := status.Code(errors.Unwrap(err)); code == codes.InvalidArgument || code == codes.Unauthenticated {
+		if code := status.Code(errors.Unwrap(err)); code == codes.InvalidArgument || code == codes.Unauthenticated ||
+			code == codes.PermissionDenied {
 			return err
 		}
 		if err != nil && ctx.Err() == nil {
