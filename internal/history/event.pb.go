@@ -1057,7 +1057,13 @@ type SignalReceivedEvent struct {
 	// The sender's idempotency key, if it gave one: a SignalWorkflow retried
 	// with the same key (say, after a leader change hid the reply) finds it here
 	// and is not recorded again. Older binaries ignore it.
-	RequestId     string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	RequestId string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// Set when this is not a signal but a request to cancel the workflow
+	// gracefully: workflow code is told, and may compensate before it ends
+	// CANCELLED. The signal name is reserved (__workflowd.cancel) and the payload
+	// is the reason. Older binaries would read an ordinary signal nobody waits
+	// for, so it needs history format 5.
+	CancelRequest bool `protobuf:"varint,4,opt,name=cancel_request,json=cancelRequest,proto3" json:"cancel_request,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1113,6 +1119,13 @@ func (x *SignalReceivedEvent) GetRequestId() string {
 	return ""
 }
 
+func (x *SignalReceivedEvent) GetCancelRequest() bool {
+	if x != nil {
+		return x.CancelRequest
+	}
+	return false
+}
+
 // MarkerRecordedEvent records a value workflow code must see identically on
 // every replay: which version of changed code an execution runs
 // (workflow.GetVersion), or the result of a non-deterministic call
@@ -1124,7 +1137,8 @@ type MarkerRecordedEvent struct {
 	// The change id (version markers) or the caller's name (side effects).
 	StepName string `protobuf:"bytes,1,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	Sequence int64  `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	// "version" or "side_effect".
+	// "version", "side_effect" or "cancel" (where workflow code received a
+	// graceful cancellation; data is the history length its decision saw).
 	Marker string `protobuf:"bytes,3,opt,name=marker,proto3" json:"marker,omitempty"`
 	// Version markers: the version as a decimal string. Side effects: the result.
 	Data          []byte `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
@@ -1278,13 +1292,14 @@ const file_event_proto_rawDesc = "" +
 	"\x05input\x18\x04 \x01(\fR\x05input\"J\n" +
 	"\x0fTimerFiredEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
-	"\bsequence\x18\x02 \x01(\x03R\bsequence\"o\n" +
+	"\bsequence\x18\x02 \x01(\x03R\bsequence\"\x96\x01\n" +
 	"\x13SignalReceivedEvent\x12\x1f\n" +
 	"\vsignal_name\x18\x01 \x01(\tR\n" +
 	"signalName\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x03 \x01(\tR\trequestId\"z\n" +
+	"request_id\x18\x03 \x01(\tR\trequestId\x12%\n" +
+	"\x0ecancel_request\x18\x04 \x01(\bR\rcancelRequest\"z\n" +
 	"\x13MarkerRecordedEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x03R\bsequence\x12\x16\n" +

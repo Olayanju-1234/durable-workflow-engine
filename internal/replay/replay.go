@@ -117,6 +117,19 @@ type replayContext struct {
 	// cancel order: they count as resolved, after every recorded result.
 	cancelled map[int64]int64
 
+	// Graceful cancellation (ADR-0014). cancelAt is the request's event id
+	// (zero: none). The code is told at the first point it would wait, and the
+	// decision that does so records a cancel marker holding the history length
+	// it saw (cutoff) at sequence cutoffSeq. A replay shows the code no result
+	// past the cutoff until it reaches the marker, so it waits, and is told, at
+	// the same point every time.
+	cancelAt, cancelTime int64
+	cancelReason         string
+	cutoff, cutoffSeq    int64
+	historyLen           int64
+	delivered            bool
+	interrupted          map[int64]bool // steps the code was waiting on when told
+
 	suspended bool
 	decisions []state.Decision
 	err       error
@@ -157,7 +170,16 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 		if st.Steps[i].Status != state.StepCancelled {
 			c.latestResolved = max(c.latestResolved, st.Steps[i].ResolvedEventID)
 		}
+		if s := &st.Steps[i]; s.Kind == state.KindMarker && s.Marker == state.MarkerCancel && c.cutoffSeq == 0 {
+			c.cutoffSeq = s.Sequence
+			c.cutoff, _ = strconv.ParseInt(string(s.Output), 10, 64)
+			if c.cutoff <= 0 {
+				c.cutoff = -1 // unreadable: deliverCancel reports it
+			}
+		}
 	}
+	c.cancelAt, c.cancelTime, c.cancelReason = st.CancelRequestedEventID, st.CancelRequestedAt, st.CancelReason
+	c.historyLen = int64(len(events))
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -191,6 +213,9 @@ func (c *replayContext) run(fn workflow.Func) ([]state.Decision, error) {
 		return c.decisions, c.err
 	case panicked != nil:
 		return nil, panicked
+	case fnErr != nil && c.delivered && errors.Is(fnErr, workflow.ErrCancelled):
+		// The code let the cancellation end it (after compensating, perhaps).
+		return append(c.pending, state.Decision{Type: state.DecideFailWorkflow, Error: fnErr.Error(), Cancelled: true}), nil
 	case fnErr != nil:
 		var next *workflow.ContinueAsNewError
 		if errors.As(fnErr, &next) {
@@ -239,6 +264,11 @@ func (c *replayContext) live() {
 }
 
 func (c *replayContext) Input() []byte { return c.st.Input }
+
+func (c *replayContext) CancelRequested() bool {
+	c.live()
+	return c.delivered
+}
 
 func (c *replayContext) ContinueAsNewSuggested() bool {
 	c.live()
@@ -304,13 +334,21 @@ func (c *replayContext) WaitForSignalAsync(name, signal string) workflow.Future 
 // one, whatever has resolved since.
 func (c *replayContext) WaitAny(fs ...workflow.Future) int {
 	c.live()
-	best, bestID := -1, int64(0)
-	for i, f := range fs {
-		ff := c.own(f, "WaitAny")
-		id, ok := c.resolvedID(ff.seq)
-		if ok && (best < 0 || id < bestID) {
-			best, bestID = i, id
+	pick := func() int {
+		best, bestID := -1, int64(0)
+		for i, f := range fs {
+			ff := c.own(f, "WaitAny")
+			id, ok := c.resolvedID(ff.seq)
+			if ok && (best < 0 || id < bestID) {
+				best, bestID = i, id
+			}
 		}
+		return best
+	}
+	best := pick()
+	if best < 0 && c.cancelPending() {
+		c.deliverCancel() // the futures it waited on now count as resolved
+		best = pick()
 	}
 	if best < 0 {
 		c.block()
@@ -323,13 +361,89 @@ func (c *replayContext) WaitAny(fs ...workflow.Future) int {
 // this replay cancelled, a place after every recorded result (the cancel will
 // be recorded next, ahead of anything that happens later).
 func (c *replayContext) resolvedID(seq int64) (int64, bool) {
-	if rec := c.st.Step(seq); rec != nil && !rec.Open() {
+	if rec := c.visible(seq); rec != nil {
 		return rec.ResolvedEventID, true
+	}
+	if c.interrupted[seq] {
+		return c.cancelAt, true
 	}
 	if n, ok := c.cancelled[seq]; ok {
 		return math.MaxInt64/2 + n, true
 	}
 	return 0, false
+}
+
+// visible is the step's recorded result as the code may see it now, or nil.
+// Before a replay reaches its cancel marker, results recorded after the
+// cutoff stay hidden: the decision that received the cancellation had not
+// seen them. Markers the code recorded itself are always there.
+func (c *replayContext) visible(seq int64) *state.Step {
+	rec := c.st.Step(seq)
+	if rec == nil || rec.Open() {
+		return nil
+	}
+	if c.cutoff != 0 && !c.delivered && rec.Kind != state.KindMarker && rec.ResolvedEventID > c.cutoff {
+		return nil
+	}
+	return rec
+}
+
+// cancelPending: a graceful cancel was requested and the code not told yet.
+func (c *replayContext) cancelPending() bool {
+	return c.cancelAt > 0 && !c.delivered
+}
+
+// deliverCancel tells the code it is being cancelled, where it would first
+// wait: every step it started that has no result it can see is interrupted
+// (waiting on it is ErrWorkflowCancelled) and, if still open, cancelled; the
+// clock moves to the request. The first decision to do so records a cancel
+// marker; a replay checks it reached the same point.
+func (c *replayContext) deliverCancel() {
+	seq := c.next + 1
+	switch {
+	case c.cutoffSeq == 0:
+		c.pending = append(c.pending, state.Decision{
+			Type: state.DecideRecordMarker, StepName: "cancellation", Sequence: seq,
+			Marker: state.MarkerCancel, Output: []byte(strconv.FormatInt(c.historyLen, 10)),
+		})
+	case c.cutoff < 0:
+		c.suspend(nil, fmt.Errorf("replay: cancel marker at step %d is unreadable", c.cutoffSeq))
+	case seq != c.cutoffSeq:
+		c.nondeterministic(": the cancellation reached the code at step %d, but history has it at step %d", seq, c.cutoffSeq)
+	}
+	c.next = seq
+	c.interrupted = make(map[int64]bool)
+	for s := int64(1); s < seq; s++ {
+		name, kind := c.stepAt(s)
+		if kind == state.KindMarker || c.visible(s) != nil {
+			continue
+		}
+		if _, byCode := c.cancelled[s]; byCode {
+			continue
+		}
+		c.interrupted[s] = true
+		if rec := c.st.Step(s); rec == nil || rec.Open() {
+			c.pending = append(c.pending, state.Decision{
+				Type: state.DecideCancelStep, StepName: name, Sequence: s, Error: "the workflow is being cancelled",
+			})
+		}
+	}
+	// Only now: which steps were waited on is judged by what the code could see.
+	c.delivered = true
+	c.now = max(c.now, c.cancelTime)
+}
+
+// stepAt names the step at seq, recorded or started in this replay.
+func (c *replayContext) stepAt(seq int64) (string, state.StepKind) {
+	if rec := c.st.Step(seq); rec != nil {
+		return rec.Name, rec.Kind
+	}
+	for _, d := range c.pending {
+		if d.Sequence == seq && d.Type != state.DecideCancelStep {
+			return d.StepName, kindOf(d.Type)
+		}
+	}
+	return "", state.KindMarker
 }
 
 func (c *replayContext) own(f workflow.Future, op string) *future {
@@ -346,18 +460,12 @@ func (c *replayContext) CancelStep(f workflow.Future) {
 	if _, done := c.resolvedID(ff.seq); done {
 		return // it has a result (or is already cancelled): nothing to do
 	}
-	name := ""
-	if rec := c.st.Step(ff.seq); rec != nil {
-		name = rec.Name
-	} else {
-		for _, d := range c.pending {
-			if d.Sequence == ff.seq {
-				name = d.StepName
-			}
-		}
-	}
+	name, _ := c.stepAt(ff.seq)
 	c.cancelled[ff.seq] = int64(len(c.cancelled) + 1)
-	c.pending = append(c.pending, state.Decision{Type: state.DecideCancelStep, StepName: name, Sequence: ff.seq})
+	if rec := c.st.Step(ff.seq); rec == nil || rec.Open() {
+		// Recorded already when a replay hides the step's cancel past its cutoff.
+		c.pending = append(c.pending, state.Decision{Type: state.DecideCancelStep, StepName: name, Sequence: ff.seq})
+	}
 }
 
 func (c *replayContext) GetVersion(changeID string, minSupported, maxSupported workflow.Version) workflow.Version {
@@ -469,11 +577,20 @@ type future struct {
 func (f *future) Get() ([]byte, error) {
 	c := f.c
 	c.live()
-	rec := c.st.Step(f.seq)
-	if _, ok := c.cancelled[f.seq]; ok && (rec == nil || rec.Open()) {
+	if c.interrupted[f.seq] {
+		return nil, c.cancelError()
+	}
+	rec := c.visible(f.seq)
+	if _, ok := c.cancelled[f.seq]; ok && rec == nil {
 		return nil, workflow.ErrCancelled
 	}
-	if rec == nil || rec.Open() {
+	if rec == nil && c.cancelPending() {
+		c.deliverCancel()
+		if c.interrupted[f.seq] {
+			return nil, c.cancelError()
+		}
+	}
+	if rec == nil {
 		c.block()
 	}
 	if rec.Status == state.StepCancelled {
@@ -487,6 +604,13 @@ func (f *future) Get() ([]byte, error) {
 		return nil, &workflow.ActivityError{StepName: rec.Name, Message: rec.Error, Type: rec.ErrorType, NonRetryable: rec.NonRetryable}
 	}
 	return rec.Output, nil
+}
+
+func (c *replayContext) cancelError() error {
+	if c.cancelReason == "" {
+		return workflow.ErrWorkflowCancelled
+	}
+	return fmt.Errorf("%w (%s)", workflow.ErrWorkflowCancelled, c.cancelReason)
 }
 
 // replaying reports whether the code is still re-running steps history already

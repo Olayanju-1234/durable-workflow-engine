@@ -19,6 +19,7 @@ that supersedes the old one.
 | [0011](0011-history-format-contract.md) | History formats and the upgrade/rollback contract | Accepted |
 | [0012](0012-continue-as-new-and-limits.md) | Continue-as-new, runs, and history and payload limits | Accepted |
 | [0013](0013-workflow-id-reuse.md) | Workflow id reuse and conflict policies | Accepted |
+| [0014](0014-graceful-cancellation.md) | Graceful cancellation | Accepted |
 
 ## Template
 

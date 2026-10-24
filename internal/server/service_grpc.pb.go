@@ -77,6 +77,8 @@ type WorkflowServiceClient interface {
 	// when its work is no longer wanted (terminate is the operator's emergency
 	// stop). Workers still running its activities learn it from their next
 	// heartbeat or completion, which fail with an ActivityCancelled detail.
+	// With graceful set, the workflow code is told instead, and may compensate
+	// before it ends.
 	CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error)
 	// ListWorkflowRuns lists every run kept for a workflow id: the current one
 	// and the earlier runs continue-as-new (or id reuse) left behind.
@@ -325,6 +327,8 @@ type WorkflowServiceServer interface {
 	// when its work is no longer wanted (terminate is the operator's emergency
 	// stop). Workers still running its activities learn it from their next
 	// heartbeat or completion, which fail with an ActivityCancelled detail.
+	// With graceful set, the workflow code is told instead, and may compensate
+	// before it ends.
 	CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error)
 	// ListWorkflowRuns lists every run kept for a workflow id: the current one
 	// and the earlier runs continue-as-new (or id reuse) left behind.

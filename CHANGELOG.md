@@ -53,7 +53,23 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `worker.start(..., id_reuse_policy=, id_conflict_policy=)`, Java `worker.start(type, input, id,
   StartOptions)`; all return the run id and whether a run started.
 
+- **Graceful cancellation** (ADR-0014): cancel with `graceful` and the workflow code is told at
+  its next wait: the steps it waits on fail with a cancellation (Go `workflow.ErrWorkflowCancelled`,
+  `CancelledFailure` in TS/Python/Java), open ones are cancelled, and steps it starts afterwards
+  run normally, so it can compensate; it ends `CANCELLED` if it lets the cancellation end it. The
+  point it is told is recorded (a `cancellation` marker step) and replays agree. Go
+  `client.CancelWorkflow(ctx, id, reason, client.Graceful())` and `ctx.CancelRequested()`, TS
+  `worker.cancel(id, reason, { graceful: true })` / `ctx.cancelRequested`, Python
+  `worker.cancel(id, reason, graceful=True)` / `ctx.cancel_requested`, Java `worker.cancel(id,
+  reason, true)` / `ctx.cancelRequested()`, HTTP `{"graceful": true}`, the dashboard's *Request
+  cancel*, `testsuite.Env.RequestCancelAfter`. Metric `workflowd_cancel_requests_total`. The
+  hard cancel is unchanged. The demo's `OrderSaga` releases its reservation when cancelled.
+
 ### Changed
+- Signal names starting with `__workflowd` are reserved (one is the graceful cancel request).
+- Registering an SDK now resumes every workflow of its types that owes a decision, not only
+  ones with nothing in flight, so a step result or cancel request recorded while no worker ran
+  the type is acted on as soon as one connects.
 - HTTP request bodies may be up to four payloads plus 1 MiB (9 MiB by default; was 1 MiB), the
   same as gRPC messages; the Go client accepts replies up to 128 MiB, so a large history reaches it.
 - New workflow ids are limited to 190 bytes, so an earlier run's file name fits.

@@ -62,6 +62,10 @@ jitter = ctx.random()
 reply = ctx.wait_for_signal("reply", "approved", timeout=3600)  # None if none arrives in time
 ```
 
+Cancel gracefully with `worker.cancel(id, reason, graceful=True)`: the step the workflow waits
+on raises `CancelledFailure`, steps it starts afterwards run normally (compensate there), and
+re-raising it ends the workflow `CANCELLED`; `ctx.cancel_requested` says it was told.
+
 A cluster: `Worker(addresses=["http://n1:8233", "http://n2:8233", "http://n3:8233"])` follows
 the leader. Activities longer than the lease heartbeat automatically; an activity taking a
 second `info` argument can check `info["lease_lost"]`.

@@ -91,6 +91,8 @@ export interface Context {
   readonly workflowId: string;
   /** This run's id: a workflow that continues as new gets a new one. */
   readonly runId: string;
+  /** True once a graceful cancel has reached the code (what it awaited rejected with CancelledFailure). */
+  readonly cancelRequested: boolean;
   /**
    * True once the history has grown past the engine's warning share of its limits, as of the
    * latest result the code has received (so every replay agrees). Then continue as new.
@@ -263,8 +265,11 @@ export class Worker {
   start(type: string, input?: Payload, opts?: StartWorkflowOptions & { workflowId?: string }): Promise<Started>;
   /** Send an external signal to a running workflow; recorded once, even when retried. */
   signal(workflowId: string, name: string, payload?: Payload, opts?: { requestId?: string }): Promise<void>;
-  /** End a running workflow as CANCELLED; workers running its activities are told to stop. */
-  cancel(workflowId: string, reason?: string): Promise<void>;
+  /**
+   * End a running workflow as CANCELLED; workers running its activities are told to stop. With
+   * graceful, the workflow code is told instead (what it awaits rejects with CancelledFailure).
+   */
+  cancel(workflowId: string, reason?: string, opts?: { graceful?: boolean }): Promise<void>;
   /** The engine's view of a workflow: status, steps, output, error; opts.runId for an earlier run. */
   describe(workflowId: string, opts?: { runId?: string }): Promise<Record<string, unknown>>;
   /** The runs kept for a workflow id, current first, then earlier ones (continued as new). */

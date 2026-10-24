@@ -260,6 +260,9 @@ type workflowDTO struct {
 	// The run this one continued from, and the one that followed it.
 	ContinuedFromRunID  string `json:"continued_from_run_id,omitempty"`
 	ContinuedAsNewRunID string `json:"continued_as_new_run_id,omitempty"`
+	// A graceful cancel was requested: the code has been told.
+	CancelRequested bool   `json:"cancel_requested,omitempty"`
+	CancelReason    string `json:"cancel_reason,omitempty"`
 }
 
 // health is answered by every node, leader or not: a follower is healthy too.
@@ -390,6 +393,8 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 
 		ContinuedFromRunID:  resp.GetContinuedFromRunId(),
 		ContinuedAsNewRunID: resp.GetContinuedAsNewRunId(),
+		CancelRequested:     resp.GetCancelRequested(),
+		CancelReason:        resp.GetCancelReason(),
 	})
 }
 
@@ -519,9 +524,11 @@ func (a *HTTPAPI) cancelWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 // endWorkflow serves terminate and cancel: {"reason"} in, {"status"} out.
+// Cancel takes "graceful": true too, which tells the workflow code instead.
 func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done string, end func(*Engine, string, string) error) {
 	var body struct {
-		Reason string `json:"reason"`
+		Reason   string `json:"reason"`
+		Graceful bool   `json:"graceful"`
 	}
 	// An empty body is valid (reason is optional).
 	if r.ContentLength > 0 {
@@ -533,6 +540,13 @@ func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done strin
 	e := a.engine(w)
 	if e == nil {
 		return
+	}
+	if body.Graceful {
+		if done != "cancelled" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("%w: only cancel can be graceful", ErrInvalidArgument))
+			return
+		}
+		end, done = (*Engine).RequestCancelWorkflow, "cancel_requested"
 	}
 	err := end(e, r.PathValue("id"), body.Reason)
 	switch {

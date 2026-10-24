@@ -296,6 +296,15 @@ warns and workflow tasks carry the event id where the history crossed it; the SD
 that into a deterministic `continueAsNewSuggested()`. At the limit the event that would
 cross it is replaced by the workflow's failure.
 
+## Graceful cancellation ([ADR-0014](adr/0014-graceful-cancellation.md))
+
+A graceful cancel records `SignalReceived{cancel_request}` and asks for a decision. The SDK
+tells the code at its first wait: what it waits on fails with a cancellation (open steps are
+cancelled), and later steps run normally, for compensation. That decision records a `cancel`
+marker with the history length it saw; replays hide results past it until they reach the
+marker, so the code is told at the same point every time. Failing with the cancellation ends
+the run `CANCELLED`.
+
 ## Why no sticky queues
 
 Temporal's sticky queues route a workflow's tasks back to the worker that holds it in memory,

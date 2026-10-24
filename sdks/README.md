@@ -131,6 +131,19 @@ Commands are a flat tagged union:
   run's). Like `complete_workflow` it comes last in a batch. The SDK must refuse it (as
   non-determinism) when the code continues before reaching every step in `steps[]`, or
   it would carry stale state forward. Engines before 0.3.0 refuse the command.
+- **Graceful cancellation** (ADR-0014). The task carries `cancel_requested_event_id`,
+  `cancel_requested_at` and `cancel_reason` once a graceful cancel was requested. Tell the code
+  at the first point it would wait on a step with no result: emit
+  `{"type":"record_marker","step_name":"cancellation","marker":"cancel","sequence":<next>,"data":"<history_length>"}`,
+  fail every step it started and is still waiting on with a cancellation error, emit
+  `cancel_step` for those with no result in `steps[]`, move the clock to `cancel_requested_at`,
+  and let the code carry on (new steps run normally). On later replays a `cancel` marker is in
+  `steps[]`: until the code reaches it, treat a result whose `resolved_event_id` is above the
+  marker's `output` as not there yet (markers excepted), and if the code would be told at
+  another sequence than the marker's, that is non-determinism. If the code fails with the
+  cancellation, send `{"type":"fail_workflow","error":"...","cancelled":true}`; the engine
+  records `CANCELLED` only when a cancel was requested. An SDK that ignores the fields keeps
+  running the workflow.
 - The task carries `run_id`, `history_size_bytes` and, once the history has passed 80%
   of the engine's limits, `suggest_continue_as_new_at`: an event id. `continueAsNewSuggested()`
   is true once the code has received a step result whose `resolved_event_id` is at least

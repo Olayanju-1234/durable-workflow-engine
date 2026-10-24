@@ -46,6 +46,8 @@ service WorkflowService {
   // when its work is no longer wanted (terminate is the operator's emergency
   // stop). Workers still running its activities learn it from their next
   // heartbeat or completion, which fail with an ActivityCancelled detail.
+  // With graceful set, the workflow code is told instead, and may compensate
+  // before it ends.
   rpc CancelWorkflow(CancelWorkflowRequest) returns (CancelWorkflowResponse);
   // ListWorkflowRuns lists every run kept for a workflow id: the current one
   // and the earlier runs continue-as-new (or id reuse) left behind.
@@ -238,6 +240,10 @@ message CompleteWorkflowCommand {
 
 message FailWorkflowCommand {
   string error = 1;
+  // The workflow ends because it was cancelled: workflow code received a
+  // graceful cancellation and let it end the workflow. Recorded as CANCELLED
+  // when a cancel was requested, as FAILED otherwise.
+  bool cancelled = 2;
 }
 
 // ContinueAsNewCommand ends this run and starts a fresh one under the same
@@ -499,6 +505,10 @@ message GetWorkflowResponse {
   // the run that followed it.
   string continued_from_run_id = 5;
   string continued_as_new_run_id = 6;
+  // A graceful cancel was requested (and why): the workflow code has been
+  // told and is ending.
+  bool cancel_requested = 7;
+  string cancel_reason = 8;
 }
 
 message ListWorkflowRunsRequest {
@@ -532,6 +542,9 @@ message CancelWorkflowRequest {
   string workflow_id = 1;
   // Recorded in the workflow's terminal event.
   string reason = 2;
+  // Graceful: record a cancel request and tell the workflow code, which may
+  // compensate before it ends CANCELLED, instead of ending the workflow now.
+  bool graceful = 3;
 }
 
 message CancelWorkflowResponse {}

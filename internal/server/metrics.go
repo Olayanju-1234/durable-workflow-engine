@@ -24,6 +24,7 @@ type engineMetrics struct {
 	activityTimeouts    *metrics.CounterVec // timeout: start_to_close | schedule_to_close
 	stepsCancelled      *metrics.Counter    // open steps workflow code cancelled
 	historyLimit        *metrics.CounterVec // kind: warned | failed
+	cancelRequests      *metrics.Counter    // graceful cancels requested
 
 	// Polyglot: workflow decisions made by external SDK workers.
 	workflowTasksDispatched  *metrics.Counter
@@ -68,6 +69,8 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func
 			"Schedule fires skipped because an earlier run was still running."),
 		stepsCancelled: reg.Counter("workflowd_steps_cancelled_total",
 			"Open steps (activities, timers, signal waits) cancelled by workflow code."),
+		cancelRequests: reg.Counter("workflowd_cancel_requests_total",
+			"Graceful cancels requested: the workflow code was told, and may compensate before it ends."),
 		historyLimit: reg.CounterVec("workflowd_history_limit_total",
 			"Histories that crossed the warning share of their event or size limit (warned) or reached it and failed their workflow (failed).", "kind"),
 		activityTimeouts: reg.CounterVec("workflowd_activity_timeouts_total",

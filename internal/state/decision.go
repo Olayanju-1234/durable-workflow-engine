@@ -42,7 +42,14 @@ func (k StepKind) String() string {
 const (
 	MarkerVersion    = "version"     // workflow.GetVersion: the version an execution runs
 	MarkerSideEffect = "side_effect" // workflow.SideEffect: a recorded result
+	// MarkerCancel: where workflow code received a graceful cancellation. Its
+	// data is the history length the decision that received it saw.
+	MarkerCancel = "cancel"
 )
+
+// CancelSignal is the reserved signal name a graceful cancel request is
+// recorded under.
+const CancelSignal = "__workflowd.cancel"
 
 // RetryPolicy controls automatic re-execution of a failed activity: the
 // workflow sees the error only once attempts are exhausted. MaxAttempts counts
@@ -204,6 +211,10 @@ type Decision struct {
 	// type and execution timeout. Empty and zero keep this run's.
 	WorkflowType     string
 	ExecutionTimeout time.Duration
+
+	// Set with DecideFailWorkflow when the code let a graceful cancellation
+	// end the workflow: recorded as CANCELLED if one was requested.
+	Cancelled bool
 }
 
 // Decide replays history and returns the single next action for the workflow. It
@@ -230,6 +241,12 @@ func Decide(def WorkflowDefinition, events []*history.HistoryEvent) (Decision, e
 // DecideState is Decide for a caller that already holds the replayed state,
 // such as the engine, which keeps it in memory.
 func (def WorkflowDefinition) DecideState(st *State) (Decision, error) {
+
+	// A data-driven definition has no compensation to run: a graceful cancel
+	// ends it at once.
+	if st.CancelRequestedEventID > 0 && !st.Status.IsTerminal() {
+		return Decision{Type: DecideFailWorkflow, Error: cancelledMessage(st.CancelReason), Cancelled: true}, nil
+	}
 
 	// Terminal, in-flight, or not-yet-started: the engine has nothing to decide.
 	if st.Status != StatusRunning {
@@ -290,4 +307,11 @@ func (def WorkflowDefinition) DecideState(st *State) (Decision, error) {
 		base.Type = DecideScheduleStep
 	}
 	return base, nil
+}
+
+func cancelledMessage(reason string) string {
+	if reason == "" {
+		return "cancelled"
+	}
+	return "cancelled: " + reason
 }

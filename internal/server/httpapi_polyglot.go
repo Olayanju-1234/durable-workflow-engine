@@ -65,8 +65,12 @@ type workflowTaskDTO struct {
 	// The event id at which the history crossed the limits' warning share
 	// (absent: not yet). Code that has seen a result at or after it should
 	// continue as new; it is an event id, so every replay agrees.
-	SuggestContinueAsNewAt int64        `json:"suggest_continue_as_new_at,omitempty"`
-	HistorySizeBytes       int64        `json:"history_size_bytes,omitempty"`
+	SuggestContinueAsNewAt int64 `json:"suggest_continue_as_new_at,omitempty"`
+	HistorySizeBytes       int64 `json:"history_size_bytes,omitempty"`
+	// A graceful cancel request: the event that recorded it, when, and why.
+	CancelRequestedEventID int64        `json:"cancel_requested_event_id,omitempty"`
+	CancelRequestedAt      string       `json:"cancel_requested_at,omitempty"`
+	CancelReason           string       `json:"cancel_reason,omitempty"`
 	Input                  string       `json:"input"`
 	InputBase64            string       `json:"input_base64,omitempty"`
 	Steps                  []*stepDTO   `json:"steps"`
@@ -161,6 +165,10 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 
 		SuggestContinueAsNewAt: task.GetSuggestContinueAsNewAt(),
 		HistorySizeBytes:       task.GetHistorySizeBytes(),
+
+		CancelRequestedEventID: st.CancelRequestedEventID,
+		CancelRequestedAt:      formatNanos(st.CancelRequestedAt),
+		CancelReason:           st.CancelReason,
 		Input:                  string(st.Input),
 		InputBase64:            base64Twin(st.Input),
 		Steps:                  make([]*stepDTO, 0, len(st.Steps)),
@@ -208,6 +216,8 @@ type commandDTO struct {
 	ScheduleToCloseTimeoutMs int64 `json:"schedule_to_close_timeout_ms,omitempty"`
 	// cancel_step: why the code no longer wants the step (optional).
 	Reason string `json:"reason,omitempty"`
+	// fail_workflow: the code let a graceful cancellation end the workflow.
+	Cancelled bool `json:"cancelled,omitempty"`
 	// continue_as_new: the next run's type and execution timeout (absent:
 	// this run's); its input travels in input.
 	WorkflowType       string `json:"workflow_type,omitempty"`
@@ -338,7 +348,7 @@ func commandFromDTO(c *commandDTO) (*WorkflowCommand, error) {
 		}}, nil
 	case "fail_workflow":
 		return &WorkflowCommand{Command: &WorkflowCommand_FailWorkflow{
-			FailWorkflow: &FailWorkflowCommand{Error: c.Error},
+			FailWorkflow: &FailWorkflowCommand{Error: c.Error, Cancelled: c.Cancelled},
 		}}, nil
 	case "cancel_step":
 		return &WorkflowCommand{Command: &WorkflowCommand_CancelStep{

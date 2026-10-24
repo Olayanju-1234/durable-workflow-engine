@@ -276,7 +276,11 @@ func (s *GRPCServer) TerminateWorkflow(ctx context.Context, req *TerminateWorkfl
 }
 
 func (s *GRPCServer) CancelWorkflow(ctx context.Context, req *CancelWorkflowRequest) (*CancelWorkflowResponse, error) {
-	if err := s.endWorkflow(ctx, req.GetWorkflowId(), req.GetReason(), (*Engine).CancelWorkflow); err != nil {
+	end := (*Engine).CancelWorkflow
+	if req.GetGraceful() {
+		end = (*Engine).RequestCancelWorkflow
+	}
+	if err := s.endWorkflow(ctx, req.GetWorkflowId(), req.GetReason(), end); err != nil {
 		return nil, err
 	}
 	return &CancelWorkflowResponse{}, nil

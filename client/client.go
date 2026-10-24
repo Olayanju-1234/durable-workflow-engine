@@ -269,13 +269,27 @@ func (c *Client) TerminateWorkflow(ctx context.Context, workflowID, reason strin
 	return wrap("terminate workflow", err)
 }
 
+// CancelOption customises CancelWorkflow.
+type CancelOption func(*server.CancelWorkflowRequest)
+
+// Graceful tells the workflow code instead of ending the workflow at once:
+// the steps it waits on fail with workflow.ErrWorkflowCancelled, and it may
+// compensate before it returns that error to end CANCELLED (or returns
+// normally, to complete). A workflow whose code does not handle it carries on.
+func Graceful() CancelOption {
+	return func(r *server.CancelWorkflowRequest) { r.Graceful = true }
+}
+
 // CancelWorkflow ends a running workflow with StatusCancelled, recording the
 // reason. Workers still running its activities are told to stop at their next
 // heartbeat or completion (the activity's ctx is cancelled with cause
 // worker.ErrActivityCancelled). It fails with ErrNotRunning if the workflow has
 // already finished.
-func (c *Client) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+func (c *Client) CancelWorkflow(ctx context.Context, workflowID, reason string, opts ...CancelOption) error {
 	req := &server.CancelWorkflowRequest{WorkflowId: workflowID, Reason: reason}
+	for _, o := range opts {
+		o(req)
+	}
 	_, err := c.conn.Call(ctx, func(ctx context.Context, s server.WorkflowServiceClient, opt grpc.CallOption) error {
 		_, err := s.CancelWorkflow(ctx, req, opt)
 		return err

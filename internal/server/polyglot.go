@@ -117,7 +117,8 @@ func (e *Engine) RegisterWorkflowTypes(workflowTypes []string, workerID, sdk str
 // on a decision.
 func (e *Engine) resumeType(workflowType string) error {
 	waiting, err := e.indexed(func(s *WorkflowSummary) bool {
-		return s.GetWorkflowType() == workflowType && s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_RUNNING
+		return s.GetWorkflowType() == workflowType && (s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_RUNNING ||
+			s.GetStatus() == WorkflowStatus_WORKFLOW_STATUS_WAITING)
 	})
 	if err != nil {
 		return fmt.Errorf("server: list workflows to resume %s: %w", workflowType, err)
@@ -145,8 +146,8 @@ func (e *Engine) resumeLocked(w *wfState, workflowType string, planner Planner) 
 		e.log.Error("resume: skipping unreadable workflow", "workflow_id", w.id, "err", err)
 		return false, nil
 	}
-	if st.WorkflowType != workflowType || st.Status != state.StatusRunning {
-		return false, nil // wrong type, terminal, or already waiting on a step
+	if st.WorkflowType != workflowType || !st.OwesDecision() {
+		return false, nil // wrong type, terminal, or waiting on steps with nothing new
 	}
 	return true, e.advanceLocked(w, planner)
 }
@@ -374,7 +375,7 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 	case *WorkflowCommand_CompleteWorkflow:
 		return state.Decision{Type: state.DecideCompleteWorkflow, Output: c.CompleteWorkflow.GetOutput()}, nil
 	case *WorkflowCommand_FailWorkflow:
-		return state.Decision{Type: state.DecideFailWorkflow, Error: c.FailWorkflow.GetError()}, nil
+		return state.Decision{Type: state.DecideFailWorkflow, Error: c.FailWorkflow.GetError(), Cancelled: c.FailWorkflow.GetCancelled()}, nil
 	case *WorkflowCommand_RecordMarker:
 		m := c.RecordMarker
 		return state.Decision{
@@ -448,7 +449,7 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 	case state.DecideCompleteWorkflow:
 		return &WorkflowCommand{Command: &WorkflowCommand_CompleteWorkflow{CompleteWorkflow: &CompleteWorkflowCommand{Output: d.Output}}}
 	case state.DecideFailWorkflow:
-		return &WorkflowCommand{Command: &WorkflowCommand_FailWorkflow{FailWorkflow: &FailWorkflowCommand{Error: d.Error}}}
+		return &WorkflowCommand{Command: &WorkflowCommand_FailWorkflow{FailWorkflow: &FailWorkflowCommand{Error: d.Error, Cancelled: d.Cancelled}}}
 	case state.DecideRecordMarker:
 		return &WorkflowCommand{Command: &WorkflowCommand_RecordMarker{RecordMarker: &RecordMarkerCommand{
 			StepName: d.StepName, Sequence: d.Sequence, Marker: d.Marker, Data: d.Output,
@@ -514,7 +515,8 @@ func validateDecisions(st *state.State, ds []state.Decision) error {
 		if d.Type == state.DecideAwaitSignal && d.Signal == "" {
 			return fmt.Errorf("%w: await-signal command has an empty signal name", ErrInvalidCommand)
 		}
-		if d.Type == state.DecideRecordMarker && d.Marker != state.MarkerVersion && d.Marker != state.MarkerSideEffect {
+		if d.Type == state.DecideRecordMarker && d.Marker != state.MarkerVersion && d.Marker != state.MarkerSideEffect &&
+			d.Marker != state.MarkerCancel {
 			return fmt.Errorf("%w: unknown marker kind %q", ErrInvalidCommand, d.Marker)
 		}
 	}
