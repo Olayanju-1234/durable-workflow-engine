@@ -292,6 +292,11 @@ func TestReadOnly(t *testing.T) {
 		{"default: delete schedule", "DELETE", "/api/schedules/s", "admin", ``, 403},
 		{"default: start", "POST", "/api/workflows", "admin", `{"type":"Flow"}`, 201},
 		{"default: list schedules", "GET", "/api/schedules", "admin", ``, 200},
+		{"default: pause schedule", "POST", "/api/schedules/s/pause", "admin", ``, 403},
+		{"default: resume schedule", "POST", "/api/schedules/s/resume", "admin", ``, 403},
+		{"default: backfill schedule", "POST", "/api/schedules/s/backfill", "admin", `{}`, 403},
+		{"default: preview a spec", "POST", "/api/schedules/preview", "admin", `{"cron":"@hourly","workflow_type":"Flow"}`, 200},
+		{"default: preview a missing schedule", "GET", "/api/schedules/s/preview", "admin", ``, 404},
 	} {
 		if code, _ := h.do(t, c.method, c.path, c.token, "", c.body); code != c.want {
 			t.Errorf("%s: HTTP %d, want %d", c.name, code, c.want)

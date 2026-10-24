@@ -120,6 +120,56 @@
     </div>
   </section>
 
+  <section class="panel" id="sched-panel" aria-labelledby="sched-title">
+    <div class="panel-head">
+      <h2 id="sched-title">Pattern cards <span class="panel-sub">schedules</span></h2>
+      <button class="btn btn-secondary" id="sched-new" type="button">+ Punch a card</button>
+    </div>
+
+    <form class="sched-form" id="sched-form" hidden>
+      <div class="sched-grid">
+        <label class="field"><span>Schedule id</span><input id="sc-id" required placeholder="nightly-report" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>Pattern <em>cron, @hourly, @every 15m</em></span><input id="sc-cron" required placeholder="0 3 * * *" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>Time zone <em>blank is UTC</em></span><input id="sc-tz" placeholder="Europe/London" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>Workflow type</span><input id="sc-type" required placeholder="OrderSaga" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>Input</span><input id="sc-input" placeholder="each run's input" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>Task queue <em>blank is default</em></span><input id="sc-queue" placeholder="default" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>While a run is going</span>
+          <select id="sc-overlap">
+            <option value="ALLOW_ALL">start it anyway</option>
+            <option value="SKIP">skip the fire</option>
+            <option value="BUFFER_ONE">hold one, start it after</option>
+          </select>
+        </label>
+        <label class="field"><span>Jitter <em>seconds, 0 for none</em></span><input id="sc-jitter" type="number" min="0" step="1" value="0"></label>
+      </div>
+      <ol class="sched-preview" id="sc-preview" hidden></ol>
+      <div class="action-row">
+        <button class="btn" id="sc-try" type="button">Preview fires</button>
+        <button class="btn btn-primary" type="submit">Create schedule</button>
+        <button class="btn" id="sc-close" type="button">Close</button>
+      </div>
+    </form>
+
+    <div class="table-scroll">
+      <table class="wf-table sched-table">
+        <thead>
+          <tr>
+            <th>Schedule</th>
+            <th>Pattern</th>
+            <th>Weaves</th>
+            <th>Next fire</th>
+            <th>Overlap</th>
+            <th>State</th>
+          </tr>
+        </thead>
+        <tbody id="sched-rows">
+          <tr class="empty"><td colspan="6">Reading the pattern cards…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <p class="colophon">
     A workflow is a weave. Its history is the card chain — appended, never rewritten.
     Kill the engine and the loom resumes on the exact pick it stopped at.

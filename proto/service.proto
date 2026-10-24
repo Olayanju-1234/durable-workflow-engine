@@ -88,6 +88,31 @@ service WorkflowService {
   rpc CreateSchedule(CreateScheduleRequest) returns (CreateScheduleResponse);
   rpc DeleteSchedule(DeleteScheduleRequest) returns (DeleteScheduleResponse);
   rpc ListSchedules(ListSchedulesRequest) returns (ListSchedulesResponse);
+  // PauseSchedule stops a schedule firing until ResumeSchedule; fires due
+  // while it is paused are not started later.
+  rpc PauseSchedule(PauseScheduleRequest) returns (PauseScheduleResponse);
+  rpc ResumeSchedule(ResumeScheduleRequest) returns (ResumeScheduleResponse);
+  // BackfillSchedule starts the runs a schedule would have started over a
+  // past range: one per fire time, under the same ids a fire uses, so it is
+  // idempotent.
+  rpc BackfillSchedule(BackfillScheduleRequest) returns (BackfillScheduleResponse);
+  // PreviewSchedule says when a schedule (or a spec not yet created) fires next.
+  rpc PreviewSchedule(PreviewScheduleRequest) returns (PreviewScheduleResponse);
+}
+
+// OverlapPolicy decides what a fire does while an earlier run of the same
+// schedule is still running.
+enum OverlapPolicy {
+  // ALLOW_ALL, or SKIP when skip_if_running is set: what every engine before
+  // 0.4.0 did.
+  OVERLAP_POLICY_UNSPECIFIED = 0;
+  // Skip the fire.
+  OVERLAP_POLICY_SKIP = 1;
+  // Keep the latest skipped fire and start it as soon as the running one
+  // finishes; later fires while one is buffered are skipped.
+  OVERLAP_POLICY_BUFFER_ONE = 2;
+  // Start it anyway: runs overlap.
+  OVERLAP_POLICY_ALLOW_ALL = 3;
 }
 
 message Schedule {
@@ -104,14 +129,76 @@ message Schedule {
   bool skip_if_running = 6;
   // The task queue the runs start on; empty is the default queue.
   string task_queue = 7;
+  // A paused schedule does not fire; note says why (who paused it, until when).
+  bool paused = 8;
+  string note = 9;
+  // What a fire does while an earlier run is still running. Setting
+  // skip_if_running is the same as SKIP.
+  OverlapPolicy overlap_policy = 10;
+  // Start each run up to this long after its fire time, by an offset fixed
+  // per fire, to spread schedules that fire together. The run's id keeps
+  // the fire time.
+  int64 jitter_ms = 11;
 }
 
 message ScheduleInfo {
   Schedule schedule = 1;
   // Unix nanoseconds.
   int64 created_at = 2;
-  // Unix nanoseconds of the next fire; zero if it never fires again.
+  // Unix nanoseconds of the next fire; zero if it never fires again, or the
+  // schedule is paused.
   int64 next_fire_at = 3;
+  // A fire held by OVERLAP_POLICY_BUFFER_ONE until the running run finishes
+  // (unix nanoseconds of its fire time; zero: none).
+  int64 buffered_fire_at = 4;
+}
+
+message PauseScheduleRequest {
+  string schedule_id = 1;
+  string note = 2;
+}
+
+message PauseScheduleResponse {}
+
+message ResumeScheduleRequest {
+  string schedule_id = 1;
+}
+
+message ResumeScheduleResponse {}
+
+message BackfillScheduleRequest {
+  string schedule_id = 1;
+  // Fire times after start and at or before end (unix nanoseconds), both in
+  // the past. At most 1,000 fires per call.
+  int64 start_time = 2;
+  int64 end_time = 3;
+  // ALLOW_ALL (the default) starts every fire; SKIP starts a fire only if no
+  // run of the schedule is running then.
+  OverlapPolicy overlap_policy = 4;
+}
+
+message BackfillScheduleResponse {
+  int32 started = 1;
+  // Fires whose run already exists (an earlier fire or backfill started it).
+  int32 existing = 2;
+  // Fires skipped by the overlap policy.
+  int32 skipped = 3;
+}
+
+message PreviewScheduleRequest {
+  // An existing schedule, or a spec to try (schedule_id may be empty).
+  string schedule_id = 1;
+  Schedule schedule = 2;
+  // How many fires (default 10, at most 1,000).
+  int32 count = 3;
+}
+
+message PreviewScheduleResponse {
+  // The next fire times (unix nanoseconds), and when each run would start
+  // with the schedule's jitter.
+  repeated int64 fire_times = 1;
+  repeated int64 start_times = 2;
+  bool paused = 3;
 }
 
 message CreateScheduleRequest {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -32,6 +33,10 @@ func commands() map[string]command {
 		{"schedule list", "", "List schedules.", setupScheduleList},
 		{"schedule create", "<schedule-id>", "Create a schedule, or replace one with the same id.", setupScheduleCreate},
 		{"schedule delete", "<schedule-id>", "Delete a schedule (its runs carry on).", setupScheduleDelete},
+		{"schedule pause", "<schedule-id>", "Stop a schedule firing until it is resumed.", setupSchedulePause},
+		{"schedule resume", "<schedule-id>", "Make a paused schedule fire again.", setupScheduleResume},
+		{"schedule backfill", "<schedule-id>", "Start the runs a schedule would have started over a past range.", setupScheduleBackfill},
+		{"schedule preview", "<schedule-id>", "Show when a schedule fires next.", setupSchedulePreview},
 		{"backup", "<file.tar.gz | ->", "Back up every history: from the engine (engine token), or a data directory (--data-dir).", setupBackup},
 		{"restore", "<file.tar.gz | ->", "Restore a backup into a new data directory (--data-dir), with the engine stopped.", setupRestore},
 		{"archive list", "", "List archived runs (finished histories retention exported).", setupArchiveList},
@@ -543,17 +548,27 @@ func setupScheduleList(*flag.FlagSet) func(*cli, []string) error {
 			return err
 		}
 		t := newTable(c.out)
-		t.row("SCHEDULE ID", "CRON", "WORKFLOW TYPE", "NEXT FIRE", "TASK QUEUE", "STATE")
+		t.row("SCHEDULE ID", "CRON", "WORKFLOW TYPE", "NEXT FIRE", "OVERLAP", "TASK QUEUE", "STATE")
 		for _, s := range r.Schedules {
 			cron := str(s["cron"])
 			if tz := str(s["timezone"]); tz != "" {
 				cron += " (" + tz + ")"
 			}
+			if j, _ := s["jitter_ms"].(float64); j > 0 {
+				cron += fmt.Sprintf(" ±%s", time.Duration(j)*time.Millisecond)
+			}
 			state := "active"
 			if b, _ := s["paused"].(bool); b {
 				state = "paused"
+				if n := str(s["note"]); n != "" {
+					state += ": " + oneLine(n, 40)
+				}
 			}
-			t.row(str(s["schedule_id"]), cron, str(s["workflow_type"]), when(str(s["next_fire_at"])), str(s["task_queue"]), state)
+			if held := str(s["buffered_fire_at"]); held != "" {
+				state += ", holding " + when(held)
+			}
+			t.row(str(s["schedule_id"]), cron, str(s["workflow_type"]), when(str(s["next_fire_at"])), str(s["overlap_policy"]),
+				str(s["task_queue"]), state)
 		}
 		return t.flush()
 	}
@@ -565,7 +580,12 @@ func setupScheduleCreate(fs *flag.FlagSet) func(*cli, []string) error {
 	typ := fs.String("type", "", "the workflow type each fire starts")
 	input := payloadFlags(fs, "input", "each run's input")
 	queue := fs.String("task-queue", "", "the task queue runs start on")
-	skip := fs.Bool("skip-if-running", false, "skip a fire while an earlier run is still going")
+	skip := fs.Bool("skip-if-running", false, "skip a fire while an earlier run is still going (same as --overlap skip)")
+	overlap := fs.String("overlap", "", "while an earlier run is going: skip, buffer_one (hold one fire) or allow_all (the default)")
+	jitter := fs.Duration("jitter", 0, "start each run up to this long after its fire time, e.g. 30s")
+	paused := fs.Bool("paused", false, "create it paused")
+	note := fs.String("note", "", "a note on the schedule, e.g. why it is paused")
+	dryRun := fs.Bool("dry-run", false, "check the schedule and show its next fires, without creating it")
 	return func(c *cli, pos []string) error {
 		if err := wantArgs(pos, "<schedule-id>"); err != nil {
 			return err
@@ -579,17 +599,146 @@ func setupScheduleCreate(fs *flag.FlagSet) func(*cli, []string) error {
 		}
 		body := map[string]any{"schedule_id": pos[0], "cron": *cron, "workflow_type": *typ}
 		putPayload(body, "input", in)
-		if *tz != "" {
-			body["timezone"] = *tz
-		}
-		if *queue != "" {
-			body["task_queue"] = *queue
+		for k, v := range map[string]string{"timezone": *tz, "task_queue": *queue, "overlap_policy": *overlap, "note": *note} {
+			if v != "" {
+				body[k] = v
+			}
 		}
 		if *skip {
 			body["skip_if_running"] = true
 		}
+		if *jitter > 0 {
+			body["jitter_ms"] = jitter.Milliseconds()
+		}
+		if *paused {
+			body["paused"] = true
+		}
+		if *dryRun {
+			body["count"] = 5
+			return c.printPreview(http.MethodPost, "/api/schedules/preview", nil, body)
+		}
 		return c.simple(http.MethodPost, "/api/schedules", body, "created schedule "+pos[0])
 	}
+}
+
+func setupSchedulePause(fs *flag.FlagSet) func(*cli, []string) error {
+	note := fs.String("note", "", "why it is paused (who, until when)")
+	return func(c *cli, pos []string) error {
+		if err := wantArgs(pos, "<schedule-id>"); err != nil {
+			return err
+		}
+		return c.simple(http.MethodPost, "/api/schedules/"+url.PathEscape(pos[0])+"/pause", map[string]any{"note": *note},
+			"paused schedule "+pos[0])
+	}
+}
+
+func setupScheduleResume(*flag.FlagSet) func(*cli, []string) error {
+	return func(c *cli, pos []string) error {
+		if err := wantArgs(pos, "<schedule-id>"); err != nil {
+			return err
+		}
+		return c.simple(http.MethodPost, "/api/schedules/"+url.PathEscape(pos[0])+"/resume", nil, "resumed schedule "+pos[0])
+	}
+}
+
+func setupScheduleBackfill(fs *flag.FlagSet) func(*cli, []string) error {
+	from := fs.String("from", "", "start of the range, RFC 3339 (2026-10-01T00:00:00Z), or a duration ago (24h)")
+	to := fs.String("to", "", "end of the range, likewise (default: now)")
+	overlap := fs.String("overlap", "", "allow_all (the default) starts every fire; skip starts one only while no run is going")
+	return func(c *cli, pos []string) error {
+		if err := wantArgs(pos, "<schedule-id>"); err != nil {
+			return err
+		}
+		if *from == "" {
+			return usagef("--from is required")
+		}
+		start, err := pointInTime(*from)
+		if err != nil {
+			return err
+		}
+		end := now()
+		if *to != "" {
+			if end, err = pointInTime(*to); err != nil {
+				return err
+			}
+		}
+		body := map[string]any{"start_time": start.UTC().Format(time.RFC3339Nano), "end_time": end.UTC().Format(time.RFC3339Nano)}
+		if *overlap != "" {
+			body["overlap_policy"] = *overlap
+		}
+		var raw []byte
+		if err := c.request(http.MethodPost, "/api/schedules/"+url.PathEscape(pos[0])+"/backfill", nil, body, &raw); err != nil {
+			return err
+		}
+		if c.json {
+			c.printJSON(raw)
+			return nil
+		}
+		var r struct{ Started, Existing, Skipped int }
+		if err := jsonUnmarshal(raw, &r); err != nil {
+			return err
+		}
+		fmt.Fprintf(c.out, "backfilled %s: %d started, %d already there, %d skipped\n", pos[0], r.Started, r.Existing, r.Skipped)
+		return nil
+	}
+}
+
+// pointInTime reads an RFC 3339 time, or a duration meaning that long ago.
+func pointInTime(v string) (time.Time, error) {
+	if d, err := time.ParseDuration(v); err == nil {
+		return now().Add(-d), nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return time.Time{}, usagef("%q is neither an RFC 3339 time nor a duration", v)
+	}
+	return t, nil
+}
+
+func setupSchedulePreview(fs *flag.FlagSet) func(*cli, []string) error {
+	count := fs.Int("count", 10, "how many fires")
+	return func(c *cli, pos []string) error {
+		if err := wantArgs(pos, "<schedule-id>"); err != nil {
+			return err
+		}
+		return c.printPreview(http.MethodGet, "/api/schedules/"+url.PathEscape(pos[0])+"/preview",
+			url.Values{"count": {strconv.Itoa(*count)}}, nil)
+	}
+}
+
+// printPreview shows a schedule's next fires and when each run starts.
+func (c *cli) printPreview(method, path string, q url.Values, body any) error {
+	var raw []byte
+	if err := c.request(method, path, q, body, &raw); err != nil {
+		return err
+	}
+	if c.json {
+		c.printJSON(raw)
+		return nil
+	}
+	var r struct {
+		Fires []struct {
+			FireAt  string `json:"fire_at"`
+			StartAt string `json:"start_at"`
+		} `json:"fires"`
+		Paused bool `json:"paused"`
+	}
+	if err := jsonUnmarshal(raw, &r); err != nil {
+		return err
+	}
+	if r.Paused {
+		fmt.Fprintln(c.out, "paused: these fires happen only once it is resumed")
+	}
+	t := newTable(c.out)
+	t.row("FIRE", "RUN STARTS")
+	for _, f := range r.Fires {
+		start := when(f.StartAt)
+		if f.StartAt == f.FireAt {
+			start = "at the fire"
+		}
+		t.row(when(f.FireAt), start)
+	}
+	return t.flush()
 }
 
 func setupScheduleDelete(*flag.FlagSet) func(*cli, []string) error {

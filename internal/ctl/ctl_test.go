@@ -252,3 +252,26 @@ func TestArchiveCommands(t *testing.T) {
 		t.Fatalf("default namespace reading acme's archive: %d %s", code, errOut)
 	}
 }
+
+func TestScheduleControlCommands(t *testing.T) {
+	h := newHarness(t)
+	contains(t, "dry run", h.ok("schedule", "create", "hourly", "--cron", "0 * * * *", "--type", "Approval", "--jitter", "30s", "--dry-run"),
+		"FIRE", "RUN STARTS")
+	if out := h.ok("schedule", "list"); strings.Contains(out, "hourly") {
+		t.Fatalf("a dry run created the schedule:\n%s", out)
+	}
+	h.ok("schedule", "create", "hourly", "--cron", "0 * * * *", "--type", "Approval", "--overlap", "buffer_one", "--jitter", "30s")
+	contains(t, "list", h.ok("schedule", "list"), "hourly", "BUFFER_ONE", "±30s", "active")
+	contains(t, "pause", h.ok("schedule", "pause", "hourly", "--note", "migrating"), "paused schedule hourly")
+	contains(t, "paused list", h.ok("schedule", "list"), "paused: migrating")
+	contains(t, "preview", h.ok("schedule", "preview", "hourly", "--count", "3"), "paused:", "FIRE")
+	contains(t, "backfill", h.ok("schedule", "backfill", "hourly", "--from", "3h"), "started", "already there")
+	contains(t, "backfill again", h.ok("schedule", "backfill", "hourly", "--from", "3h"), "0 started")
+	contains(t, "resume", h.ok("schedule", "resume", "hourly"), "resumed schedule hourly")
+	if code, _, errOut := h.run("", "schedule", "backfill", "hourly", "--from", "nonsense"); code != 2 {
+		t.Fatalf("bad --from: exit %d %s", code, errOut)
+	}
+	if code, _, errOut := h.run("", "schedule", "backfill", "hourly", "--from", "1h", "--to", "-1h"); code != 1 || !strings.Contains(errOut, "HTTP 400") {
+		t.Fatalf("future --to: exit %d %s", code, errOut)
+	}
+}

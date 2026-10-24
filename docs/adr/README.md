@@ -25,6 +25,7 @@ that supersedes the old one.
 | [0017](0017-ctl-command-line.md) | `workflowd ctl`, the operator's command line | Accepted |
 | [0018](0018-guardrails.md) | Engine guardrails: quotas, rate limits, read-only | Accepted |
 | [0019](0019-archiving.md) | Archiving finished histories | Accepted |
+| [0020](0020-schedule-controls.md) | Schedule controls | Accepted |
 
 ## Template
 

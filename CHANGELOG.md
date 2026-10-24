@@ -55,6 +55,15 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `WORKFLOWD_ARCHIVE_ACCESS_KEY_ID` / `WORKFLOWD_ARCHIVE_SECRET_ACCESS_KEY`. Metrics
   `workflowd_runs_archived_total`, `workflowd_archive_failures_total`; `/api/health` `archiving`.
 
+- **Schedule controls** (ADR-0020): pause and resume (with a note), an overlap policy (`SKIP`,
+  `BUFFER_ONE`: hold one fire and start it when the running run finishes, `ALLOW_ALL`), jitter
+  (a per-fire offset fixed by the fire time), backfill over a past range (idempotent: the fire's
+  run id), and a preview of the next fires (of a schedule, or of a spec before it is created). In
+  gRPC, HTTP (`/api/schedules/{id}/pause|resume|backfill|preview`, `POST /api/schedules/preview`),
+  the Go client, `workflowd ctl schedule ...` and a schedules panel in the dashboard (create,
+  preview, pause, resume, backfill). `skip_if_running` keeps working. `/api/namespaces` says whether
+  the namespace is read-only, and the dashboard hides what it would refuse.
+
 ### Changed
 - SDK workers (TypeScript, Python, Java) retry a registration refused with 429 instead of
   stopping; the Go worker's `Run` stops on `PERMISSION_DENIED` like an invalid token.

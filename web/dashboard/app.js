@@ -159,6 +159,7 @@ async function refresh() {
     renderStats(everything);
     renderChipCounts(everything);
     renderRows(filtered.workflows || []);
+    loadSchedules();
     setConn('ok', 'connected');
     if (state.selected) await loadDetail(state.selected, true);
   } catch (err) {
@@ -399,6 +400,217 @@ async function startWorkflow(e) {
   }
 }
 
+/* ---------- schedules (pattern cards) ---------- */
+
+const sched = {
+  open: null,       // the schedule id whose detail row is open
+  detail: null,     // that row's element, kept across refreshes so typing survives them
+  readOnly: false,  // the namespace refuses schedule changes
+  last: '',         // the list as last rendered
+};
+
+async function loadSchedules() {
+  let list;
+  try {
+    list = (await api('/api/schedules')).schedules || [];
+  } catch {
+    return; // the floor already says when the engine is unreachable
+  }
+  const key = JSON.stringify(list);
+  if (key === sched.last) return;
+  sched.last = key;
+  renderSchedules(list);
+}
+
+function renderSchedules(list) {
+  const body = $('sched-rows');
+  if (!list.length) {
+    body.innerHTML = `<tr class="empty"><td colspan="6">No pattern cards yet. A schedule starts a workflow on a cron
+      pattern: punch one above, or <code>workflowd ctl schedule create</code>.</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map((s) => {
+    const state = s.paused ? 'PAUSED' : 'ACTIVE';
+    const pattern = `${esc(s.cron)}${s.timezone ? ` <span class="muted">${esc(s.timezone)}</span>` : ''}`
+      + (s.jitter_ms ? ` <span class="tag" title="jitter">±${esc(fmtMs(s.jitter_ms))}</span>` : '');
+    const held = s.buffered_fire_at ? ` · holding ${esc(fmtTime(s.buffered_fire_at))}` : '';
+    const note = s.paused && s.note ? ` <span class="muted">— ${esc(s.note)}</span>` : '';
+    return `<tr data-s="${state}" data-id="${esc(s.schedule_id)}" tabindex="0">
+      <td><strong>${esc(s.schedule_id)}</strong></td>
+      <td>${pattern}</td>
+      <td>${esc(s.workflow_type)}${s.task_queue ? ` <span class="muted">on ${esc(s.task_queue)}</span>` : ''}</td>
+      <td>${s.paused ? '<span class="muted">paused</span>' : esc(fmtTime(s.next_fire_at))}</td>
+      <td>${esc((s.overlap_policy || 'ALLOW_ALL').replace('_', ' ').toLowerCase())}</td>
+      <td><span class="badge" data-s="${state}">${state}</span>${held}${note}</td>
+    </tr>`;
+  }).join('');
+  for (const tr of body.querySelectorAll('tr[data-id]')) {
+    tr.addEventListener('click', () => toggleSchedule(tr.dataset.id, list.find((s) => s.schedule_id === tr.dataset.id)));
+    tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') tr.click(); });
+  }
+  const row = body.querySelector(`tr[data-id="${CSS.escape(sched.open || '')}"]`);
+  if (row && sched.detail) {
+    row.after(sched.detail);
+    updateDetailState(list.find((s) => s.schedule_id === sched.open));
+  } else {
+    sched.open = null;
+    sched.detail = null;
+  }
+}
+
+function fmtMs(ms) {
+  return ms % 60000 === 0 ? `${ms / 60000}m` : ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`;
+}
+
+// A datetime-local value for d (local time, to the minute).
+function localInput(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function toggleSchedule(id, s) {
+  if (sched.open === id) {
+    sched.detail?.remove();
+    sched.open = null;
+    sched.detail = null;
+    return;
+  }
+  sched.detail?.remove();
+  sched.open = id;
+  const tr = document.createElement('tr');
+  tr.className = 'sched-detail-row';
+  const now = new Date();
+  tr.innerHTML = `<td colspan="6"><div class="sched-detail">
+    <div>
+      <h4>Next fires</h4>
+      <ol class="sched-preview" data-role="preview"><li>…</li></ol>
+    </div>
+    <div data-role="controls">
+      <h4>Controls</h4>
+      <div class="action-row">
+        <input data-role="note" placeholder="why it is paused (optional)" aria-label="Pause note">
+        <button class="btn btn-secondary" data-role="toggle" type="button"></button>
+      </div>
+      <h4>Backfill a past range</h4>
+      <div class="action-row">
+        <input type="datetime-local" data-role="from" aria-label="Backfill from" value="${localInput(new Date(now - 864e5))}">
+        <input type="datetime-local" data-role="to" aria-label="Backfill to" value="${localInput(now)}">
+        <select data-role="overlap" aria-label="Backfill overlap">
+          <option value="ALLOW_ALL">start every fire</option>
+          <option value="SKIP">only while none is running</option>
+        </select>
+        <button class="btn" data-role="backfill" type="button">Backfill</button>
+      </div>
+    </div>
+    <p class="muted" data-role="readonly" hidden>Schedules are read-only in this namespace.</p>
+  </div></td>`;
+  tr.querySelector('[data-role="toggle"]').addEventListener('click', () => toggleSchedulePause(id));
+  tr.querySelector('[data-role="backfill"]').addEventListener('click', () => backfillSchedule(id));
+  sched.detail = tr;
+  document.querySelector(`#sched-rows tr[data-id="${CSS.escape(id)}"]`).after(tr);
+  updateDetailState(s);
+  loadPreview(id);
+}
+
+function updateDetailState(s) {
+  if (!sched.detail || !s) return;
+  const btn = sched.detail.querySelector('[data-role="toggle"]');
+  btn.textContent = s.paused ? 'Resume' : 'Pause';
+  btn.dataset.paused = s.paused ? '1' : '';
+  sched.detail.querySelector('[data-role="note"]').hidden = !!s.paused;
+  sched.detail.querySelector('[data-role="controls"]').hidden = sched.readOnly;
+  sched.detail.querySelector('[data-role="readonly"]').hidden = !sched.readOnly;
+}
+
+function renderPreview(el, res) {
+  const fires = res.fires || [];
+  el.innerHTML = fires.length
+    ? fires.map((f) => `<li>${esc(new Date(f.fire_at).toLocaleString())}${f.start_at !== f.fire_at
+      ? ` <span class="muted">→ starts ${esc(new Date(f.start_at).toLocaleTimeString())}</span>` : ''}</li>`).join('')
+    : '<li>never fires again</li>';
+  if (res.paused) el.insertAdjacentHTML('afterbegin', '<li class="note">Paused: these happen once it is resumed.</li>');
+}
+
+async function loadPreview(id) {
+  const el = sched.detail?.querySelector('[data-role="preview"]');
+  if (!el) return;
+  try {
+    renderPreview(el, await api(`/api/schedules/${encodeURIComponent(id)}/preview?count=5`));
+  } catch (err) {
+    el.innerHTML = `<li>${esc(err.message)}</li>`;
+  }
+}
+
+async function toggleSchedulePause(id) {
+  const btn = sched.detail.querySelector('[data-role="toggle"]');
+  const resume = btn.dataset.paused === '1';
+  try {
+    await api(`/api/schedules/${encodeURIComponent(id)}/${resume ? 'resume' : 'pause'}`, {
+      method: 'POST',
+      body: JSON.stringify(resume ? {} : { note: sched.detail.querySelector('[data-role="note"]').value.trim() }),
+    });
+    toast(resume ? `Resumed ${id}` : `Paused ${id}`, 'success');
+    sched.last = '';
+    await loadSchedules();
+    loadPreview(id);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function backfillSchedule(id) {
+  const q = (r) => sched.detail.querySelector(`[data-role="${r}"]`).value;
+  const from = new Date(q('from'));
+  const to = new Date(q('to'));
+  if (isNaN(from) || isNaN(to)) { toast('Pick a start and an end', 'error'); return; }
+  try {
+    const res = await api(`/api/schedules/${encodeURIComponent(id)}/backfill`, {
+      method: 'POST',
+      body: JSON.stringify({ start_time: from.toISOString(), end_time: to.toISOString(), overlap_policy: q('overlap') }),
+    });
+    toast(`Backfill: ${res.started} started, ${res.existing} already there, ${res.skipped} skipped`, 'success');
+    refresh();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function scheduleForm() {
+  const v = (id) => $(id).value.trim();
+  const body = {
+    schedule_id: v('sc-id'), cron: v('sc-cron'), timezone: v('sc-tz'), workflow_type: v('sc-type'),
+    input: $('sc-input').value, task_queue: v('sc-queue'), overlap_policy: $('sc-overlap').value,
+    jitter_ms: Math.max(0, Math.round(Number($('sc-jitter').value || 0) * 1000)),
+  };
+  if (body.task_queue === 'default') body.task_queue = '';
+  return body;
+}
+
+async function previewScheduleForm() {
+  const el = $('sc-preview');
+  el.hidden = false;
+  try {
+    renderPreview(el, await api('/api/schedules/preview', { method: 'POST', body: JSON.stringify({ ...scheduleForm(), count: 5 }) }));
+  } catch (err) {
+    el.innerHTML = `<li>${esc(err.message)}</li>`;
+  }
+}
+
+async function createSchedule(e) {
+  e.preventDefault();
+  try {
+    await api('/api/schedules', { method: 'POST', body: JSON.stringify(scheduleForm()) });
+    toast(`Card punched: ${$('sc-id').value.trim()}`, 'success');
+    $('sched-form').hidden = true;
+    $('sched-form').reset();
+    $('sc-preview').hidden = true;
+    sched.last = '';
+    loadSchedules();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 // The namespace picker shows only when the caller can use more than one.
 async function loadNamespaces() {
   let info;
@@ -417,6 +629,8 @@ async function loadNamespaces() {
   const sel = $('ns');
   sel.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
   sel.value = info.current;
+  sched.readOnly = !!info.read_only_schedules;
+  $('sched-new').hidden = sched.readOnly;
   // Shown whenever there is a choice, or the view is not the default one.
   $('ns-pick').hidden = names.length < 2 && info.current === 'default';
 }
@@ -428,6 +642,10 @@ function switchNamespace(next) {
   url.searchParams.set('namespace', next);
   history.replaceState(null, '', url);
   closeDrawer();
+  sched.open = null;
+  sched.detail = null;
+  sched.last = '';
+  loadNamespaces();
   refresh();
 }
 
@@ -529,6 +747,10 @@ function init() {
     scheduleRefresh();
   });
   $('ns').addEventListener('change', (e) => switchNamespace(e.target.value));
+  $('sched-new').addEventListener('click', () => { $('sched-form').hidden = !$('sched-form').hidden; });
+  $('sc-close').addEventListener('click', () => { $('sched-form').hidden = true; });
+  $('sc-try').addEventListener('click', previewScheduleForm);
+  $('sched-form').addEventListener('submit', createSchedule);
 
   refresh();
   scheduleRefresh();

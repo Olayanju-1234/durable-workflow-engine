@@ -263,14 +263,17 @@ func writeAuthError(w http.ResponseWriter, err error) {
 	}
 }
 
-// listNamespaces lists the namespaces the caller can use, and which one this
-// request is in.
+// listNamespaces lists the namespaces the caller can use, which one this
+// request is in, and whether that one refuses changes (so a UI can say so).
 func (a *HTTPAPI) listNamespaces(w http.ResponseWriter, r *http.Request) {
 	g := grantOf(r)
+	p := a.guard.policy(g.Namespace)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"namespaces": a.authz.Visible(g),
-		"current":    g.Namespace,
-		"admin":      g.Admin,
+		"namespaces":          a.authz.Visible(g),
+		"current":             g.Namespace,
+		"admin":               g.Admin,
+		"read_only":           p.ReadOnly,
+		"read_only_schedules": p.ReadOnly || p.ReadOnlySchedules,
 	})
 }
 

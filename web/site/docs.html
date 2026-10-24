@@ -639,6 +639,24 @@ c.CancelWorkflow(ctx, "order-42", "customer changed their mind", client.Graceful
       runs once. Fields: minute, hour, day of month, month, day of week, with <code>*</code>,
       ranges, steps, lists and names; when both day fields are set, either matches.
     </p>
+    <h3 id="schedule-controls">Controls</h3>
+    <table>
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td>Pause / resume</td><td>A paused schedule does not fire, and does not catch up afterwards; a note says why. Creating it again resumes it.</td></tr>
+        <tr><td>Overlap policy</td><td>While an earlier run is going: <code>SKIP</code> the fire (same as <code>skip_if_running</code>), <code>BUFFER_ONE</code> (hold the latest fire and start it as soon as the run finishes), or <code>ALLOW_ALL</code> (start it anyway, the default).</td></tr>
+        <tr><td>Jitter</td><td>Start each run up to this long after its fire time, by an offset fixed per fire, so schedules that all fire on the hour spread out. Keep it below the interval between fires.</td></tr>
+        <tr><td>Backfill</td><td>Start the runs a schedule would have started over a past range, under the same ids, so runs that exist are left alone and a repeated backfill does nothing. <code>ALLOW_ALL</code> or <code>SKIP</code>; up to 1,000 fires a call.</td></tr>
+        <tr><td>Preview</td><td>The next fire times, with each run's jittered start, of a schedule or of a spec before you create it.</td></tr>
+      </tbody>
+    </table>
+    <pre data-lang="sh"><code>workflowd ctl schedule create hourly-sync --cron "0 * * * *" --type Sync --overlap buffer_one --jitter 2m --dry-run
+workflowd ctl schedule pause hourly-sync --note "paused for the migration, back Monday"
+workflowd ctl schedule resume hourly-sync
+workflowd ctl schedule backfill hourly-sync --from 2026-10-23T00:00:00Z --to 2026-10-23T06:00:00Z
+workflowd ctl schedule preview hourly-sync --count 5</code></pre>
+    <p>The dashboard's <em>Pattern cards</em> panel does the same: create (with a preview), pause, resume and backfill.
+      A paused, jittered or <code>BUFFER_ONE</code> schedule needs history format 6.</p>
 
     <h2 id="testing">Testing workflows</h2>
     <p>
@@ -1311,7 +1329,16 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
 {"schedule_id":"nightly","cron":"0 2 * * *","timezone":"UTC","workflow_type":"Report","input":"","skip_if_running":true}
 → 201 {"schedule_id":"nightly"}
 GET /api/schedules          → 200 {"schedules":[{..., "next_fire_at":"2026-10-22T02:00:00Z"}]}
-DELETE /api/schedules/{id}  → 200 {"status":"deleted"}</code></pre>
+DELETE /api/schedules/{id}  → 200 {"status":"deleted"}
+POST /api/schedules/{id}/pause     {"note":"migration"}       → 200 {"status":"paused"}
+POST /api/schedules/{id}/resume                                  → 200 {"status":"resumed"}
+POST /api/schedules/{id}/backfill  {"start_time":"2026-10-23T00:00:00Z","end_time":"2026-10-23T06:00:00Z","overlap_policy":"SKIP"}
+                                   → 200 {"started":5,"existing":1,"skipped":0}
+GET  /api/schedules/{id}/preview?count=5     → 200 {"fires":[{"fire_at":…,"start_at":…}],"paused":false}
+POST /api/schedules/preview  {a schedule, "count":5}            (a spec not yet created)</code></pre>
+    <p>A schedule also takes <code>"overlap_policy"</code> (<code>SKIP</code>, <code>BUFFER_ONE</code>,
+      <code>ALLOW_ALL</code>), <code>"jitter_ms"</code>, <code>"paused"</code>, <code>"note"</code> and
+      <code>"task_queue"</code>; listings add <code>"buffered_fire_at"</code> for a held fire.</p>
 
     <h3>Terminate a workflow</h3>
     <pre data-lang="sh"><code>POST /api/workflows/{id}/terminate

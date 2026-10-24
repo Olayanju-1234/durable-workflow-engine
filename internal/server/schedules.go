@@ -45,7 +45,8 @@ type scheduleEntry struct {
 	spec      *Schedule
 	createdAt time.Time
 	cron      cron.Schedule
-	next      time.Time // the fire time armed, zero when none
+	next      time.Time // the fire time armed, zero when none (or paused)
+	buffered  time.Time // a fire OVERLAP_POLICY_BUFFER_ONE holds, zero when none
 }
 
 type scheduler struct {
@@ -66,32 +67,45 @@ func (e *Engine) CreateSchedule(spec *Schedule) error {
 }
 
 func (e *Engine) createSchedule(ns string, spec *Schedule) error {
-	ent, err := newScheduleEntry(ns, proto.Clone(spec).(*Schedule), time.Now())
-	if err != nil {
-		return err
-	}
-	key := history.Key(ns, spec.GetScheduleId())
 	e.sched.mu.Lock()
 	defer e.sched.mu.Unlock()
 	if err := e.loadSchedulesLocked(); err != nil {
 		return err
 	}
+	return e.putScheduleLocked(ns, proto.Clone(spec).(*Schedule), "created")
+}
+
+// putScheduleLocked records a schedule's spec (a create, a replacement, a
+// pause or a resume) and arms its next fire. The caller holds e.sched.mu
+// and has loaded the schedules.
+func (e *Engine) putScheduleLocked(ns string, spec *Schedule, what string) error {
+	ent, err := newScheduleEntry(ns, spec, time.Now())
+	if err != nil {
+		return err
+	}
+	key := ent.key()
 	if cur, ok := e.sched.entries[key]; ok && proto.Equal(cur.spec, ent.spec) {
-		return nil // the same schedule again: a retried create
+		return nil // the same schedule again: a retried request
 	}
 	data, err := proto.Marshal(ent.spec)
 	if err != nil {
 		return fmt.Errorf("server: encode schedule: %w", err)
 	}
-	at, err := e.appendScheduleChange(ns, signalUpsert, data)
+	at, err := e.appendScheduleChange(ns, signalUpsert, data, scheduleFormat(ent.spec))
 	if err != nil {
 		return err
 	}
 	ent.createdAt = at
+	if cur, ok := e.sched.entries[key]; ok && !ent.spec.GetPaused() {
+		ent.buffered = cur.buffered // a held fire survives an edit, not a pause
+		if !ent.buffered.IsZero() {
+			e.armBufferLocked(ent)
+		}
+	}
 	e.sched.entries[key] = ent
 	e.armScheduleLocked(ent, ent.cron.Next(time.Now()))
-	e.log.Info("schedule created", "namespace", ns, "schedule_id", ent.spec.GetScheduleId(), "cron", ent.spec.GetCron(),
-		"workflow_type", ent.spec.GetWorkflowType(), "next_fire_at", ent.next)
+	e.log.Info("schedule "+what, "namespace", ns, "schedule_id", ent.spec.GetScheduleId(), "cron", ent.spec.GetCron(),
+		"workflow_type", ent.spec.GetWorkflowType(), "paused", ent.spec.GetPaused(), "next_fire_at", ent.next)
 	return nil
 }
 
@@ -111,7 +125,7 @@ func (e *Engine) deleteSchedule(ns, scheduleID string) error {
 	if _, ok := e.sched.entries[key]; !ok || validateID(key) != nil {
 		return fmt.Errorf("%w: schedule %q", ErrNotFound, scheduleID)
 	}
-	if _, err := e.appendScheduleChange(ns, signalDelete, []byte(scheduleID)); err != nil {
+	if _, err := e.appendScheduleChange(ns, signalDelete, []byte(scheduleID), history.FormatBase); err != nil {
 		return err
 	}
 	delete(e.sched.entries, key)
@@ -138,6 +152,9 @@ func (e *Engine) listSchedules(ns string) ([]*ScheduleInfo, error) {
 		info := &ScheduleInfo{Schedule: proto.Clone(ent.spec).(*Schedule), CreatedAt: ent.createdAt.UnixNano()}
 		if !ent.next.IsZero() {
 			info.NextFireAt = ent.next.UnixNano()
+		}
+		if !ent.buffered.IsZero() {
+			info.BufferedFireAt = ent.buffered.UnixNano()
 		}
 		out = append(out, info)
 	}
@@ -166,6 +183,9 @@ func newScheduleEntry(ns string, spec *Schedule, now time.Time) (*scheduleEntry,
 	if err != nil {
 		return nil, fmt.Errorf("%w: schedule %q: %v", ErrInvalidArgument, id, err)
 	}
+	if err := normalizeControls(spec); err != nil {
+		return nil, fmt.Errorf("%w: schedule %q: %v", ErrInvalidArgument, id, err)
+	}
 	if c.Next(now).IsZero() {
 		return nil, fmt.Errorf("%w: schedule %q: %q never fires", ErrInvalidArgument, id, spec.GetCron())
 	}
@@ -175,9 +195,10 @@ func newScheduleEntry(ns string, spec *Schedule, now time.Time) (*scheduleEntry,
 // key is the entry's store key: its namespace and schedule id.
 func (ent *scheduleEntry) key() string { return history.Key(ent.ns, ent.spec.GetScheduleId()) }
 
-// appendScheduleChange records one change in a namespace's schedule history
-// and returns its timestamp. The caller holds e.sched.mu.
-func (e *Engine) appendScheduleChange(ns, signal string, payload []byte) (time.Time, error) {
+// appendScheduleChange records one change in a namespace's schedule history,
+// stamped with the history format it needs, and returns its timestamp. The
+// caller holds e.sched.mu.
+func (e *Engine) appendScheduleChange(ns, signal string, payload []byte, format uint32) (time.Time, error) {
 	w := e.lockWorkflow(history.Key(ns, scheduleLogID))
 	defer e.unlockWorkflow(w)
 	events, _, err := e.historyLocked(w)
@@ -195,6 +216,9 @@ func (e *Engine) appendScheduleChange(ns, signal string, payload []byte) (time.T
 	ev := &history.HistoryEvent{Attributes: &history.HistoryEvent_SignalReceived{
 		SignalReceived: &history.SignalReceivedEvent{SignalName: signal, Payload: payload},
 	}}
+	if format > history.FormatBase {
+		ev.MinReaderFormat = format
+	}
 	if err := e.appendLocked(w, ev, int64(len(w.events)+1)); err != nil {
 		return time.Time{}, err
 	}
@@ -274,6 +298,9 @@ func (e *Engine) recoverSchedules() error {
 	sort.Strings(ids)
 	for _, id := range ids {
 		ent := e.sched.entries[id]
+		if ent.spec.GetPaused() {
+			continue // nothing fires while paused, and nothing is caught up after
+		}
 		from := ent.createdAt
 		if cutoff := now.Add(-scheduleCatchUp); from.Before(cutoff) {
 			from = cutoff
@@ -296,14 +323,18 @@ func (e *Engine) recoverSchedules() error {
 	return nil
 }
 
-// armScheduleLocked sets the entry's next fire. Timer.Sequence carries the
-// fire time, so a stale or superseded timer is recognised and ignored.
+// armScheduleLocked sets the entry's next fire (none while it is paused).
+// Timer.Sequence carries the fire time, so a stale or superseded timer is
+// recognised and ignored; the timer goes off after the fire's jitter.
 func (e *Engine) armScheduleLocked(ent *scheduleEntry, at time.Time) {
+	if ent.spec.GetPaused() {
+		at = time.Time{}
+	}
 	ent.next = at
 	if at.IsZero() {
 		return
 	}
-	e.sched.timers.Add(timer.Timer{WorkflowID: ent.key(), Sequence: at.UnixNano(), FireAt: at})
+	e.sched.timers.Add(timer.Timer{WorkflowID: ent.key(), Sequence: at.UnixNano(), FireAt: at.Add(jitterOf(ent.key(), ent.spec, at))})
 }
 
 func (e *Engine) armRetryLocked(ent *scheduleEntry, fire time.Time) {
@@ -314,6 +345,10 @@ func (e *Engine) armRetryLocked(ent *scheduleEntry, fire time.Time) {
 func (e *Engine) onScheduleDue(tm timer.Timer) {
 	e.sched.mu.Lock()
 	defer e.sched.mu.Unlock()
+	if tm.StepName == bufferCheck {
+		e.onBufferCheckLocked(tm)
+		return
+	}
 	ent, ok := e.sched.entries[tm.WorkflowID]
 	fire := time.Unix(0, tm.Sequence)
 	if !ok || !ent.next.Equal(fire) {
@@ -335,20 +370,41 @@ func (e *Engine) onScheduleDue(tm timer.Timer) {
 // retried. The caller holds e.sched.mu.
 func (e *Engine) fireLocked(ent *scheduleEntry, at time.Time) (retry bool) {
 	spec := ent.spec
-	runID := fmt.Sprintf("%s-%s", spec.GetScheduleId(), at.UTC().Format(runIDTimeFormat))
-	if spec.GetSkipIfRunning() {
-		live, err := e.indexed(func(s *WorkflowSummary) bool {
-			ns, id := history.SplitKey(s.GetWorkflowId())
-			return ns == ent.ns && strings.HasPrefix(id, spec.GetScheduleId()+"-") && id != runID &&
-				!isTerminalStatus(s.GetStatus()) && s.GetStatus() != WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED
-		})
-		if err == nil && len(live) > 0 {
-			e.metrics.schedulesSkipped.Inc()
-			e.log.Info("schedule fire skipped: an earlier run is still running", "namespace", ent.ns, "schedule_id", spec.GetScheduleId(),
-				"fire_at", at, "running", localID(live[0].GetWorkflowId()))
-			return false
-		}
+	policy := overlapOf(spec)
+	if policy == OverlapPolicy_OVERLAP_POLICY_ALLOW_ALL {
+		return e.startFireLocked(ent, at)
 	}
+	running := e.runningRun(ent.ns, spec.GetScheduleId(), fireRunID(spec.GetScheduleId(), at))
+	if !ent.buffered.IsZero() && running == "" {
+		// A held fire goes before any newer one, however its check is timed.
+		held := ent.buffered
+		if e.startFireLocked(ent, held) {
+			e.metrics.schedulesSkipped.Inc()
+			return false // the held fire is retried by its own check; this one is dropped
+		}
+		ent.buffered, running = time.Time{}, fireRunID(spec.GetScheduleId(), held)
+	}
+	if running == "" {
+		return e.startFireLocked(ent, at)
+	}
+	if policy == OverlapPolicy_OVERLAP_POLICY_BUFFER_ONE && ent.buffered.IsZero() {
+		ent.buffered = at
+		e.armBufferLocked(ent)
+		e.log.Info("schedule fire held until the running run finishes", "namespace", ent.ns,
+			"schedule_id", spec.GetScheduleId(), "fire_at", at, "running", running)
+		return false
+	}
+	e.metrics.schedulesSkipped.Inc()
+	e.log.Info("schedule fire skipped: an earlier run is still running", "namespace", ent.ns, "schedule_id", spec.GetScheduleId(),
+		"fire_at", at, "running", running)
+	return false
+}
+
+// startFireLocked starts the run of one fire time and reports whether it
+// should be retried. The caller holds e.sched.mu.
+func (e *Engine) startFireLocked(ent *scheduleEntry, at time.Time) (retry bool) {
+	spec := ent.spec
+	runID := fireRunID(spec.GetScheduleId(), at)
 	_, err := e.StartWorkflow(spec.GetWorkflowType(), spec.GetInput(), runID, inNamespace(ent.ns), WithTaskQueue(spec.GetTaskQueue()))
 	switch {
 	case err == nil:
