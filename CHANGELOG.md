@@ -47,6 +47,14 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   (`RESOURCE_EXHAUSTED`). Metrics `workflowd_requests_refused_total{reason}` and
   `workflowd_starts_refused_total{reason}`.
 
+- **Archiving** (ADR-0019): with `--archive`, retention exports a finished run's history to a
+  directory or an S3-compatible bucket (S3, R2; hand-written SigV4, no SDK) and deletes it only
+  once the store has it; a run that cannot be archived stays on disk and is retried. Earlier runs
+  too. Read back by namespace: `GET /api/archive/workflows[/{id}[/history]]`,
+  `workflowd ctl archive list|describe|history`. Credentials from `--archive-credentials-file` or
+  `WORKFLOWD_ARCHIVE_ACCESS_KEY_ID` / `WORKFLOWD_ARCHIVE_SECRET_ACCESS_KEY`. Metrics
+  `workflowd_runs_archived_total`, `workflowd_archive_failures_total`; `/api/health` `archiving`.
+
 ### Changed
 - SDK workers (TypeScript, Python, Java) retry a registration refused with 429 instead of
   stopping; the Go worker's `Run` stops on `PERMISSION_DENIED` like an invalid token.

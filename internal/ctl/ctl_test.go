@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/olayanju-1234/durable-workflow-engine/internal/archive"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/replay"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
@@ -28,7 +29,7 @@ type harness struct {
 	env    map[string]string
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, opts ...server.Option) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := history.NewHistoryStore(filepath.Join(dir, "data"))
@@ -41,7 +42,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e := server.NewEngine(store, logger, server.WithNamespaces(set))
+	e := server.NewEngine(store, logger, append([]server.Option{server.WithNamespaces(set)}, opts...)...)
 	t.Cleanup(e.Close)
 	approval := replay.Planner{Fn: func(ctx workflow.Context, in []byte) ([]byte, error) {
 		got := ctx.WaitForSignal("approval", "approve")
@@ -226,4 +227,28 @@ func TestBackupAndRestore(t *testing.T) {
 	offline := filepath.Join(h.dir, "offline.tar.gz")
 	h.ok("backup", "--data-dir", filepath.Join(h.dir, "data"), offline)
 	contains(t, "offline restore", h.ok("restore", "--data-dir", filepath.Join(h.dir, "restored2"), offline), "restored 2 histories")
+}
+
+// Finished runs that retention archived are listed, described and printed
+// from the archive, in their namespace.
+func TestArchiveCommands(t *testing.T) {
+	dir, err := archive.OpenDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, server.WithArchive(dir))
+	h.ok("start", "Approval", "--id", "old-1", "--input", "archived input", "-n", "acme")
+	h.ok("terminate", "old-1", "--reason", "done", "-n", "acme")
+	if code, _, errOut := h.run("", "archive", "list", "-n", "acme"); code != 0 {
+		t.Fatalf("archive list before any purge: %d %s", code, errOut)
+	}
+	if n, err := h.engine.PurgeTerminated(time.Now().Add(time.Hour)); n != 1 || err != nil {
+		t.Fatalf("purged %d, %v", n, err)
+	}
+	contains(t, "archive list", h.ok("archive", "list", "-n", "acme"), "old-1")
+	contains(t, "archive describe", h.ok("archive", "describe", "old-1", "-n", "acme"), "TERMINATED", "archived input")
+	contains(t, "archive history", h.ok("archive", "history", "old-1", "-n", "acme"), "WorkflowStarted", "WorkflowFailed")
+	if code, _, errOut := h.run("", "archive", "describe", "old-1"); code != 1 || !strings.Contains(errOut, "HTTP 404") {
+		t.Fatalf("default namespace reading acme's archive: %d %s", code, errOut)
+	}
 }

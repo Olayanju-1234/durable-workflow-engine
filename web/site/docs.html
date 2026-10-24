@@ -71,6 +71,7 @@
     <a href="#security">Auth &amp; TLS</a>
     <a href="#namespaces">Namespaces</a>
     <a href="#guardrails">Guardrails</a>
+    <a href="#archiving">Archiving</a>
     <a href="#api">gRPC API</a>
     <a href="#http-api">HTTP / JSON API</a>
     <a href="#metrics">Metrics</a>
@@ -993,6 +994,8 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--tls-cert</code>, <code>--tls-key</code></td><td>empty</td><td>Serve TLS on the gRPC, dashboard/API and metrics listeners with this PEM certificate and key. Re-read when the files change, so a renewed certificate needs no restart. Unset: plaintext.</td></tr>
         <tr><td><code>--demo-worker</code></td><td><code>false</code></td><td>Run an in-process worker for the built-in demo activities (<code>reserve</code>, <code>charge</code>, <code>ship</code>, <code>release</code>), so <code>OrderSaga</code> and <code>OrderWorkflow</code> run with no separate worker. An input containing <code>decline</code> makes <code>charge</code> fail for good, which shows the saga compensating.</td></tr>
         <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated, timed out, cancelled) and earlier runs of a workflow that <a href="#continue-as-new">continued as new</a> this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
+        <tr><td><code>--archive</code></td><td>empty</td><td>Before retention deletes a finished history, export it to a directory or <code>s3://bucket/prefix?endpoint=…</code> (<a href="#archiving">Archiving</a>). A history that cannot be exported is kept.</td></tr>
+        <tr><td><code>--archive-credentials-file</code></td><td><code>$WORKFLOWD_ARCHIVE_*</code></td><td>S3 credentials: lines <code>access_key_id=</code> and <code>secret_access_key=</code>.</td></tr>
         <tr><td><code>--max-history-events</code>, <code>--max-history-bytes</code>, <code>--max-payload-bytes</code></td><td>51200, 50 MiB, 2 MiB</td><td>The <a href="#limits">limits</a> on a run's history and on each payload. <code>0</code> turns one off.</td></tr>
         <tr><td><code>--version</code></td><td>—</td><td>Print the version and the newest history format this binary reads, and exit.</td></tr>
         <tr><td><code>--check-format</code></td><td>—</td><td>With the engine stopped: report the data directory's recorded history format, what its histories need, and whether this binary can serve it, then exit (non-zero if not). See <a href="#upgrading">Upgrading &amp; rolling back</a>.</td></tr>
@@ -1009,6 +1012,31 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
       the HTTP or gRPC port can start, signal and terminate workflows. Set a token and certificates as described in
       <a href="#security">Auth &amp; TLS</a>, or bind everything to localhost and put a TLS proxy in front.
     </div>
+
+    <h2 id="archiving">Archiving</h2>
+    <p>With <code>--archive</code>, retention exports each finished run's history before it deletes it, and deletes it
+      only once the archive has it. If the archive is unreachable the history stays on disk and the next retention pass
+      tries again (<code>workflowd_archive_failures_total</code> counts the failures), so nothing is lost while it is down.
+      Earlier runs of a workflow that continued as new are archived the same way.</p>
+    <pre data-lang="sh"><code># a directory (another disk, a mounted volume)
+workflowd --serve --retention 168h --archive /mnt/archive/workflowd
+
+# Cloudflare R2, or any S3-compatible store
+export WORKFLOWD_ARCHIVE_ACCESS_KEY_ID=… WORKFLOWD_ARCHIVE_SECRET_ACCESS_KEY=…
+workflowd --serve --retention 168h \
+  --archive 's3://workflowd-archive/prod?endpoint=https://ACCOUNT.r2.cloudflarestorage.com'</code></pre>
+    <p>An archived run is the history file's bytes, unchanged, at
+      <code>&lt;namespace&gt;/&lt;workflow id&gt;/&lt;closed at&gt;~&lt;run id&gt;.history</code>. S3 requests are
+      path-style and signed with AWS Signature Version 4 (written in workflowd, no SDK); each upload carries its MD5 and
+      SHA-256, so the store refuses a damaged one. The region defaults to <code>us-east-1</code>, or <code>auto</code> for
+      R2; set <code>region=</code> otherwise. Credentials come from <code>--archive-credentials-file</code>, else
+      <code>WORKFLOWD_ARCHIVE_ACCESS_KEY_ID</code> and <code>WORKFLOWD_ARCHIVE_SECRET_ACCESS_KEY</code>, else the
+      <code>AWS_*</code> pair.</p>
+    <p>Archived runs are read where they are, in your namespace:</p>
+    <pre data-lang="sh"><code>workflowd ctl archive list --prefix order-
+workflowd ctl archive describe order-42            # the latest archived run, or --run-id
+workflowd ctl archive history order-42
+curl localhost:8233/api/archive/workflows/order-42[/history][?run_id=…]</code></pre>
 
     <h2 id="ctl">Command line: <code>workflowd ctl</code></h2>
     <p>The operator's command line is a subcommand of the same binary. It talks to a running engine over the
@@ -1036,7 +1064,8 @@ workflowd ctl terminate order-43 --reason stuck
 workflowd ctl schedule create nightly --cron "0 3 * * *" --timezone Europe/London --type Report
 workflowd ctl schedule list
 workflowd ctl health
-workflowd ctl namespaces</code></pre>
+workflowd ctl namespaces
+workflowd ctl archive describe order-1      # a run retention archived (see Archiving)</code></pre>
     <p>Flags may come before or after the arguments; <code>workflowd ctl &lt;command&gt; --help</code> lists a command's
       flags. Exit status: <code>0</code> done, <code>1</code> the engine refused or failed (its message is printed),
       <code>2</code> a usage mistake.</p>
