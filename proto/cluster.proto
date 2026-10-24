@@ -14,6 +14,7 @@ message Command {
   oneof command {
     AppendEvent append = 1;
     DeleteWorkflow delete = 2;
+    NewRun new_run = 3;
   }
 }
 
@@ -27,6 +28,15 @@ message AppendEvent {
 // DeleteWorkflow removes a finished workflow's history (retention).
 message DeleteWorkflow {
   string workflow_id = 1;
+}
+
+// NewRun keeps a workflow's finished history under archive_id and starts its
+// next run with event (continue-as-new, or a reused id). The history must end
+// with a terminal event, or every node rejects it.
+message NewRun {
+  string workflow_id = 1;
+  string archive_id = 2;
+  history.v1.HistoryEvent event = 3;
 }
 
 // A history snapshot is a SnapshotHeader record followed by one

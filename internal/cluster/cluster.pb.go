@@ -30,6 +30,7 @@ type Command struct {
 	//
 	//	*Command_Append
 	//	*Command_Delete
+	//	*Command_NewRun
 	Command       isCommand_Command `protobuf_oneof:"command"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -90,6 +91,15 @@ func (x *Command) GetDelete() *DeleteWorkflow {
 	return nil
 }
 
+func (x *Command) GetNewRun() *NewRun {
+	if x != nil {
+		if x, ok := x.Command.(*Command_NewRun); ok {
+			return x.NewRun
+		}
+	}
+	return nil
+}
+
 type isCommand_Command interface {
 	isCommand_Command()
 }
@@ -102,9 +112,15 @@ type Command_Delete struct {
 	Delete *DeleteWorkflow `protobuf:"bytes,2,opt,name=delete,proto3,oneof"`
 }
 
+type Command_NewRun struct {
+	NewRun *NewRun `protobuf:"bytes,3,opt,name=new_run,json=newRun,proto3,oneof"`
+}
+
 func (*Command_Append) isCommand_Command() {}
 
 func (*Command_Delete) isCommand_Command() {}
+
+func (*Command_NewRun) isCommand_Command() {}
 
 // AppendEvent adds one event to a workflow's history. event.event_id must be
 // the next position in that history, or every node rejects it.
@@ -205,6 +221,69 @@ func (x *DeleteWorkflow) GetWorkflowId() string {
 	return ""
 }
 
+// NewRun keeps a workflow's finished history under archive_id and starts its
+// next run with event (continue-as-new, or a reused id). The history must end
+// with a terminal event, or every node rejects it.
+type NewRun struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowId    string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	ArchiveId     string                 `protobuf:"bytes,2,opt,name=archive_id,json=archiveId,proto3" json:"archive_id,omitempty"`
+	Event         *history.HistoryEvent  `protobuf:"bytes,3,opt,name=event,proto3" json:"event,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NewRun) Reset() {
+	*x = NewRun{}
+	mi := &file_cluster_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NewRun) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NewRun) ProtoMessage() {}
+
+func (x *NewRun) ProtoReflect() protoreflect.Message {
+	mi := &file_cluster_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NewRun.ProtoReflect.Descriptor instead.
+func (*NewRun) Descriptor() ([]byte, []int) {
+	return file_cluster_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *NewRun) GetWorkflowId() string {
+	if x != nil {
+		return x.WorkflowId
+	}
+	return ""
+}
+
+func (x *NewRun) GetArchiveId() string {
+	if x != nil {
+		return x.ArchiveId
+	}
+	return ""
+}
+
+func (x *NewRun) GetEvent() *history.HistoryEvent {
+	if x != nil {
+		return x.Event
+	}
+	return nil
+}
+
 // A history snapshot is a SnapshotHeader record followed by one
 // SnapshotWorkflow record per workflow, framed by internal/record.
 type SnapshotHeader struct {
@@ -217,7 +296,7 @@ type SnapshotHeader struct {
 
 func (x *SnapshotHeader) Reset() {
 	*x = SnapshotHeader{}
-	mi := &file_cluster_proto_msgTypes[3]
+	mi := &file_cluster_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -229,7 +308,7 @@ func (x *SnapshotHeader) String() string {
 func (*SnapshotHeader) ProtoMessage() {}
 
 func (x *SnapshotHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_cluster_proto_msgTypes[3]
+	mi := &file_cluster_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -242,7 +321,7 @@ func (x *SnapshotHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotHeader.ProtoReflect.Descriptor instead.
 func (*SnapshotHeader) Descriptor() ([]byte, []int) {
-	return file_cluster_proto_rawDescGZIP(), []int{3}
+	return file_cluster_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *SnapshotHeader) GetVersion() uint32 {
@@ -270,7 +349,7 @@ type SnapshotWorkflow struct {
 
 func (x *SnapshotWorkflow) Reset() {
 	*x = SnapshotWorkflow{}
-	mi := &file_cluster_proto_msgTypes[4]
+	mi := &file_cluster_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -282,7 +361,7 @@ func (x *SnapshotWorkflow) String() string {
 func (*SnapshotWorkflow) ProtoMessage() {}
 
 func (x *SnapshotWorkflow) ProtoReflect() protoreflect.Message {
-	mi := &file_cluster_proto_msgTypes[4]
+	mi := &file_cluster_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -295,7 +374,7 @@ func (x *SnapshotWorkflow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotWorkflow.ProtoReflect.Descriptor instead.
 func (*SnapshotWorkflow) Descriptor() ([]byte, []int) {
-	return file_cluster_proto_rawDescGZIP(), []int{4}
+	return file_cluster_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SnapshotWorkflow) GetWorkflowId() string {
@@ -317,10 +396,11 @@ var File_cluster_proto protoreflect.FileDescriptor
 const file_cluster_proto_rawDesc = "" +
 	"\n" +
 	"\rcluster.proto\x12\n" +
-	"cluster.v1\x1a\vevent.proto\"}\n" +
+	"cluster.v1\x1a\vevent.proto\"\xac\x01\n" +
 	"\aCommand\x121\n" +
 	"\x06append\x18\x01 \x01(\v2\x17.cluster.v1.AppendEventH\x00R\x06append\x124\n" +
-	"\x06delete\x18\x02 \x01(\v2\x1a.cluster.v1.DeleteWorkflowH\x00R\x06deleteB\t\n" +
+	"\x06delete\x18\x02 \x01(\v2\x1a.cluster.v1.DeleteWorkflowH\x00R\x06delete\x12-\n" +
+	"\anew_run\x18\x03 \x01(\v2\x12.cluster.v1.NewRunH\x00R\x06newRunB\t\n" +
 	"\acommand\"^\n" +
 	"\vAppendEvent\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
@@ -328,7 +408,13 @@ const file_cluster_proto_rawDesc = "" +
 	"\x05event\x18\x02 \x01(\v2\x18.history.v1.HistoryEventR\x05event\"1\n" +
 	"\x0eDeleteWorkflow\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
-	"workflowId\"H\n" +
+	"workflowId\"x\n" +
+	"\x06NewRun\x12\x1f\n" +
+	"\vworkflow_id\x18\x01 \x01(\tR\n" +
+	"workflowId\x12\x1d\n" +
+	"\n" +
+	"archive_id\x18\x02 \x01(\tR\tarchiveId\x12.\n" +
+	"\x05event\x18\x03 \x01(\v2\x18.history.v1.HistoryEventR\x05event\"H\n" +
 	"\x0eSnapshotHeader\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x1c\n" +
 	"\tworkflows\x18\x02 \x01(\x04R\tworkflows\"M\n" +
@@ -349,24 +435,27 @@ func file_cluster_proto_rawDescGZIP() []byte {
 	return file_cluster_proto_rawDescData
 }
 
-var file_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_cluster_proto_goTypes = []any{
 	(*Command)(nil),              // 0: cluster.v1.Command
 	(*AppendEvent)(nil),          // 1: cluster.v1.AppendEvent
 	(*DeleteWorkflow)(nil),       // 2: cluster.v1.DeleteWorkflow
-	(*SnapshotHeader)(nil),       // 3: cluster.v1.SnapshotHeader
-	(*SnapshotWorkflow)(nil),     // 4: cluster.v1.SnapshotWorkflow
-	(*history.HistoryEvent)(nil), // 5: history.v1.HistoryEvent
+	(*NewRun)(nil),               // 3: cluster.v1.NewRun
+	(*SnapshotHeader)(nil),       // 4: cluster.v1.SnapshotHeader
+	(*SnapshotWorkflow)(nil),     // 5: cluster.v1.SnapshotWorkflow
+	(*history.HistoryEvent)(nil), // 6: history.v1.HistoryEvent
 }
 var file_cluster_proto_depIdxs = []int32{
 	1, // 0: cluster.v1.Command.append:type_name -> cluster.v1.AppendEvent
 	2, // 1: cluster.v1.Command.delete:type_name -> cluster.v1.DeleteWorkflow
-	5, // 2: cluster.v1.AppendEvent.event:type_name -> history.v1.HistoryEvent
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	3, // 2: cluster.v1.Command.new_run:type_name -> cluster.v1.NewRun
+	6, // 3: cluster.v1.AppendEvent.event:type_name -> history.v1.HistoryEvent
+	6, // 4: cluster.v1.NewRun.event:type_name -> history.v1.HistoryEvent
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_cluster_proto_init() }
@@ -377,6 +466,7 @@ func file_cluster_proto_init() {
 	file_cluster_proto_msgTypes[0].OneofWrappers = []any{
 		(*Command_Append)(nil),
 		(*Command_Delete)(nil),
+		(*Command_NewRun)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -384,7 +474,7 @@ func file_cluster_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cluster_proto_rawDesc), len(file_cluster_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

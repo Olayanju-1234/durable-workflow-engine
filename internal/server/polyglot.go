@@ -170,6 +170,10 @@ func (e *Engine) dispatchWorkflowTaskLocked(w *wfState, workflowType string, eve
 		History:       events,
 		TaskToken:     newLeaseToken(),
 		HistoryLength: historyLength,
+
+		RunId:                  w.runID(),
+		SuggestContinueAsNewAt: w.suggestAt,
+		HistorySizeBytes:       w.bytes,
 	}
 	e.pendingDecisions[workflowID] = &decisionTask{
 		token:         task.TaskToken,
@@ -382,6 +386,15 @@ func decisionFromCommand(cmd *WorkflowCommand) (state.Decision, error) {
 		return state.Decision{
 			Type: state.DecideCancelStep, StepName: s.GetStepName(), Sequence: s.GetSequence(), Error: s.GetReason(),
 		}, nil
+	case *WorkflowCommand_ContinueAsNew:
+		n := c.ContinueAsNew
+		if n.GetExecutionTimeoutMs() < 0 {
+			return state.Decision{}, fmt.Errorf("%w: continue-as-new has a negative execution timeout", ErrInvalidCommand)
+		}
+		return state.Decision{
+			Type: state.DecideContinueAsNew, Input: n.GetInput(), WorkflowType: n.GetWorkflowType(),
+			ExecutionTimeout: time.Duration(n.GetExecutionTimeoutMs()) * time.Millisecond,
+		}, nil
 	default:
 		return state.Decision{}, fmt.Errorf("server: unknown workflow command %T", c)
 	}
@@ -444,6 +457,10 @@ func CommandFromDecision(d state.Decision) *WorkflowCommand {
 		return &WorkflowCommand{Command: &WorkflowCommand_CancelStep{CancelStep: &CancelStepCommand{
 			StepName: d.StepName, Sequence: d.Sequence, Reason: d.Error,
 		}}}
+	case state.DecideContinueAsNew:
+		return &WorkflowCommand{Command: &WorkflowCommand_ContinueAsNew{ContinueAsNew: &ContinueAsNewCommand{
+			Input: d.Input, WorkflowType: d.WorkflowType, ExecutionTimeoutMs: d.ExecutionTimeout.Milliseconds(),
+		}}}
 	default:
 		return nil
 	}
@@ -479,7 +496,7 @@ func validateDecisions(st *state.State, ds []state.Decision) error {
 				return fmt.Errorf("%w: a noop cannot be part of a batch of commands", ErrInvalidCommand)
 			}
 			continue
-		case state.DecideCompleteWorkflow, state.DecideFailWorkflow:
+		case state.DecideCompleteWorkflow, state.DecideFailWorkflow, state.DecideContinueAsNew:
 			if i != len(ds)-1 {
 				return fmt.Errorf("%w: command %d ends the workflow but more commands follow it", ErrInvalidCommand, i+1)
 			}

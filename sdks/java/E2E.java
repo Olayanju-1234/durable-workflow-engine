@@ -136,6 +136,18 @@ public final class E2E {
             throw new IllegalStateException("stopped");
         });
 
+        // Continue-as-new: a loop keeps its history small by starting a fresh run whenever the
+        // engine suggests it (the harness's engine allows 60 events).
+        worker.workflow("JavaLoop", ctx -> {
+            int total = ctx.input().isEmpty() ? 0 : Integer.parseInt(ctx.input());
+            while (!ctx.continueAsNewSuggested()) {
+                if (total >= 50) return total + " ticks; run " + ctx.runId();
+                ctx.activity("java-tick", "");
+                total++;
+            }
+            return ctx.continueAsNew(String.valueOf(total));
+        });
+
         worker.workflow("JavaAfterRestart", ctx -> ctx.activity("java-tick", ""));
         worker.start();
 
@@ -157,6 +169,20 @@ public final class E2E {
         Map<String, Object> cancel = waitDone(worker, worker.startWorkflow("JavaCancel", "", ""));
         if (!"cancelled".equals(cancel.get("output"))) fail("cancel: output " + cancel.get("output"));
         if (!provisionCancelled.await(5, TimeUnit.SECONDS)) fail("cancel: the activity was never told");
+
+        String loopId = worker.startWorkflow("JavaLoop", "0", "");
+        Map<String, Object> loop = waitDone(worker, loopId);
+        List<Map<String, Object>> runs = worker.runs(loopId);
+        Map<String, Object> earlier = worker.describe(loopId, String.valueOf(runs.get(runs.size() - 1).get("run_id")));
+        boolean runsOk = runs.size() == 3;
+        for (int i = 1; i < runs.size(); i++) runsOk &= "CONTINUED_AS_NEW".equals(runs.get(i).get("status"));
+        if (!("50 ticks; run " + loop.get("run_id")).equals(loop.get("output")) || !runsOk
+                || ((Number) loop.get("history_length")).longValue() > 60
+                || !String.valueOf(runs.get(1).get("run_id")).equals(loop.get("continued_from_run_id"))
+                || !"0".equals(earlier.get("input"))
+                || !String.valueOf(runs.get(1).get("run_id")).equals(earlier.get("continued_as_new_run_id"))) {
+            fail("continue-as-new: output " + loop.get("output") + ", runs " + runs);
+        }
 
         // A restarted engine has forgotten every registration: the worker must notice and
         // register again before this workflow can be dispatched.

@@ -207,3 +207,70 @@ func TestReplayRestoresLostBufferedWrites(t *testing.T) {
 		t.Fatal("replay did not restore the history byte for byte")
 	}
 }
+
+func entry(t *testing.T, index uint64, cmd *Command) *raft.LogEntry {
+	t.Helper()
+	data, err := proto.Marshal(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &raft.LogEntry{Index: index, Term: 1, Data: data}
+}
+
+// A new run (continue-as-new) is applied once on every node: replaying the
+// log over a directory that already holds it changes nothing, and it is
+// refused while the workflow's run is still open.
+func TestNewRunAppliesOnceAndSurvivesReplay(t *testing.T) {
+	m, store := newTestSM(t)
+	done := &history.HistoryEvent{EventId: 2, Attributes: &history.HistoryEvent_WorkflowCompleted{
+		WorkflowCompleted: &history.WorkflowCompletedEvent{ContinuedAsNew: &history.ContinuedAsNew{RunId: "r2"}},
+	}}
+	next := &history.HistoryEvent{EventId: 1, Attributes: &history.HistoryEvent_WorkflowStarted{
+		WorkflowStarted: &history.WorkflowStartedEvent{RunId: "r2"},
+	}}
+	log := []*raft.LogEntry{
+		appendEntry(t, 1, "wf", 1),
+		entry(t, 2, &Command{Command: &Command_Append{Append: &AppendEvent{WorkflowId: "wf", Event: done}}}),
+		entry(t, 3, &Command{Command: &Command_NewRun{NewRun: &NewRun{WorkflowId: "wf", ArchiveId: "__workflowd-run~1~r1~wf", Event: next}}}),
+		appendEntry(t, 4, "wf", 2),
+	}
+	early := entry(t, 9, &Command{Command: &Command_NewRun{NewRun: &NewRun{WorkflowId: "open", ArchiveId: "__workflowd-run~1~x~open", Event: next}}})
+	mustApply(t, m, appendEntry(t, 8, "open", 1))
+	if err := mustApply(t, m, early); !errors.Is(err, ErrConflict) {
+		t.Fatalf("new run of an open workflow: %v, want ErrConflict", err)
+	}
+	for _, e := range log {
+		if err := mustApply(t, m, e); err != nil {
+			t.Fatalf("apply %d: %v", e.GetIndex(), err)
+		}
+	}
+	check := func(when string) {
+		ids, stamps := eventIDs(t, store, "wf")
+		if len(ids) != 2 || stamps[0] != 3 || stamps[1] != 4 {
+			t.Fatalf("%s: current run ids %v stamps %v, want the new run's two events (3, 4)", when, ids, stamps)
+		}
+		if ids, _ := eventIDs(t, store, "__workflowd-run~1~r1~wf"); len(ids) != 2 {
+			t.Fatalf("%s: archived run has %d events, want 2", when, len(ids))
+		}
+	}
+	check("applied")
+	restarted := newStateMachine(store, m.raftDir, m.log)
+	for _, e := range log {
+		if err := mustApply(t, restarted, e); err != nil {
+			t.Fatalf("re-apply %d: %v", e.GetIndex(), err)
+		}
+	}
+	check("replayed")
+
+	snap, err := restarted.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := decodeSnapshot(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := files["__workflowd-run~1~r1~wf"]; !ok {
+		t.Fatal("the snapshot left out the archived run")
+	}
+}

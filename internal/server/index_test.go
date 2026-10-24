@@ -35,7 +35,11 @@ func scanSummaries(t *testing.T, store *history.HistoryStore) []*WorkflowSummary
 		if err != nil {
 			t.Fatal(err)
 		}
-		out = append(out, summaryFrom(id, events, st))
+		var bytes int64
+		for _, ev := range events {
+			bytes += eventSize(ev)
+		}
+		out = append(out, summaryFrom(id, events, st, bytes))
 	}
 	return out
 }

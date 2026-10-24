@@ -347,7 +347,8 @@ func (w *Worker) decide(ctx context.Context, task *server.WorkflowTask) {
 	w.mu.Unlock()
 
 	req := &server.CompleteWorkflowTaskRequest{WorkflowId: task.GetWorkflowId(), TaskToken: task.GetTaskToken()}
-	decisions, err := replay.DecideAll(fn, task.GetHistory(), w.opts.Logger)
+	decisions, err := replay.DecideAllWith(fn, task.GetHistory(), w.opts.Logger,
+		replay.Options{SuggestContinueAsNewAt: task.GetSuggestContinueAsNewAt()})
 	switch {
 	case err != nil:
 		// Non-determinism or a panic: the code can never replay this history, so

@@ -278,6 +278,24 @@ Every limit and every cancellation is history, so recovery and replay see it:
 - A finished workflow's still-open steps are presented as `CANCELLED` by `GetWorkflow`; nothing is
   recorded for them.
 
+## Runs, continue-as-new and limits ([ADR-0012](adr/0012-continue-as-new-and-limits.md))
+
+A workflow id has one current run in `<id>.history`; every run has a run id on its
+`WorkflowStarted`. Continue-as-new records the run's end (`WorkflowCompleted` with
+`continued_as_new`: the next run's id, type and input), then `HistoryLog.NewRun` swaps the
+file: link the finished history to `__workflowd-run~<closed at>~<run id>~<workflow id>`,
+write the next run's first event to `<id>.history.next`, rename it over `<id>.history`
+(fsyncing the directory between). A crash before the rename leaves the finished run
+current, and recovery redoes the swap from its last event. In a cluster it is one Raft
+command (`NewRun`). Archived runs are reserved names, so recovery, the index and listing
+skip them; retention purges them by the close time in their name. Timers carry the run id,
+so one left over from an earlier run never fires into the next.
+
+Each run's history is bounded (events, bytes) and so is each payload. At 80% the engine
+warns and workflow tasks carry the event id where the history crossed it; the SDKs turn
+that into a deterministic `continueAsNewSuggested()`. At the limit the event that would
+cross it is replaced by the workflow's failure.
+
 ## Why no sticky queues
 
 Temporal's sticky queues route a workflow's tasks back to the worker that holds it in memory,

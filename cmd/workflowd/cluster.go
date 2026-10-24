@@ -106,7 +106,7 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 		GRPCAddr: advertised(cfg.addr, selfHost), HTTPAddr: advertised(cfg.httpAddr, selfHost),
 		DataDir: dataDir, Store: store, Logger: logger, TickInterval: cc.tick, PeerTLS: cfg.sec.peerTLS,
 		NewEngine: func(hl server.HistoryLog) *server.Engine {
-			e := server.NewEngine(store, logger, server.WithHistoryLog(hl))
+			e := server.NewEngine(store, logger, server.WithHistoryLog(hl), server.WithLimits(cfg.limits))
 			registerDemoTypes(e)
 			return e
 		},
@@ -129,7 +129,8 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 		logger.Warn("Raft peer traffic is plaintext and unauthenticated", "hint", "set --raft-tls-cert, --raft-tls-key and --raft-tls-ca")
 	}
 	if cfg.httpAddr != "" {
-		opts := append(cfg.sec.httpOptions(), server.WithEngineSource(cl), server.WithClusterStatus(cl.StatusMap))
+		opts := append(cfg.sec.httpOptions(), server.WithEngineSource(cl), server.WithClusterStatus(cl.StatusMap),
+			server.WithRequestLimits(cfg.limits))
 		if cfg.demoWorker {
 			opts = append(opts, server.WithDemoWorker())
 		}
@@ -148,7 +149,7 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.addr, err)
 	}
-	gs := grpc.NewServer(cfg.sec.grpcServerOptions()...)
+	gs := grpc.NewServer(cfg.grpcServerOptions()...)
 	server.RegisterWorkflowServiceServer(gs, server.NewGRPCServerFrom(cl, logger))
 	go func() { _ = gs.Serve(lis) }()
 	logger.Info("gRPC server listening", "addr", cfg.addr)

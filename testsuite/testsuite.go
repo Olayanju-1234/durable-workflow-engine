@@ -68,6 +68,8 @@ type Env struct {
 	executed   bool
 	agenda     []happening
 	order      int
+	runs       int
+	suggestAt  int // a run's history length at which ContinueAsNewSuggested turns true (0: never)
 }
 
 // NewEnv returns an environment whose virtual clock starts at
@@ -103,6 +105,15 @@ func (e *Env) SignalAfter(d time.Duration, signal string, payload []byte) {
 	slices.SortStableFunc(e.signals, func(a, b scheduledSignal) int { return a.at.Compare(b.at) })
 }
 
+// SuggestContinueAsNewAfter makes ctx.ContinueAsNewSuggested() true once a
+// run's history has this many events, as the engine does near its limits.
+func (e *Env) SuggestContinueAsNewAfter(events int) {
+	e.suggestAt = events
+}
+
+// Runs is how many runs the workflow took: 1, plus one per continue-as-new.
+func (e *Env) Runs() int { return e.runs }
+
 // Now is the virtual time: where the clock stood when the workflow finished.
 func (e *Env) Now() time.Time { return e.now }
 
@@ -123,9 +134,7 @@ func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 		return nil, errors.New("testsuite: an Env runs one workflow; create another")
 	}
 	e.executed = true
-	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
-		WorkflowStarted: &history.WorkflowStartedEvent{WorkflowId: WorkflowID, WorkflowType: "test", Input: input},
-	}})
+	e.startRun(input, "")
 	for _, sig := range e.signals {
 		e.push(happening{at: sig.at, signal: &sig})
 	}
@@ -133,7 +142,7 @@ func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 	decide := true
 	for range maxDecisions {
 		if decide {
-			ds, err := replay.DecideAll(fn, e.events, e.logger)
+			ds, err := replay.DecideAllWith(fn, e.events, e.logger, replay.Options{SuggestContinueAsNewAt: e.suggestion()})
 			if err != nil {
 				return nil, fmt.Errorf("testsuite: %w", err)
 			}
@@ -166,6 +175,19 @@ func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 					return d.Output, nil
 				case state.DecideFailWorkflow:
 					return nil, fmt.Errorf("%w: %s", ErrWorkflowFailed, d.Error)
+				case state.DecideContinueAsNew:
+					if d.WorkflowType != "" {
+						return nil, fmt.Errorf("testsuite: continue as new to type %q: an Env runs one workflow function", d.WorkflowType)
+					}
+					st, err := e.state()
+					if err != nil {
+						return nil, err
+					}
+					// What the old run planned dies with it; signals still to come
+					// go to the new run, as they would on a server.
+					e.agenda = slices.DeleteFunc(e.agenda, func(h happening) bool { return h.signal == nil })
+					e.events = nil
+					e.startRun(d.Input, st.RunID)
 				}
 			}
 			decide = false
@@ -214,6 +236,25 @@ func (e *Env) ExecuteWorkflow(fn workflow.Func, input []byte) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("testsuite: workflow made %d decisions without finishing", maxDecisions)
+}
+
+// startRun records the WorkflowStarted of the next run.
+func (e *Env) startRun(input []byte, continuedFrom string) {
+	e.runs++
+	e.append(&history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowStarted{
+		WorkflowStarted: &history.WorkflowStartedEvent{
+			WorkflowId: WorkflowID, WorkflowType: "test", Input: input,
+			RunId: fmt.Sprintf("test-run-%d", e.runs), ContinuedFromRunId: continuedFrom,
+		},
+	}})
+}
+
+// suggestion is the event id at which the run reached SuggestContinueAsNewAfter.
+func (e *Env) suggestion() int64 {
+	if e.suggestAt <= 0 || len(e.events) < e.suggestAt {
+		return 0
+	}
+	return int64(e.suggestAt)
 }
 
 func isNoop(ds []state.Decision) bool {

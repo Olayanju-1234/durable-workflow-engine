@@ -44,6 +44,10 @@ func init() {
 	rpc.ConnOf = func(c any) *rpc.Conn { return c.(*Client).conn }
 }
 
+// maxReceiveBytes is the largest reply a client accepts: room for a full
+// history at the engine's default limit, with headroom.
+const maxReceiveBytes = 128 << 20
+
 // Options configures a Client.
 type Options struct {
 	// Addrs are workflowd gRPC addresses, e.g. "localhost:7233". For a cluster,
@@ -78,7 +82,10 @@ func Dial(opts Options) (*Client, error) {
 	if opts.TLS != nil {
 		creds = credentials.NewTLS(opts.TLS)
 	}
-	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	// A workflow task carries its whole history, which may be tens of
+	// megabytes (the engine's --max-history-bytes), past gRPC's 4 MiB default.
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxReceiveBytes))}
 	if opts.AuthToken != "" {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerToken(opts.AuthToken)))
 	}
@@ -206,18 +213,49 @@ func (c *Client) CancelWorkflow(ctx context.Context, workflowID, reason string) 
 	return wrap("cancel workflow", err)
 }
 
-// DescribeWorkflow returns a workflow's status, steps, input and output.
+// DescribeWorkflow returns a workflow's status, steps, input and output: its
+// current run's.
 func (c *Client) DescribeWorkflow(ctx context.Context, workflowID string) (*WorkflowDescription, error) {
+	return c.DescribeWorkflowRun(ctx, workflowID, "")
+}
+
+// DescribeWorkflowRun describes one run of a workflow id, current or earlier
+// (see ListWorkflowRuns); an empty runID means the current one.
+func (c *Client) DescribeWorkflowRun(ctx context.Context, workflowID, runID string) (*WorkflowDescription, error) {
 	var resp *server.GetWorkflowResponse
 	_, err := c.conn.Call(ctx, func(ctx context.Context, s server.WorkflowServiceClient, opt grpc.CallOption) error {
 		var err error
-		resp, err = s.GetWorkflow(ctx, &server.GetWorkflowRequest{WorkflowId: workflowID}, opt)
+		resp, err = s.GetWorkflow(ctx, &server.GetWorkflowRequest{WorkflowId: workflowID, RunId: runID}, opt)
 		return err
 	})
 	if err != nil {
 		return nil, wrap("describe workflow", err)
 	}
 	return describe(resp), nil
+}
+
+// ListWorkflowRuns lists the runs kept for a workflow id: the current one,
+// then earlier ones (continued as new), newest first.
+func (c *Client) ListWorkflowRuns(ctx context.Context, workflowID string) ([]Run, error) {
+	var resp *server.ListWorkflowRunsResponse
+	_, err := c.conn.Call(ctx, func(ctx context.Context, s server.WorkflowServiceClient, opt grpc.CallOption) error {
+		var err error
+		resp, err = s.ListWorkflowRuns(ctx, &server.ListWorkflowRunsRequest{WorkflowId: workflowID}, opt)
+		return err
+	})
+	if err != nil {
+		return nil, wrap("list workflow runs", err)
+	}
+	runs := make([]Run, 0, len(resp.GetRuns()))
+	for _, r := range resp.GetRuns() {
+		st, ok := statuses[r.GetStatus()]
+		if !ok {
+			st = StatusUnknown
+		}
+		runs = append(runs, Run{RunID: r.GetRunId(), Status: st, StartedAt: unixNanos(r.GetStartedAt()),
+			ClosedAt: unixNanos(r.GetClosedAt()), Current: r.GetCurrent()})
+	}
+	return runs, nil
 }
 
 // WaitForResult polls until the workflow finishes and returns its output. A

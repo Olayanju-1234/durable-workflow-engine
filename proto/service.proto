@@ -47,6 +47,9 @@ service WorkflowService {
   // stop). Workers still running its activities learn it from their next
   // heartbeat or completion, which fail with an ActivityCancelled detail.
   rpc CancelWorkflow(CancelWorkflowRequest) returns (CancelWorkflowResponse);
+  // ListWorkflowRuns lists every run kept for a workflow id: the current one
+  // and the earlier runs continue-as-new (or id reuse) left behind.
+  rpc ListWorkflowRuns(ListWorkflowRunsRequest) returns (ListWorkflowRunsResponse);
 
   // ---- Polyglot workflow execution -------------------------------------
   //
@@ -156,6 +159,15 @@ message WorkflowTask {
   // whose history has moved on since — optimistic concurrency, which is what
   // makes re-dispatching a workflow task safe (see CompleteWorkflowTask).
   int64 history_length = 5;
+  // The run this history belongs to.
+  string run_id = 6;
+  // The id of the event at which the history crossed the engine's warning
+  // threshold (a share of its event and size limits), zero until it does.
+  // Code that has observed a result at or after it should continue as new;
+  // because it is an event id, replay sees the same answer every time.
+  int64 suggest_continue_as_new_at = 7;
+  // The history's size in bytes, as stored.
+  int64 history_size_bytes = 8;
 }
 
 message PollWorkflowTaskResponse {
@@ -228,6 +240,15 @@ message FailWorkflowCommand {
   string error = 1;
 }
 
+// ContinueAsNewCommand ends this run and starts a fresh one under the same
+// workflow id with an empty history: how a workflow that loops forever keeps
+// its history small. Unset fields keep this run's type and execution timeout.
+message ContinueAsNewCommand {
+  bytes input = 1;
+  string workflow_type = 2;
+  int64 execution_timeout_ms = 3;
+}
+
 message WorkflowCommand {
   oneof command {
     ScheduleActivityCommand schedule_activity = 1;
@@ -237,6 +258,7 @@ message WorkflowCommand {
     FailWorkflowCommand fail_workflow = 5;
     RecordMarkerCommand record_marker = 6;
     CancelStepCommand cancel_step = 7;
+    ContinueAsNewCommand continue_as_new = 8;
   }
 }
 
@@ -271,6 +293,8 @@ enum WorkflowStatus {
   WORKFLOW_STATUS_TERMINATED = 6;
   // Cancelled by a client; on disk a WorkflowFailed event with cancelled set.
   WORKFLOW_STATUS_CANCELLED = 7;
+  // A finished run that continued as new; its workflow id goes on as a new run.
+  WORKFLOW_STATUS_CONTINUED_AS_NEW = 8;
 }
 
 message StartWorkflowRequest {
@@ -287,6 +311,8 @@ message StartWorkflowRequest {
 
 message StartWorkflowResponse {
   string workflow_id = 1;
+  // The run this start began.
+  string run_id = 2;
 }
 
 message PollTaskRequest {
@@ -397,6 +423,9 @@ message WorkflowSummary {
   // — a broken log must be visible to operators, never silently skipped.
   string error = 6;
   int64 history_length = 7;
+  // The run this summary describes, and its history's size in bytes.
+  string run_id = 8;
+  int64 history_size_bytes = 9;
 }
 
 message ListWorkflowsResponse {
@@ -405,6 +434,9 @@ message ListWorkflowsResponse {
 
 message GetWorkflowRequest {
   string workflow_id = 1;
+  // An earlier run of the workflow id (see ListWorkflowRuns); empty means the
+  // current one.
+  string run_id = 2;
 }
 
 // StepInfo is the reconstructed view of one step, as replayed from history.
@@ -435,6 +467,29 @@ message GetWorkflowResponse {
   bytes input = 3;
   // Workflow output once COMPLETED.
   bytes output = 4;
+  // The run this one continued from, and (for a run that continued as new)
+  // the run that followed it.
+  string continued_from_run_id = 5;
+  string continued_as_new_run_id = 6;
+}
+
+message ListWorkflowRunsRequest {
+  string workflow_id = 1;
+}
+
+// RunInfo is one run of a workflow id: the current one first, then earlier
+// runs (continued as new, or finished before the id was reused), newest first.
+message RunInfo {
+  string run_id = 1;
+  WorkflowStatus status = 2;
+  // Unix nanoseconds.
+  int64 started_at = 3;
+  int64 closed_at = 4;
+  bool current = 5;
+}
+
+message ListWorkflowRunsResponse {
+  repeated RunInfo runs = 1;
 }
 
 message TerminateWorkflowRequest {

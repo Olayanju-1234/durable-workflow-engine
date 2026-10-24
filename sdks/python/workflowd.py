@@ -176,6 +176,15 @@ class _Yield(BaseException):
         super().__init__("workflowd internal yield")
 
 
+class _ContinueAsNew(BaseException):
+    """Raised by ctx.continue_as_new: ends the replay with that command. A
+    BaseException, so an ``except Exception`` in the workflow cannot stop it."""
+
+    def __init__(self, command: dict):
+        super().__init__("workflowd continue as new")
+        self.command = command
+
+
 class _NonDeterminism(BaseException):
     """The workflow code no longer matches the recorded history.
 
@@ -299,6 +308,36 @@ class Context:
         self._started_at = _parse_time(task.get("started_at"))
         self._now = self._started_at  # the latest result the code has received
         self._random: Optional[random.Random] = None
+        self.run_id: str = task.get("run_id", "")  # a workflow that continues as new gets a new one
+        self._suggest_at: int = task.get("suggest_continue_as_new_at") or 0
+        self._observed_event_id = 0  # the newest result the code has received
+
+    def continue_as_new_suggested(self) -> bool:
+        """True once the history has grown past the engine's warning share of
+        its limits, as of the latest result the code has received, so every
+        replay answers the same at the same point. Then ``return
+        ctx.continue_as_new(state)``: a history that reaches its limit fails
+        the workflow."""
+        return self._suggest_at > 0 and self._observed_event_id >= self._suggest_at
+
+    def continue_as_new(
+        self, payload: Any = "", *, workflow_type: Optional[str] = None, execution_timeout: Optional[float] = None
+    ) -> Any:
+        """End this run and start a fresh one under the same workflow id, with an
+        empty history and ``payload`` as its input: ``return
+        ctx.continue_as_new(state)``. It does not return. Steps started before it
+        still run; signals this run has not consumed are not carried over.
+        ``workflow_type`` and ``execution_timeout`` (seconds) change the next
+        run's type and timeout (default: this run's)."""
+        if self._next < len(self._steps):
+            raise _NonDeterminism(
+                f"non-determinism: continued as new after {self._next} steps, but history has {len(self._steps)}"
+            )
+        command = _put_payload({"type": "continue_as_new"}, "input", payload)
+        if workflow_type:
+            command["workflow_type"] = workflow_type
+        _put_timeouts(command, execution_timeout=execution_timeout)
+        raise _ContinueAsNew(command)
 
     def now(self) -> datetime:
         """The workflow's deterministic clock (UTC): when the latest step result
@@ -330,6 +369,7 @@ class Context:
         at = _parse_time(rec.get("resolved_at"))
         if at is not None and (self._now is None or at > self._now):
             self._now = at
+        self._observed_event_id = max(self._observed_event_id, rec.get("resolved_event_id") or 0)
 
     def input_as(self, decode: str = "text") -> Any:
         """The start input decoded as "text" (same as ctx.input), "json" or "bytes"."""
@@ -538,6 +578,8 @@ def decide(fn: Callable[[Context], Any], task: dict) -> dict:
         return {"commands": ctx._pending + [_put_payload({"type": "complete_workflow"}, "output", output)]}
     except _Yield:
         return {"commands": list(ctx._pending)}
+    except _ContinueAsNew as can:
+        return {"commands": ctx._pending + [can.command]}
     except _NonDeterminism as err:
         return {"replay_error": str(err)}
     except Exception as err:  # WorkflowFailure, uncaught ActivityFailure, bugs
@@ -751,8 +793,17 @@ class Worker:
             "POST", f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}/cancel", {"reason": reason}
         )
 
-    def describe(self, workflow_id: str) -> dict:
-        return self.conn.request("GET", f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}")
+    def describe(self, workflow_id: str, run_id: Optional[str] = None) -> dict:
+        """A workflow's current state; with ``run_id``, an earlier run's."""
+        path = f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}"
+        if run_id:
+            path += f"?run_id={urllib.parse.quote(run_id, safe='')}"
+        return self.conn.request("GET", path)
+
+    def runs(self, workflow_id: str) -> List[dict]:
+        """The runs kept for a workflow id: the current one, then earlier ones
+        (continued as new), newest first."""
+        return self.conn.request("GET", f"/api/workflows/{urllib.parse.quote(workflow_id, safe='')}/runs")["runs"]
 
     # -- serving loops --
 

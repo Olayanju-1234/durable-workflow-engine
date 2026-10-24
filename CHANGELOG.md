@@ -27,6 +27,31 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `isLeaseLost()` / `isCancelled()`). `worker.start()` serves in the background; `worker.describe`.
   Several commands per task (`commands`), like the other SDKs.
 - The Java SDK runs end to end from `go test ./sdks` when a JDK is installed (as in CI).
+- **Continue-as-new** (ADR-0012): a workflow ends its run and starts a fresh one under the same
+  workflow id with an empty history. Go `return nil, workflow.ContinueAsNew(state)`, TypeScript
+  `return ctx.continueAsNew(state)`, Python `return ctx.continue_as_new(state)`, Java
+  `return ctx.continueAsNew(state)`; the `continue_as_new` command. Every run has a run id
+  (`run_id`, `ctx.Info().RunID`, `ctx.runId`); earlier runs are kept until retention removes them:
+  `GET /api/workflows/{id}/runs`, `GET /api/workflows/{id}?run_id=`, gRPC `ListWorkflowRuns`, Go
+  `client.ListWorkflowRuns` / `DescribeWorkflowRun`, `worker.runs` / `describe(id, runId)` in the
+  other SDKs. Status `CONTINUED_AS_NEW` (earlier runs). Crash-safe: recovery finishes a
+  continue-as-new that a crash interrupted. The test environment follows it (`env.Runs()`).
+- **History and payload limits** (ADR-0012): `--max-history-events` (51,200), `--max-history-bytes`
+  (50 MiB) per run, `--max-payload-bytes` (2 MiB) per payload on HTTP and gRPC alike. At 80% of a
+  history limit the engine warns and `continueAsNewSuggested()` (all SDKs) turns true, at the same
+  point on every replay; at the limit the workflow fails with a clear error. Oversized payloads are
+  refused (413 / `RESOURCE_EXHAUSTED`) or, when produced inside, fail the step (`PayloadTooLarge`)
+  or the workflow. Metric `workflowd_history_limit_total{kind}`; `history_size_bytes` on workflows.
+  Workflow tasks carry `run_id`, `history_size_bytes` and `suggest_continue_as_new_at`.
+
+### Changed
+- HTTP request bodies may be up to four payloads plus 1 MiB (9 MiB by default; was 1 MiB), the
+  same as gRPC messages; the Go client accepts replies up to 128 MiB, so a large history reaches it.
+- New workflow ids are limited to 190 bytes, so an earlier run's file name fits.
+- Start returns the run id (`run_id` in the HTTP response, `StartWorkflowResponse.run_id`).
+
+### Fixed
+- Retention skipped cancelled workflows; it now purges them, and earlier runs of continued workflows.
 
 ## [0.2.0] - 2026-10-23
 

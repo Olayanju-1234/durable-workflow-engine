@@ -29,7 +29,8 @@ import (
 //	GET  /api/health
 //	GET  /api/workflows[?status=RUNNING&q=&limit=&offset=]
 //	POST /api/workflows                      {"type","input","workflow_id","execution_timeout_ms"}
-//	GET  /api/workflows/{id}
+//	GET  /api/workflows/{id}[?run_id=]
+//	GET  /api/workflows/{id}/runs
 //	POST /api/workflows/{id}/terminate       {"reason"}
 //	POST /api/workflows/{id}/cancel          {"reason"}
 //	POST /api/workflows/{id}/signal          {"name","payload"}
@@ -46,10 +47,16 @@ type HTTPAPI struct {
 	// clusterStatus, when set, is reported by /api/health under "cluster".
 	clusterStatus func() map[string]any
 	startedAt     time.Time
+	// maxBody is the largest request body accepted (Limits.RequestBytes).
+	maxBody int
 }
 
 func NewHTTPAPI(engine *Engine, logger *slog.Logger, opts ...HTTPOption) *HTTPAPI {
-	a := &HTTPAPI{src: staticSource{engine}, log: logger, startedAt: time.Now()}
+	limits := Limits{MaxPayloadBytes: DefaultMaxPayloadBytes}
+	if engine != nil {
+		limits = engine.Limits()
+	}
+	a := &HTTPAPI{src: staticSource{engine}, log: logger, startedAt: time.Now(), maxBody: limits.RequestBytes()}
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -82,6 +89,13 @@ func WithDemoWorker() HTTPOption {
 // of a fixed one: in a cluster, the leader's, and a leader hint elsewhere.
 func WithEngineSource(src EngineSource) HTTPOption {
 	return func(a *HTTPAPI) { a.src = src }
+}
+
+// WithRequestLimits makes the API accept request bodies up to
+// l.RequestBytes(), for an API whose engine is not known at construction (a
+// cluster's).
+func WithRequestLimits(l Limits) HTTPOption {
+	return func(a *HTTPAPI) { a.maxBody = l.RequestBytes() }
 }
 
 // WithClusterStatus adds this node's cluster view to /api/health.
@@ -125,6 +139,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/workflows", a.listWorkflows)
 	mux.HandleFunc("POST /api/workflows", a.startWorkflow)
 	mux.HandleFunc("GET /api/workflows/{id}", a.getWorkflow)
+	mux.HandleFunc("GET /api/workflows/{id}/runs", a.listWorkflowRuns)
 	mux.HandleFunc("POST /api/workflows/{id}/terminate", a.terminateWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", a.cancelWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
@@ -208,6 +223,9 @@ type summaryDTO struct {
 	UpdatedAt     string `json:"updated_at,omitempty"`
 	Error         string `json:"error,omitempty"`
 	HistoryLength int64  `json:"history_length"`
+	RunID         string `json:"run_id,omitempty"`
+	// The history's size on disk, against the engine's history size limit.
+	HistorySizeBytes int64 `json:"history_size_bytes,omitempty"`
 }
 
 type stepDTO struct {
@@ -239,6 +257,9 @@ type workflowDTO struct {
 	Output       string     `json:"output,omitempty"`
 	OutputBase64 string     `json:"output_base64,omitempty"`
 	Steps        []*stepDTO `json:"steps"`
+	// The run this one continued from, and the one that followed it.
+	ContinuedFromRunID  string `json:"continued_from_run_id,omitempty"`
+	ContinuedAsNewRunID string `json:"continued_as_new_run_id,omitempty"`
 }
 
 // health is answered by every node, leader or not: a follower is healthy too.
@@ -332,7 +353,7 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
-	resp, err := e.GetWorkflow(r.PathValue("id"))
+	resp, err := e.GetWorkflowRun(r.PathValue("id"), r.URL.Query().Get("run_id"))
 	switch {
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
@@ -366,7 +387,43 @@ func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		Output:       string(resp.GetOutput()),
 		OutputBase64: base64Twin(resp.GetOutput()),
 		Steps:        steps,
+
+		ContinuedFromRunID:  resp.GetContinuedFromRunId(),
+		ContinuedAsNewRunID: resp.GetContinuedAsNewRunId(),
 	})
+}
+
+// runDTO is one run of a workflow id.
+type runDTO struct {
+	RunID     string `json:"run_id"`
+	Status    string `json:"status"`
+	StartedAt string `json:"started_at,omitempty"`
+	ClosedAt  string `json:"closed_at,omitempty"`
+	Current   bool   `json:"current,omitempty"`
+}
+
+func (a *HTTPAPI) listWorkflowRuns(w http.ResponseWriter, r *http.Request) {
+	e := a.engine(w)
+	if e == nil {
+		return
+	}
+	runs, err := e.ListWorkflowRuns(r.PathValue("id"))
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeError(w, http.StatusNotFound, err)
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]*runDTO, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, &runDTO{
+			RunID: run.GetRunId(), Status: statusName(run.GetStatus()), StartedAt: formatNanos(run.GetStartedAt()),
+			ClosedAt: formatNanos(run.GetClosedAt()), Current: run.GetCurrent(),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": out})
 }
 
 func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -378,8 +435,8 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		// Optional: the workflow times out this long after it starts.
 		ExecutionTimeoutMs int64 `json:"execution_timeout_ms"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := a.decodeJSON(r, &body); err != nil {
+		writeError(w, decodeStatus(err), err)
 		return
 	}
 	input, err := payloadFrom(body.Input, body.InputBase64, "input_base64")
@@ -391,7 +448,7 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		return
 	}
-	id, err := e.StartWorkflow(body.Type, input, body.WorkflowID,
+	started, err := e.Start(body.Type, input, body.WorkflowID,
 		WithExecutionTimeout(time.Duration(body.ExecutionTimeoutMs)*time.Millisecond))
 	switch {
 	case err == nil:
@@ -402,6 +459,9 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		// The caller must fix the request: the type is not registered here.
 		writeError(w, http.StatusBadRequest, err)
 		return
+	case errors.Is(err, ErrPayloadTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, err)
+		return
 	case errors.Is(err, ErrAlreadyExists):
 		// A supplied id collided with an existing workflow — a conflict, not a
 		// malformed request; the caller picks a new id (or reuses the workflow).
@@ -411,7 +471,7 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"workflow_id": id})
+	writeJSON(w, http.StatusCreated, map[string]string{"workflow_id": started.WorkflowID, "run_id": started.RunID})
 }
 
 func (a *HTTPAPI) terminateWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -429,8 +489,8 @@ func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done strin
 	}
 	// An empty body is valid (reason is optional).
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &body); err != nil {
-			writeError(w, http.StatusBadRequest, err)
+		if err := a.decodeJSON(r, &body); err != nil {
+			writeError(w, decodeStatus(err), err)
 			return
 		}
 	}
@@ -461,8 +521,8 @@ func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 		// Optional idempotency key: a retry with the same key is recorded once.
 		RequestID string `json:"request_id"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := a.decodeJSON(r, &body); err != nil {
+		writeError(w, decodeStatus(err), err)
 		return
 	}
 	payload, err := payloadFrom(body.Payload, body.PayloadBase64, "payload_base64")
@@ -480,9 +540,11 @@ func (a *HTTPAPI) signalWorkflow(w http.ResponseWriter, r *http.Request) {
 			a.writeNotLeader(w, err)
 		case errors.Is(err, ErrInvalidArgument):
 			writeError(w, http.StatusBadRequest, err)
+		case errors.Is(err, ErrPayloadTooLarge):
+			writeError(w, http.StatusRequestEntityTooLarge, err)
 		case errors.Is(err, ErrNotFound):
 			writeError(w, http.StatusNotFound, err)
-		case errors.Is(err, ErrAlreadyTerminal):
+		case errors.Is(err, ErrAlreadyTerminal), errors.Is(err, ErrHistoryLimit):
 			writeError(w, http.StatusConflict, err)
 		default:
 			writeError(w, http.StatusInternalServerError, err)
@@ -501,6 +563,9 @@ func toSummaryDTO(s *WorkflowSummary) *summaryDTO {
 		UpdatedAt:     formatNanos(s.GetUpdatedAt()),
 		Error:         s.GetError(),
 		HistoryLength: s.GetHistoryLength(),
+
+		RunID:            s.GetRunId(),
+		HistorySizeBytes: s.GetHistorySizeBytes(),
 	}
 }
 
@@ -535,13 +600,27 @@ func formatNanos(ns int64) string {
 	return time.Unix(0, ns).UTC().Format(time.RFC3339Nano)
 }
 
-func decodeJSON(r *http.Request, dst any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+// decodeJSON reads a request body of at most the engine's request limit. An
+// over-long body is ErrPayloadTooLarge (413).
+func (a *HTTPAPI) decodeJSON(r *http.Request, dst any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, int64(a.maxBody)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		var tooLong *http.MaxBytesError
+		if errors.As(err, &tooLong) {
+			return fmt.Errorf("%w: the request body is over %d bytes", ErrPayloadTooLarge, a.maxBody)
+		}
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil
+}
+
+// decodeStatus is the answer to a body decodeJSON refused.
+func decodeStatus(err error) int {
+	if errors.Is(err, ErrPayloadTooLarge) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {

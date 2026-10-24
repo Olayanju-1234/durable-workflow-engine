@@ -48,7 +48,7 @@ func (e *Engine) indexLocked(w *wfState) {
 	case w.fold.Err() != nil:
 		sum = &WorkflowSummary{WorkflowId: w.id, Error: fmt.Sprintf("history invalid: %v", w.fold.Err())}
 	default:
-		sum = summaryFrom(w.id, w.events, w.fold.State())
+		sum = summaryFrom(w.id, w.events, w.fold.State(), w.bytes)
 	}
 	e.idx.mu.Lock()
 	defer e.idx.mu.Unlock()
@@ -98,7 +98,7 @@ func (e *Engine) finishIndex(err error) {
 func (e *Engine) indexWorkflow(id string) {
 	w := e.lockWorkflow(id)
 	defer e.unlockWorkflow(w)
-	if err := w.load(e.store); err != nil {
+	if err := w.load(e.store, e.limits); err != nil {
 		e.idx.mu.Lock()
 		if e.idx.entries != nil {
 			e.idx.entries[id] = &WorkflowSummary{WorkflowId: id, Error: fmt.Sprintf("history unreadable: %v", err)}

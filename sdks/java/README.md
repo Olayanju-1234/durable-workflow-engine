@@ -48,6 +48,9 @@ String answer = ctx.waitForSignal("answer", "approved", Duration.ofHours(1));
 ctx.sleepUntil("reminder", ctx.now().plus(Duration.ofDays(2)));
 double jitter = ctx.random();
 
+// A loop that runs forever keeps its history small: a fresh run, same workflow id.
+if (ctx.continueAsNewSuggested()) return ctx.continueAsNew(state);
+
 // An activity that learns when to stop (lease lost, timeout, cancelled).
 worker.activityWithContext("provision", (input, actx) -> {
     while (!actx.isLeaseLost()) { /* a chunk of work */ }

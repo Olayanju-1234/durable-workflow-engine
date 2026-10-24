@@ -64,7 +64,7 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 	if err != nil {
 		return nil, err
 	}
-	id, err := e.StartWorkflow(req.GetWorkflowType(), req.GetInput(), req.GetWorkflowId(),
+	started, err := e.Start(req.GetWorkflowType(), req.GetInput(), req.GetWorkflowId(),
 		WithExecutionTimeout(time.Duration(req.GetExecutionTimeoutMs())*time.Millisecond))
 	switch {
 	case err == nil:
@@ -72,13 +72,15 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 		return nil, s.notLeader(ctx, err)
 	case errors.Is(err, ErrUnknownType), errors.Is(err, ErrInvalidArgument):
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	case errors.Is(err, ErrPayloadTooLarge):
+		return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
 	case errors.Is(err, ErrAlreadyExists):
 		return nil, status.Errorf(codes.AlreadyExists, "%v", err)
 	default:
 		// History I/O failed server-side; a retry may succeed.
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
-	return &StartWorkflowResponse{WorkflowId: id}, nil
+	return &StartWorkflowResponse{WorkflowId: started.WorkflowID, RunId: started.RunID}, nil
 }
 
 func (s *GRPCServer) PollTask(ctx context.Context, req *PollTaskRequest) (*PollTaskResponse, error) {
@@ -165,9 +167,11 @@ func (s *GRPCServer) SignalWorkflow(ctx context.Context, req *SignalWorkflowRequ
 		return nil, s.notLeader(ctx, err)
 	case errors.Is(err, ErrInvalidArgument):
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	case errors.Is(err, ErrPayloadTooLarge):
+		return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
 	case errors.Is(err, ErrNotFound):
 		return nil, status.Errorf(codes.NotFound, "%v", err)
-	case errors.Is(err, ErrAlreadyTerminal):
+	case errors.Is(err, ErrAlreadyTerminal), errors.Is(err, ErrHistoryLimit):
 		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
 	default:
 		return nil, status.Errorf(codes.Internal, "%v", err)
@@ -252,7 +256,7 @@ func (s *GRPCServer) GetWorkflow(ctx context.Context, req *GetWorkflowRequest) (
 	if err != nil {
 		return nil, err
 	}
-	resp, err := e.GetWorkflow(req.GetWorkflowId())
+	resp, err := e.GetWorkflowRun(req.GetWorkflowId(), req.GetRunId())
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return nil, status.Errorf(codes.NotFound, "%v", err)
@@ -295,4 +299,19 @@ func (s *GRPCServer) endWorkflow(ctx context.Context, id, reason string, end fun
 	default:
 		return status.Errorf(codes.Internal, "%v", err)
 	}
+}
+
+func (s *GRPCServer) ListWorkflowRuns(ctx context.Context, req *ListWorkflowRunsRequest) (*ListWorkflowRunsResponse, error) {
+	e, err := s.engine(ctx)
+	if err != nil {
+		return nil, err
+	}
+	runs, err := e.ListWorkflowRuns(req.GetWorkflowId())
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	case err != nil:
+		return nil, status.Errorf(codes.Internal, "%v", err)
+	}
+	return &ListWorkflowRunsResponse{Runs: runs}, nil
 }

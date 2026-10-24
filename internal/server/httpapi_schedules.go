@@ -61,8 +61,8 @@ func (a *HTTPAPI) createSchedule(w http.ResponseWriter, r *http.Request) {
 		InputBase64   *string `json:"input_base64"`
 		SkipIfRunning bool    `json:"skip_if_running"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if err := a.decodeJSON(r, &body); err != nil {
+		writeError(w, decodeStatus(err), err)
 		return
 	}
 	input, err := payloadFrom(body.Input, body.InputBase64, "input_base64")

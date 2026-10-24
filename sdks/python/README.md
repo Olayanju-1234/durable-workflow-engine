@@ -49,6 +49,10 @@ if ctx.get_version("fraud-check", DEFAULT_VERSION, 1) == 1:
     ctx.activity("fraud-check", receipt)
 order_id = ctx.side_effect("id", lambda: str(uuid.uuid4()))
 
+# A loop that runs forever keeps its history small: a fresh run, same workflow id.
+if ctx.continue_as_new_suggested():
+    return ctx.continue_as_new(state)
+
 # A deterministic clock and random numbers (the same on every replay); wait with a timeout.
 deadline = ctx.now() + timedelta(days=2)
 ctx.sleep_until("reminder", deadline)

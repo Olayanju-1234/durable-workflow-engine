@@ -35,3 +35,9 @@ func (w Workflow) Decide(events []*history.HistoryEvent) (state.Decision, error)
 func (w Workflow) DecideAll(events []*history.HistoryEvent) ([]state.Decision, error) {
 	return replay.DecideAll(w.Fn, events, nil)
 }
+
+// DecideAllSuggesting is DecideAll that also says where the history crossed
+// the engine's warning threshold.
+func (w Workflow) DecideAllSuggesting(events []*history.HistoryEvent, suggestAt int64) ([]state.Decision, error) {
+	return replay.DecideAllWith(w.Fn, events, nil, replay.Options{SuggestContinueAsNewAt: suggestAt})
+}

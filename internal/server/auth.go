@@ -16,8 +16,9 @@ import (
 // readMethods are the gRPC calls that only read workflow state; WithPublicReads
 // and GRPCAuth's publicReads leave them open. Polls are not reads: they lease tasks.
 var readMethods = map[string]bool{
-	WorkflowService_ListWorkflows_FullMethodName: true,
-	WorkflowService_GetWorkflow_FullMethodName:   true,
+	WorkflowService_ListWorkflows_FullMethodName:    true,
+	WorkflowService_GetWorkflow_FullMethodName:      true,
+	WorkflowService_ListWorkflowRuns_FullMethodName: true,
 }
 
 // validBearer reports whether header is exactly "Bearer <token>", compared in
@@ -53,7 +54,7 @@ func isPublicRead(r *http.Request) bool {
 
 // GRPCAuth returns server options that require the bearer token in the
 // "authorization" metadata of every call, as the JSON API does. With
-// publicReads, ListWorkflows and GetWorkflow stay open. An empty token
+// publicReads, ListWorkflows, GetWorkflow and ListWorkflowRuns stay open. An empty token
 // returns no options, so the server is unauthenticated as before.
 func GRPCAuth(token string, publicReads bool) []grpc.ServerOption {
 	if token == "" {

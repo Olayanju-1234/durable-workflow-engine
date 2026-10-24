@@ -47,6 +47,12 @@ message WorkflowStartedEvent {
   // (recorded as a duration; the deadline is derived, so recovery re-arms it).
   // Zero means no limit. Older binaries ignore it and never time out.
   int64 execution_timeout_ms = 4;
+  // This run's id. A workflow id has one run at a time; continue-as-new and
+  // id reuse start another under the same id. Empty in histories from before
+  // 0.3.0, whose run id is derived from this event's timestamp.
+  string run_id = 5;
+  // The run this one continued from (continue-as-new), if any.
+  string continued_from_run_id = 6;
 }
 
 message StepScheduledEvent {
@@ -113,6 +119,18 @@ message StepFailedEvent {
 
 message WorkflowCompletedEvent {
   bytes output = 1;
+  // Set when the run ended by continuing as new: the workflow id goes on as a
+  // fresh run, with an empty history, described here. Older binaries read it
+  // as a plain completion, so it needs history format 5.
+  ContinuedAsNew continued_as_new = 2;
+}
+
+// ContinuedAsNew is what the next run of a workflow starts with.
+message ContinuedAsNew {
+  string run_id = 1;
+  string workflow_type = 2;
+  bytes input = 3;
+  int64 execution_timeout_ms = 4;
 }
 
 message WorkflowFailedEvent {

@@ -192,6 +192,19 @@ def py_clock(ctx):
 worker.activity("py-tick")(lambda _payload: time.sleep(0.02) or "tick")
 
 
+# Continue-as-new: a loop keeps its history small by starting a fresh run
+# whenever the engine suggests it (the harness's engine allows 60 events).
+@worker.workflow("PyLoop")
+def py_loop(ctx):
+    total = int(ctx.input or "0")
+    while not ctx.continue_as_new_suggested():
+        if total >= 50:
+            return f"{total} ticks; run {ctx.run_id}"
+        ctx.activity("py-tick")
+        total += 1
+    return ctx.continue_as_new(str(total))
+
+
 @worker.workflow("PyAfterRestart")
 def py_after_restart(ctx):
     return ctx.activity("py-flaky", {"n": 41}, decode="json")
@@ -309,6 +322,21 @@ if json.loads(clock["output"]) != want:
 clock_steps = " ".join(f"{s['step_name']}={s['status']}" for s in clock["steps"])
 if "maybe=CANCELLED maybe.timeout=COMPLETED" not in clock_steps:
     fail(f"clock: the timed-out wait was not cancelled: {clock_steps}")
+
+loop_id = worker.start_workflow("PyLoop", "0")
+loop = wait_done(loop_id)
+runs = worker.runs(loop_id)
+earlier = worker.describe(loop_id, run_id=runs[-1]["run_id"])
+if (
+    loop["output"] != f"50 ticks; run {loop['run_id']}"
+    or len(runs) != 3
+    or loop["history_length"] > 60
+    or any(r["status"] != "CONTINUED_AS_NEW" for r in runs[1:])
+    or loop.get("continued_from_run_id") != runs[1]["run_id"]
+    or earlier["input"] != "0"
+    or earlier.get("continued_as_new_run_id") != runs[1]["run_id"]
+):
+    fail(f"continue-as-new: output {loop['output']}, {loop['history_length']} events, runs {runs}")
 
 forever_id = worker.start_workflow("PyForever", execution_timeout=0.3)
 for _ in range(100):

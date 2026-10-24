@@ -282,6 +282,42 @@ class Context {
     this._startedAt = millis(task.started_at);
     this._now = this._startedAt; // the latest result the code has received
     this._random = null;
+    /** This run's id: a workflow that continues as new gets a new one. */
+    this.runId = task.run_id ?? '';
+    this._suggestAt = task.suggest_continue_as_new_at ?? 0;
+    this._observedEventId = 0; // the newest result the code has received
+    this._continueAsNew = null;
+  }
+
+  /**
+   * True once the history has grown past the engine's warning share of its
+   * limits, as of the latest result the code has received, so every replay
+   * answers the same at the same point. Then `return ctx.continueAsNew(state)`:
+   * a history that reaches its limit fails the workflow.
+   */
+  continueAsNewSuggested() {
+    return this._suggestAt > 0 && this._observedEventId >= this._suggestAt;
+  }
+
+  /**
+   * End this run and start a fresh one under the same workflow id, with an
+   * empty history and `input`: `return ctx.continueAsNew(state)`. Steps the code
+   * started before it still run; signals this run has not consumed are not
+   * carried over. opts.workflowType and opts.executionTimeoutMs change the next
+   * run's type and timeout (default: this run's).
+   */
+  continueAsNew(input = '', opts = {}) {
+    if (this._continueAsNew) return FOREVER();
+    if (this._next < this._steps.length) {
+      return this._nondeterminism(
+        `non-determinism: continued as new after ${this._next} steps, but history has ${this._steps.length}`,
+      );
+    }
+    const command = putPayload({ type: 'continue_as_new' }, 'input', input);
+    if (opts.workflowType) command.workflow_type = opts.workflowType;
+    putTimeouts(command, { execution_timeout_ms: opts.executionTimeoutMs });
+    this._continueAsNew = { command, pendingAt: this._pending.length };
+    return FOREVER(); // nothing after it runs, however the code handles errors
   }
 
   /**
@@ -315,8 +351,10 @@ class Context {
 
   _observe(seq) {
     const rec = this._steps[seq - 1];
-    const at = rec && rec.kind !== 'MARKER' && rec.status !== 'CANCELLED' ? millis(rec.resolved_at) : null;
+    if (!rec || rec.kind === 'MARKER' || rec.status === 'CANCELLED') return;
+    const at = millis(rec.resolved_at);
     if (at !== null && (this._now === null || at > this._now)) this._now = at;
+    this._observedEventId = Math.max(this._observedEventId, rec.resolved_event_id ?? 0);
   }
 
   /** The start input decoded as 'text' (same as ctx.input), 'json' or 'bytes'. */
@@ -603,6 +641,11 @@ async function decide(fn, task) {
   // waiting on steps with no result.
   await nextTurn();
   if (ctx._replayError) return { replayError: ctx._replayError };
+  if (ctx._continueAsNew) {
+    // Steps started after the call never ran from the code's point of view.
+    const commands = [...ctx._pending.slice(0, ctx._continueAsNew.pendingAt), ctx._continueAsNew.command];
+    return { commands, command: commands.length === 1 ? commands[0] : null };
+  }
   const commands = [...ctx._pending];
   if (settled?.type === 'complete_workflow') {
     commands.push(putPayload({ type: 'complete_workflow' }, 'output', settled.output));
@@ -811,9 +854,15 @@ class Worker {
     });
   }
 
-  /** Fetch a workflow's current state. */
-  async describe(workflowId) {
-    return this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}`);
+  /** Fetch a workflow's current state, or with opts.runId an earlier run's. */
+  async describe(workflowId, opts = {}) {
+    const run = opts.runId ? `?run_id=${encodeURIComponent(opts.runId)}` : '';
+    return this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}${run}`);
+  }
+
+  /** The runs kept for a workflow id: `{ runs: [...] }`, current first, then earlier ones. */
+  async runs(workflowId) {
+    return this.conn.request(`/api/workflows/${encodeURIComponent(workflowId)}/runs`);
   }
 
   async _workflowLoop() {

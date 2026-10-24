@@ -18,6 +18,9 @@ func (l bufferedLog) Append(id string, ev *history.HistoryEvent) error {
 	return l.s.AppendBuffered(id, ev)
 }
 func (l bufferedLog) Delete(id string) error { return l.s.Delete(id) }
+func (l bufferedLog) NewRun(id, archive string, ev *history.HistoryEvent) error {
+	return l.s.NewRun(id, archive, ev)
+}
 
 func benchEngine(b *testing.B, fsync bool, def state.WorkflowDefinition) *Engine {
 	b.Helper()
