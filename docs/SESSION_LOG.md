@@ -98,7 +98,8 @@ graceful cancel for custom steps). Maven Central (owner).
 - `isTerminalStatus` now includes CONTINUED_AS_NEW; the only guard against purging a run mid
   continue-as-new is in `purgeIfExpired` (tested).
 - Rollback below 0.3.0: check `--check-format` first; a directory where anything continued as new
-  or was gracefully cancelled is format 5. Today: demo 4, liftoff 1.
+  or was gracefully cancelled is format 5. Today: liftoff 1; demo 5 (the verification runs used
+  both features; retention purges them from 2026-10-31, then `--rescan-format`).
 - `/usr/bin/javac` on the laptop is the macOS stub; Docker isn't running. Java only compiles in CI.
 
 ---
