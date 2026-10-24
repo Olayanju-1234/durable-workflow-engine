@@ -166,16 +166,21 @@ func TestPythonSDK(t *testing.T) {
 }
 
 func TestJavaSDK(t *testing.T) {
+	// CI's runners have a JDK, so this must not quietly skip there.
+	skip := t.Skipf
+	if os.Getenv("CI") != "" {
+		skip = t.Fatalf
+	}
 	javac, err := exec.LookPath("javac")
 	if err != nil {
-		t.Skip("javac not installed")
+		skip("javac not installed")
 	}
 	java, err := exec.LookPath("java")
 	if err != nil {
-		t.Skip("java not installed")
+		skip("java not installed")
 	}
 	if err := exec.Command(javac, "-version").Run(); err != nil {
-		t.Skipf("javac does not run (no JDK behind it): %v", err)
+		skip("javac does not run (no JDK behind it): %v", err)
 	}
 	classes := t.TempDir()
 	out, err := exec.Command(javac, "--release", "11", "-Xlint:all,-serial", "-Werror", "-d", classes,
