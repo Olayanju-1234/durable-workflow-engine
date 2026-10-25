@@ -30,6 +30,7 @@ needs it is written. Binaries before 0.3.0 neither write nor read that file.
 | 4 | A cancelled step, or a step closed between retries by a timeout or a cancel | 0.2.0 | refuses a history with a step closed between retries; reads a cancelled step as failed |
 | 5 | Continue-as-new and graceful cancellation | 0.3.0 | reads a run that continued as new as completed (the chain stops); ignores a cancel request |
 | 6 | A namespace other than `default`, a named task queue, or a paused, jittered or `BUFFER_ONE` schedule | 0.4.0 | does not see the namespace's workflows at all (they stop running); hands a named queue's tasks to any worker polling the default queue; fires a paused schedule, without jitter, and overlapping a held fire |
+| 7 | An event encrypted at rest (`--encryption-keys`) | 0.5.0 | refuses the history (an event with no contents); `--decrypt-all` brings a directory back |
 
 Statuses added as flags (`TIMED_OUT`, `CANCELLED`, `TERMINATED`) need no format: an older
 binary shows them as `FAILED`, which is harmless. A reset run (0.5.0, ADR-0021) needs none

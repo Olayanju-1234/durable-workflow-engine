@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
@@ -16,13 +18,18 @@ type formatReport struct {
 	recorded, needed uint32
 	histories        int
 	unreadable       []string
+	// Encryption at rest: events sealed per key id, plaintext events, and
+	// the keyring given (nil: none).
+	sealed    map[string]int
+	plaintext int
+	keys      *history.Keyring
 }
 
 // scanFormat reads every history in dir (workflows, archived runs and the
 // engine's own) and works out the newest format any of them needs. It never
 // writes. A directory recorded as newer than this binary is not scanned:
 // this binary cannot tell what such histories contain.
-func scanFormat(dir string) (*formatReport, error) {
+func scanFormat(dir string, keys *history.Keyring) (*formatReport, error) {
 	if _, err := os.Stat(dir); err != nil {
 		return nil, fmt.Errorf("data directory: %w", err)
 	}
@@ -30,7 +37,7 @@ func scanFormat(dir string) (*formatReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &formatReport{recorded: recorded, needed: history.FormatBase}
+	r := &formatReport{recorded: recorded, needed: history.FormatBase, sealed: map[string]int{}, keys: keys}
 	if recorded > history.FormatVersion {
 		return r, nil
 	}
@@ -39,12 +46,23 @@ func scanFormat(dir string) (*formatReport, error) {
 		return nil, err
 	}
 	defer store.Close()
+	store.SetKeyring(keys)
 	ids, err := store.ListWorkflows()
 	if err != nil {
 		return nil, err
 	}
 	for _, id := range ids {
 		r.histories++
+		// Key ids are in the clear: counted without opening anything.
+		if raw, err := store.ReadSealed(id); err == nil {
+			for _, ev := range raw {
+				if history.IsSealed(ev) {
+					r.sealed[ev.GetKeyId()]++
+				} else {
+					r.plaintext++
+				}
+			}
+		}
 		events, err := store.ReadAll(id)
 		if err != nil {
 			r.unreadable = append(r.unreadable, fmt.Sprintf("%s: %v", id, err))
@@ -91,6 +109,29 @@ func (r *formatReport) print(w io.Writer, dir string) {
 		fmt.Fprintf(w, "histories need:   %d (needs %s; %d histories scanned)\n", r.needed, release(r.needed), r.histories)
 	}
 	fmt.Fprintf(w, "this binary:      reads up to format %d\n", history.FormatVersion)
+	if len(r.sealed) > 0 || r.keys != nil {
+		total := 0
+		var per []string
+		for _, id := range sortedKeys(r.sealed) {
+			total += r.sealed[id]
+			mark := ""
+			if !r.keys.Has(id) {
+				mark = " (MISSING from the key file)"
+			}
+			per = append(per, fmt.Sprintf("key %s: %d%s", id, r.sealed[id], mark))
+		}
+		fmt.Fprintf(w, "encryption:       %d events sealed%s, %d plaintext\n", total, list(per), r.plaintext)
+		if r.keys != nil {
+			unused := []string{}
+			for _, id := range r.keys.IDs() {
+				if r.sealed[id] == 0 && id != r.keys.Active() {
+					unused = append(unused, id)
+				}
+			}
+			fmt.Fprintf(w, "key file:         active key %s; keys no event uses (safe to retire): %s\n",
+				r.keys.Active(), orNone(unused))
+		}
+	}
 	for _, u := range r.unreadable {
 		fmt.Fprintf(w, "unreadable:       %s\n", u)
 	}
@@ -107,8 +148,8 @@ func (r *formatReport) print(w io.Writer, dir string) {
 // checkFormat is --check-format (and, with rescan, --rescan-format, which also
 // records the scanned format, lowering it once the histories that needed a
 // newer one are gone). Run it with the engine stopped.
-func checkFormat(w io.Writer, dir string, rescan bool) error {
-	r, err := scanFormat(dir)
+func checkFormat(w io.Writer, dir string, rescan bool, keys *history.Keyring) error {
+	r, err := scanFormat(dir, keys)
 	if err != nil {
 		return err
 	}
@@ -123,4 +164,27 @@ func checkFormat(w io.Writer, dir string, rescan bool) error {
 		fmt.Fprintf(w, "recorded format set to %d\n", r.needed)
 	}
 	return nil
+}
+
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func list(items []string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(items, ", ") + ")"
+}
+
+func orNone(items []string) string {
+	if len(items) == 0 {
+		return "none"
+	}
+	return strings.Join(items, ", ")
 }

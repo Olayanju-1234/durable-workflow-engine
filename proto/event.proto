@@ -21,6 +21,11 @@ message HistoryEvent {
   // docs/UPGRADING.md); unset means the base format, which every binary reads.
   // A binary whose format is lower refuses to start rather than misread it.
   uint32 min_reader_format = 4;
+  // Set when the event is encrypted at rest (ADR-0022): the attributes below
+  // are empty, and sealed holds them, encrypted with AES-256-GCM under the
+  // key named key_id. Such an event needs history format 7.
+  bytes sealed = 5;
+  string key_id = 6;
 
   // Exactly one attributes message is set per event; the field that is present
   // determines the event type. New event types get new oneof fields, which is

@@ -401,9 +401,13 @@ func (a *HTTPAPI) health(w http.ResponseWriter, _ *http.Request) {
 		"workflow_task_queue_depth": st.WorkflowTaskQueueDepth,
 		"demo_worker":               a.demoWorker,
 		"archiving":                 st.Archive != "",
+		"encryption":                st.EncryptionKey != "",
 		// The data directory's history format, and the newest this binary reads.
 		"history_format":       st.HistoryFormat,
 		"reads_history_format": history.FormatVersion,
+	}
+	if st.EncryptionKey != "" {
+		body["encryption_key"] = st.EncryptionKey
 	}
 	if a.clusterStatus != nil {
 		body["cluster"] = a.clusterStatus()

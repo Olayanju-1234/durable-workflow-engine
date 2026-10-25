@@ -132,6 +132,9 @@ func (s *Scope) ArchivedHistory(ctx context.Context, workflowID, runID string) (
 		return archive.Run{}, nil, err
 	}
 	events, err := history.DecodeRaw(data)
+	if err == nil {
+		events, err = s.e.store.OpenAll(events)
+	}
 	if err != nil {
 		return archive.Run{}, nil, fmt.Errorf("server: archived run %s of %s: %w", run.RunID, workflowID, err)
 	}

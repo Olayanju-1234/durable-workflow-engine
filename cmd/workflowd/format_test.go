@@ -32,7 +32,7 @@ func TestCheckFormat(t *testing.T) {
 		&history.HistoryEvent{Attributes: &history.HistoryEvent_MarkerRecorded{MarkerRecorded: &history.MarkerRecordedEvent{StepName: "v", Sequence: 1, Marker: "version", Data: []byte("1")}}})
 
 	var out bytes.Buffer
-	if err := checkFormat(&out, dir, false); err != nil {
+	if err := checkFormat(&out, dir, false, nil); err != nil {
 		t.Fatalf("check: %v\n%s", err, out.String())
 	}
 	for _, want := range []string{"recorded format:  none", "histories need:   2", "1 histories scanned", "OK:"} {
@@ -49,7 +49,7 @@ func TestCheckFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := checkFormat(&out, dir, true); err != nil {
+	if err := checkFormat(&out, dir, true, nil); err != nil {
 		t.Fatalf("rescan: %v\n%s", err, out.String())
 	}
 	if f, _ := history.ReadFormat(dir); f != history.FormatMarkers {
@@ -61,7 +61,7 @@ func TestCheckFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := checkFormat(&out, dir, true); err == nil {
+	if err := checkFormat(&out, dir, true, nil); err == nil {
 		t.Fatalf("a newer directory passed:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "REFUSED") {
@@ -83,7 +83,7 @@ func TestCheckFormatCountsNamespaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := checkFormat(&out, dir, true); err != nil {
+	if err := checkFormat(&out, dir, true, nil); err != nil {
 		t.Fatalf("rescan: %v\n%s", err, out.String())
 	}
 	if f, _ := history.ReadFormat(dir); f != history.FormatNamespaces {

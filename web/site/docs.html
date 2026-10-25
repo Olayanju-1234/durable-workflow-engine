@@ -73,6 +73,7 @@
     <a href="#namespaces">Namespaces</a>
     <a href="#guardrails">Guardrails</a>
     <a href="#archiving">Archiving</a>
+    <a href="#encryption">Encryption at rest</a>
     <a href="#api">gRPC API</a>
     <a href="#http-api">HTTP / JSON API</a>
     <a href="#metrics">Metrics</a>
@@ -1048,6 +1049,8 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated, timed out, cancelled) and earlier runs of a workflow that <a href="#continue-as-new">continued as new</a> this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
         <tr><td><code>--archive</code></td><td>empty</td><td>Before retention deletes a finished history, export it to a directory or <code>s3://bucket/prefix?endpoint=…</code> (<a href="#archiving">Archiving</a>). A history that cannot be exported is kept.</td></tr>
         <tr><td><code>--archive-credentials-file</code></td><td><code>$WORKFLOWD_ARCHIVE_*</code></td><td>S3 credentials: lines <code>access_key_id=</code> and <code>secret_access_key=</code>.</td></tr>
+        <tr><td><code>--encryption-keys</code></td><td>empty</td><td>Encrypt history at rest with the keys in this file (<a href="#encryption">Encryption</a>). Unset: plaintext, as before.</td></tr>
+        <tr><td><code>--encrypt-all</code>, <code>--decrypt-all</code></td><td></td><td>With <code>--encryption-keys</code> and the engine stopped: rewrite every history sealed with the active key, or in plaintext, then exit.</td></tr>
         <tr><td><code>--max-history-events</code>, <code>--max-history-bytes</code>, <code>--max-payload-bytes</code></td><td>51200, 50 MiB, 2 MiB</td><td>The <a href="#limits">limits</a> on a run's history and on each payload. <code>0</code> turns one off.</td></tr>
         <tr><td><code>--version</code></td><td>—</td><td>Print the version and the newest history format this binary reads, and exit.</td></tr>
         <tr><td><code>--check-format</code></td><td>—</td><td>With the engine stopped: report the data directory's recorded history format, what its histories need, and whether this binary can serve it, then exit (non-zero if not). See <a href="#upgrading">Upgrading &amp; rolling back</a>.</td></tr>
@@ -1089,6 +1092,41 @@ workflowd --serve --retention 168h \
 workflowd ctl archive describe order-42            # the latest archived run, or --run-id
 workflowd ctl archive history order-42
 curl localhost:8233/api/archive/workflows/order-42[/history][?run_id=…]</code></pre>
+
+    <h2 id="encryption">Encryption at rest</h2>
+    <p>A history holds every input, output, signal payload and error message of its workflow. With
+      <code>--encryption-keys FILE</code> the engine encrypts each event's contents with AES-256-GCM before it reaches the
+      disk, so the data directory, backups, archived runs and (in a cluster) the Raft log hold ciphertext. Event ids and
+      timestamps stay in the clear, which is what format checks and backups need. The engine, its APIs, the dashboard and
+      the SDKs see plaintext as before.</p>
+    <pre data-lang="sh"><code># a key: 32 random bytes, base64
+openssl rand -base64 32
+
+# /etc/workflowd/keys.json (mode 600, outside the data directory)
+{"active": "2026-10", "keys": [{"id": "2026-10", "key": "&lt;base64&gt;"}]}
+
+workflowd --serve --data-dir /var/lib/workflowd --encryption-keys /etc/workflowd/keys.json</code></pre>
+    <p>New events are sealed with the <code>active</code> key; every key listed opens events sealed with it, and events
+      written in plaintext before stay readable. Each sealed event names its key and is bound to its position, so a
+      changed or moved event fails to open instead of being misread. The first sealed event raises the data directory to
+      <a href="#upgrading">history format 7</a>, which binaries before 0.5.0 refuse.</p>
+    <p><strong>Rotating a key:</strong> add a new key to the file and make it <code>active</code>, then restart or send
+      <code>SIGHUP</code>. New events use the new key; old ones keep theirs. To retire the old key, rewrite everything under
+      the new one (engine stopped), and let <code>--check-format</code> confirm nothing uses the old key:</p>
+    <pre data-lang="sh"><code>workflowd --encrypt-all --data-dir /var/lib/workflowd --encryption-keys /etc/workflowd/keys.json
+workflowd --check-format --data-dir /var/lib/workflowd --encryption-keys /etc/workflowd/keys.json
+# encryption:       1840 events sealed (key 2026-10: 1840), 0 plaintext
+# key file:         active key 2026-10; keys no event uses (safe to retire): 2026-07</code></pre>
+    <p><code>--decrypt-all</code> rewrites every history in plaintext and lowers the recorded format, which is the way back
+      to a binary before 0.5.0.</p>
+    <div class="callout warn">
+      <strong>A lost key loses every event it sealed.</strong> There is no way around the encryption: keep the key file
+      out of the data directory and out of its backups, back it up somewhere separate, and keep old keys until
+      <code>--check-format</code> says nothing uses them. An engine that cannot open a history does not start (the log
+      names the workflow and the key); if a key is gone for good, move the histories it sealed out of the data directory,
+      and they are lost. Every node of a cluster needs the same key file, and so does anyone restoring a backup or reading
+      an archived run.
+    </div>
 
     <h2 id="ctl">Command line: <code>workflowd ctl</code></h2>
     <p>The operator's command line is a subcommand of the same binary. It talks to a running engine over the

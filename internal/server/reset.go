@@ -147,7 +147,13 @@ func (e *Engine) ResetWorkflow(workflowID string, opts ResetOptions) (ResetResul
 	default:
 	}
 	archive := archiveID(w.id, st.RunID, events[len(events)-1].GetTimestamp())
-	if err := e.hlog.NewRun(w.id, archive, run[0], run[1:]...); err != nil {
+	sealed := make([]*history.HistoryEvent, len(run))
+	for i, ev := range run {
+		if sealed[i], err = e.store.Seal(ev); err != nil {
+			return ResetResult{}, fmt.Errorf("server: reset %s: %w", workflowID, err)
+		}
+	}
+	if err := e.hlog.NewRun(w.id, archive, sealed[0], sealed[1:]...); err != nil {
 		w.forget()
 		e.indexLocked(w)
 		return ResetResult{}, fmt.Errorf("server: reset %s: %w", workflowID, err)

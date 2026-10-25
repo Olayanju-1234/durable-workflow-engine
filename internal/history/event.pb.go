@@ -37,6 +37,11 @@ type HistoryEvent struct {
 	// docs/UPGRADING.md); unset means the base format, which every binary reads.
 	// A binary whose format is lower refuses to start rather than misread it.
 	MinReaderFormat uint32 `protobuf:"varint,4,opt,name=min_reader_format,json=minReaderFormat,proto3" json:"min_reader_format,omitempty"`
+	// Set when the event is encrypted at rest (ADR-0022): the attributes below
+	// are empty, and sealed holds them, encrypted with AES-256-GCM under the
+	// key named key_id. Such an event needs history format 7.
+	Sealed []byte `protobuf:"bytes,5,opt,name=sealed,proto3" json:"sealed,omitempty"`
+	KeyId  string `protobuf:"bytes,6,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
 	// Exactly one attributes message is set per event; the field that is present
 	// determines the event type. New event types get new oneof fields, which is
 	// how the schema evolves without breaking old logs.
@@ -114,6 +119,20 @@ func (x *HistoryEvent) GetMinReaderFormat() uint32 {
 		return x.MinReaderFormat
 	}
 	return 0
+}
+
+func (x *HistoryEvent) GetSealed() []byte {
+	if x != nil {
+		return x.Sealed
+	}
+	return nil
+}
+
+func (x *HistoryEvent) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
 }
 
 func (x *HistoryEvent) GetAttributes() isHistoryEvent_Attributes {
@@ -1267,13 +1286,15 @@ var File_event_proto protoreflect.FileDescriptor
 const file_event_proto_rawDesc = "" +
 	"\n" +
 	"\vevent.proto\x12\n" +
-	"history.v1\"\x80\a\n" +
+	"history.v1\"\xaf\a\n" +
 	"\fHistoryEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\x03R\aeventId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x1d\n" +
 	"\n" +
 	"raft_index\x18\x03 \x01(\x04R\traftIndex\x12*\n" +
-	"\x11min_reader_format\x18\x04 \x01(\rR\x0fminReaderFormat\x12M\n" +
+	"\x11min_reader_format\x18\x04 \x01(\rR\x0fminReaderFormat\x12\x16\n" +
+	"\x06sealed\x18\x05 \x01(\fR\x06sealed\x12\x15\n" +
+	"\x06key_id\x18\x06 \x01(\tR\x05keyId\x12M\n" +
 	"\x10workflow_started\x18\n" +
 	" \x01(\v2 .history.v1.WorkflowStartedEventH\x00R\x0fworkflowStarted\x12G\n" +
 	"\x0estep_scheduled\x18\v \x01(\v2\x1e.history.v1.StepScheduledEventH\x00R\rstepScheduled\x12G\n" +

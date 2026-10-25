@@ -27,6 +27,7 @@ that supersedes the old one.
 | [0019](0019-archiving.md) | Archiving finished histories | Accepted |
 | [0020](0020-schedule-controls.md) | Schedule controls | Accepted |
 | [0021](0021-reset.md) | Resetting a finished run | Accepted |
+| [0022](0022-encryption-at-rest.md) | Encrypting history at rest | Accepted |
 
 ## Template
 

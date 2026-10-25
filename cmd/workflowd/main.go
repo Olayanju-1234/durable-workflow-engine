@@ -52,6 +52,9 @@ func main() {
 		archiveSpec = flag.String("archive", "", "before retention deletes a finished history, export it here: a directory, file:///dir, or s3://bucket/prefix?endpoint=https://...&region=... (S3, R2); a history that cannot be exported is kept")
 		archiveCred = flag.String("archive-credentials-file", "", "S3 credentials for --archive: lines access_key_id=... and secret_access_key=... (default: $WORKFLOWD_ARCHIVE_ACCESS_KEY_ID and $WORKFLOWD_ARCHIVE_SECRET_ACCESS_KEY, else $AWS_ACCESS_KEY_ID and $AWS_SECRET_ACCESS_KEY)")
 		checkFmt    = flag.Bool("check-format", false, "report the data directory's history format and whether this binary can serve it, then exit (run with the engine stopped)")
+		keysFile    = flag.String("encryption-keys", "", "encrypt history at rest with the keys in this JSON file ({\"active\": id, \"keys\": [{\"id\", \"key\"}]}); new events are sealed with the active key, and every key listed opens events sealed with it. Keep it out of the data directory and its backups: a lost key loses its events (docs: Encryption)")
+		encryptAll  = flag.Bool("encrypt-all", false, "with --encryption-keys: rewrite every history in --data-dir sealed with the active key (so older keys can be retired), then exit; run with the engine stopped")
+		decryptAll  = flag.Bool("decrypt-all", false, "with --encryption-keys: rewrite every history in --data-dir as plaintext (so a binary before 0.5.0 can read it again), then exit; run with the engine stopped")
 		rescanFmt   = flag.Bool("rescan-format", false, "like --check-format, then record the format the histories need now (lowers it once newer histories are gone)")
 
 		// Clustering is opt-in; with none of these set the daemon is single-node.
@@ -67,8 +70,23 @@ func main() {
 		fmt.Printf("workflowd %s (reads history format %d)\n", version.Version, history.FormatVersion)
 		return
 	}
+	var keys *history.Keyring
+	if *keysFile != "" {
+		var err error
+		if keys, err = loadKeys(*keysFile); err != nil {
+			fmt.Fprintln(os.Stderr, "workflowd:", err)
+			os.Exit(2)
+		}
+	}
+	if *encryptAll || *decryptAll {
+		if err := rewriteEncryption(os.Stdout, *dataDir, keys, *decryptAll); err != nil {
+			fmt.Fprintln(os.Stderr, "workflowd:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *checkFmt || *rescanFmt {
-		if err := checkFormat(os.Stdout, *dataDir, *rescanFmt); err != nil {
+		if err := checkFormat(os.Stdout, *dataDir, *rescanFmt, keys); err != nil {
 			fmt.Fprintln(os.Stderr, "workflowd:", err)
 			os.Exit(1)
 		}
@@ -99,7 +117,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+	store.SetKeyring(keys)
 	logger.Info("history store ready", "data_dir", *dataDir, "version", version.Version)
+	if keys != nil {
+		logger.Info("encryption at rest is on", "active_key", keys.Active(), "keys", keys.IDs())
+	}
 
 	if *demo {
 		if err := runDemo(logger, store); err != nil {
