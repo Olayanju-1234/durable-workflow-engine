@@ -5,6 +5,105 @@ what's next, gotchas. Keep it terse — this is the breadcrumb trail across sess
 
 ---
 
+## 2026-10-25 — Session 29: 0.5.0, see it, fix it, trust it (SDKs 0.5.0)
+
+0.4.0 made one engine safe for several apps. 0.5.0 is about operating it: a dashboard that is live
+and navigable, a way to fix a failed run instead of starting over, numbers without Prometheus,
+history encrypted at rest, tokens rotated without a restart, a record of who did what, and traces
+that follow a request through a workflow into its activities. Eight PRs, each squash-merged on
+green CI, then both deploys.
+
+**Done:**
+- #57 roadmap: ticked graceful cancellation (ADR-0014, #46) and Python/Java parity (#43), shipped in 0.3.0.
+- #58 **Live dashboard** (`83290e4`): `GET /api/events` (server-sent events) replaces 2 s polling:
+  an in-engine change feed (`feed.go`) published from the visibility index and schedules, 200 ms
+  coalescing, 15 s pings, `X-Accel-Buffering: no`, at most 256 subscribers, a lagging client gets
+  `resync`. The page streams with `fetch` (EventSource can't send a token) and falls back to
+  polling on a 404 or after 4 failed reconnects. Rows update in place by key (selection and scroll
+  kept); a URL per workflow (`/workflows/<id>?namespace=&run=&tab=`); an event-history timeline
+  with pretty-printed payloads; filters for status, type, start-time range, namespace and search
+  (`started_after`/`started_before`/`sort` on the list API, plus status counts and types).
+- #59 **Reset + bulk actions** (ADR-0021, `94bc7f3`): `POST /api/workflows/{id}/reset`, gRPC
+  `ResetWorkflow`, `ctl reset [--event N]`, client `ResetWorkflow`. A reset is a new run whose first
+  events are the old run's up to the reset point, unchanged; `WorkflowStarted` gets a new run id and
+  `reset_from_run_id`/`reset_event_id`/`reset_reason`; signals received after the point are
+  reapplied, cancel requests are not; the execution timeout is extended. Default point: the opening
+  event of the last step that failed for good (or was open at the end), else the last event. The
+  multi-event `NewRun` is atomic (`.next` + rename; the cluster replicates it as one entry). No
+  format bump. Bulk cancel/terminate/reset in `ctl` (`--status/--type/--query`, asks `yes`) and in
+  the dashboard (row selection, bulk bar, confirmation naming what is skipped); the signal form
+  validates JSON.
+- #60 **The pulse** (`3f21c81`): an in-engine sampler (10 s, 1 h ring) over the existing metrics,
+  per namespace: throughput, failure rate, step p50/p95 latency, activity and workflow queue depth,
+  active workflows. `GET /api/metrics?window=1m..1h`; new labelled families
+  `workflowd_namespace_*`; a dashboard panel with KPI tiles, three SVG charts with a crosshair
+  tooltip and a table view (palette run through the dataviz validator, light and dark).
+- #61 **Encryption at rest** (ADR-0022, `f830263`): `--encryption-keys FILE` (JSON keyring, one
+  active key id, older ids kept for reading). AES-256-GCM per event, AAD binds the key id and event
+  id, so a record can't be moved or relabelled. `HistoryEvent.sealed`/`key_id`; format 7 only once
+  a sealed event exists; plaintext histories stay readable. `--encrypt-all` / `--decrypt-all`
+  rewrite a stopped engine's data dir; `--check-format` reports which keys histories need. Losing
+  every copy of a key loses the histories sealed with it: docs say so in bold.
+- #62 **Reload + audit** (ADR-0023, `1508da0`): the auth token file, metrics token, namespaces file
+  and keyring reload on SIGHUP and when their content changes (checked every `--reload-interval`,
+  10 s), all or nothing: a bad file keeps the old config and logs why. An append-only audit log
+  (`--audit-log`, default `<data-dir>/audit/audit.log`, `off` to disable; JSON lines, fsync per entry,
+  16 MiB × 4 rotation) records start, signal, cancel (and graceful cancel requests), terminate,
+  reset, schedule changes, backups and config reloads (which namespaces were added, removed or
+  changed, which tokens and keys were replaced) with who (`engine:<hash>`, `token:<hash>`,
+  `anonymous`, `operator`), when, outcome and the client address; never payloads or tokens. Recorded at the transport edge from the guard's own
+  classification, with a test that every mutating route is classified. `GET /api/audit` (anonymous
+  403), `ctl audit`.
+- #63 **Tracing** (ADR-0024, `2979ae8`): W3C `traceparent`/`tracestate` on start (headers, request
+  field or gRPC metadata) makes the run a child span, recorded on `WorkflowStarted.trace`; workflow
+  tasks carry the run's span (stable across replays), activity tasks a new span per attempt; every
+  SDK exposes both. Optional `--otlp-endpoint` export (OTLP/HTTP protobuf, hand-encoded with
+  `protowire`, checked with `protoc --decode` against opentelemetry-proto v1.3.2), batched, never
+  blocking. No format change.
+- #64 release 0.5.0 (`7e1dc62`): npm dry run 40154714552, publish 40154759585; PyPI 40154816924;
+  tag `sdks-v0.5.0` @ `7e1dc62`. Clean installs (npm `require` via `NODE_PATH`, PyPI venv) ran a
+  traced workflow on the demo on their own queues (`verify-050-ts-mvn80vk1`,
+  `verify-050-py-6add6c61`): COMPLETED, the caller's trace id reached the workflow (a new run span)
+  and the activity (its own span), tracestate passed through.
+- **Deployed `7e1dc62`** (fresh backups `data-20261025T022904Z` / `liftoff-data-20261025T022904Z`
+  first; both data copies recovered and passed `--check-format` locally first; `.prev` = `4d9ac4c`
+  on both):
+  - demo, 02:34 UTC, unit unchanged (guardrails kept, nginx untouched): 33 workflows recovered,
+    format 6. Through nginx: SSE streams unbuffered (hello, then 5 `workflow` frames for one run);
+    `/api/metrics` 200; deep link `/workflows/<id>` 200; OrderSaga `verify-050-023846` COMPLETED; 30
+    parallel writes → 20 through + 10 × 429; `POST /api/schedules` 403; `/api/audit` 403; the audit
+    log `/opt/durable/data/audit/audit.log` records each start as `anonymous` with the client IP.
+    Site redeployed (docs.html), byte-identical. Hookdash fine.
+  - workflowd-liftoff, 02:39 UTC: 0 open, 26 workflows recovered, format 6; liftoff's worker
+    re-registered both types 15 ms after the restart; api.liftoff `/health` 200; smoke
+    `liftoff-webhook-smoke-20261025023956` COMPLETED "no webhook configured"; `ctl audit -n liftoff`
+    shows it under the engine token's id; reloads cover the token and namespaces files; `/api/metrics`
+    401 without a token.
+  - **Encryption and OTLP are off on both** (the keys are the owner's call).
+
+**Teeth:** 57 mutations across #59, #61, #62, #63: all caught (the key-id binding needed a twin-key
+test to be observable).
+
+**Fixed on the way:** `TestLosingTimerIsNotShownAsScheduled` raced a 200 ms timer under load (now
+1 s); `TestRetentionPurgesArchivedRuns` could have its step taken by another test's worker (now on
+its own task queue).
+
+**Next (owner):** encryption keys (where the keyring lives, how it is backed up off the box; then
+`--encryption-keys` + `--encrypt-all` per engine), an OTLP collector if traces are wanted, an R2
+bucket + credentials for archiving, Maven Central.
+
+**Gotchas:**
+- Token rotation no longer needs an engine restart: edit the token or namespaces file and the engine
+  picks it up within 10 s (or `systemctl kill -s HUP`). liftoff itself still restarts to read its `.env`.
+- The audit log lives in the data dir, so the daily backup tar includes it.
+- Rolling back to 0.4.0 is safe while encryption has never been on (dirs stay format 6). After
+  `--encrypt-all`, a rollback needs `--decrypt-all` with the new binary first.
+- `require('workflowd/package.json')` fails (not in the package's `exports`); read the file instead.
+- My verify loop grepped for `"status":"COMPLETED"` in the describe JSON and matched a *step's*
+  status: check the top-level field (`ctl describe` or `jq .status`).
+
+---
+
 ## 2026-10-24 — Session 28: 0.4.0, one engine for several apps (SDKs 0.4.0)
 
 A product review after 0.3.0 listed four pains: liftoff needed a whole second engine to stay
