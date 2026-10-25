@@ -274,3 +274,44 @@ func TestNewRunAppliesOnceAndSurvivesReplay(t *testing.T) {
 		t.Fatal("the snapshot left out the archived run")
 	}
 }
+
+// A reset run starts with several events: every node writes them all, stamped
+// with the command's index, and a later append follows the last one.
+func TestNewRunWithSeveralEvents(t *testing.T) {
+	m, store := newTestSM(t)
+	done := &history.HistoryEvent{EventId: 2, Attributes: &history.HistoryEvent_WorkflowFailed{
+		WorkflowFailed: &history.WorkflowFailedEvent{Error: "boom"},
+	}}
+	first := &history.HistoryEvent{EventId: 1, Attributes: &history.HistoryEvent_WorkflowStarted{
+		WorkflowStarted: &history.WorkflowStartedEvent{RunId: "r2", ResetFromRunId: "r1", ResetEventId: 2},
+	}}
+	sig := &history.HistoryEvent{EventId: 2, Attributes: &history.HistoryEvent_SignalReceived{
+		SignalReceived: &history.SignalReceivedEvent{SignalName: "go"},
+	}}
+	bad := proto.Clone(sig).(*history.HistoryEvent)
+	bad.EventId = 5
+	log := []*raft.LogEntry{
+		appendEntry(t, 1, "wf", 1),
+		entry(t, 2, &Command{Command: &Command_Append{Append: &AppendEvent{WorkflowId: "wf", Event: done}}}),
+		entry(t, 3, &Command{Command: &Command_NewRun{NewRun: &NewRun{WorkflowId: "wf", ArchiveId: "__workflowd-run~1~r1~wf", Event: first,
+			MoreEvents: []*history.HistoryEvent{sig}}}}),
+		appendEntry(t, 4, "wf", 3),
+	}
+	for _, e := range log {
+		if err := mustApply(t, m, e); err != nil {
+			t.Fatalf("apply %d: %v", e.GetIndex(), err)
+		}
+	}
+	ids, stamps := eventIDs(t, store, "wf")
+	if len(ids) != 3 || ids[1] != 2 || stamps[0] != 3 || stamps[1] != 3 || stamps[2] != 4 {
+		t.Fatalf("current run ids %v stamps %v, want 1, 2 (index 3) then 3 (index 4)", ids, stamps)
+	}
+	// A new run whose events are out of order is refused on every node.
+	mustApply(t, m, appendEntry(t, 5, "other", 1))
+	mustApply(t, m, entry(t, 6, &Command{Command: &Command_Append{Append: &AppendEvent{WorkflowId: "other", Event: done}}}))
+	err := mustApply(t, m, entry(t, 7, &Command{Command: &Command_NewRun{NewRun: &NewRun{WorkflowId: "other",
+		ArchiveId: "__workflowd-run~1~r1~other", Event: first, MoreEvents: []*history.HistoryEvent{bad}}}}))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("out-of-order new run: %v, want ErrConflict", err)
+	}
+}

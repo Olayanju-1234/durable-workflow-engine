@@ -284,6 +284,7 @@ func TestReadOnly(t *testing.T) {
 		{"signal", "POST", "/api/workflows/x/signal", "ft", `{"name":"s"}`, 403},
 		{"cancel", "POST", "/api/workflows/x/cancel", "ft", ``, 403},
 		{"terminate", "POST", "/api/workflows/x/terminate", "ft", ``, 403},
+		{"reset", "POST", "/api/workflows/x/reset", "ft", ``, 403},
 		{"create schedule", "POST", "/api/schedules", "ft", `{"schedule_id":"s","cron":"@hourly","workflow_type":"Flow"}`, 403},
 		{"list", "GET", "/api/workflows", "ft", ``, 200},
 		{"register", "POST", "/api/workflow-types", "ft", `{"workflow_types":["R"],"worker_id":"w"}`, 200},

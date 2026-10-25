@@ -32,7 +32,9 @@ needs it is written. Binaries before 0.3.0 neither write nor read that file.
 | 6 | A namespace other than `default`, a named task queue, or a paused, jittered or `BUFFER_ONE` schedule | 0.4.0 | does not see the namespace's workflows at all (they stop running); hands a named queue's tasks to any worker polling the default queue; fires a paused schedule, without jitter, and overlapping a held fire |
 
 Statuses added as flags (`TIMED_OUT`, `CANCELLED`, `TERMINATED`) need no format: an older
-binary shows them as `FAILED`, which is harmless.
+binary shows them as `FAILED`, which is harmless. A reset run (0.5.0, ADR-0021) needs none
+either: an older binary reads it as an ordinary run and the run it was reset from as an
+ordinary earlier run. In a cluster, reset only once every node runs 0.5.0.
 
 ## Before you upgrade
 

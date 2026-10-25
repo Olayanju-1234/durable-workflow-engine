@@ -52,6 +52,11 @@ service WorkflowService {
   // ListWorkflowRuns lists every run kept for a workflow id: the current one
   // and the earlier runs continue-as-new (or id reuse) left behind.
   rpc ListWorkflowRuns(ListWorkflowRunsRequest) returns (ListWorkflowRunsResponse);
+  // ResetWorkflow starts a finished run again from a point in its history: a
+  // new run under the same id keeps the events before that point, so the code
+  // replays them and carries on from there (by default, from the step whose
+  // failure ended the run). The finished run is kept as an earlier run.
+  rpc ResetWorkflow(ResetWorkflowRequest) returns (ResetWorkflowResponse);
 
   // ---- Polyglot workflow execution -------------------------------------
   //
@@ -620,6 +625,13 @@ message GetWorkflowResponse {
   // told and is ending.
   bool cancel_requested = 7;
   string cancel_reason = 8;
+  // The run this one was reset from, if an operator reset it.
+  string reset_from_run_id = 9;
+  // Where ResetWorkflow with no event id would reset this finished run (zero:
+  // it is not finished, or has no such step), and that step.
+  int64 reset_event_id = 10;
+  string reset_step_name = 11;
+  int64 reset_step_sequence = 12;
 }
 
 message ListWorkflowRunsRequest {
@@ -659,3 +671,24 @@ message CancelWorkflowRequest {
 }
 
 message CancelWorkflowResponse {}
+
+message ResetWorkflowRequest {
+  string workflow_id = 1;
+  // The first event of the finished run to leave out: the new run keeps
+  // events 1 to event_id - 1. Zero picks the opening event of the step whose
+  // failure ended the run (or the step it was waiting on when it was
+  // cancelled, terminated or timed out).
+  int64 event_id = 2;
+  // Recorded on the new run's WorkflowStarted.
+  string reason = 3;
+}
+
+message ResetWorkflowResponse {
+  // The new run.
+  string run_id = 1;
+  // The event the reset left out, and the run it was reset from.
+  int64 reset_event_id = 2;
+  string previous_run_id = 3;
+  // Signals recorded after that event, recorded again on the new run.
+  int32 reapplied_signals = 4;
+}

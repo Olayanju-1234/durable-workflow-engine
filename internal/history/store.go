@@ -399,17 +399,18 @@ func (s *HistoryStore) Delete(workflowID string) error {
 
 // NewRun ends a workflow's current history file and starts the next: the
 // finished history is kept under archiveID, and the workflow's history becomes
-// just first. A crash at any point leaves the old history current (the caller
-// redoes the whole step: it reads a finished run) or the new one, never neither.
+// first, then more (a reset run starts with the events it keeps). A crash at
+// any point leaves the old history current (the caller redoes the whole step:
+// it reads a finished run) or the whole new one, never neither and never part.
 //
 //  1. link the current file to the archive name, and fsync the directory;
-//  2. write first to <id>.history.next and fsync it;
+//  2. write the events to <id>.history.next and fsync it;
 //  3. rename it over the current file, and fsync the directory.
 //
 // Redoing it after a crash between 1 and 3 finds the archive already linked
 // to the same file, which is fine. It always fsyncs, even for a cluster's
 // buffered store: it is rare, and the rename must not outrun the data.
-func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent) error {
+func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent, more ...*HistoryEvent) error {
 	if err := validateWorkflowID(workflowID); err != nil {
 		return err
 	}
@@ -419,17 +420,23 @@ func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent)
 	if s.dirOf(archiveID) != s.dirOf(workflowID) {
 		return fmt.Errorf("history: run archive %q is not in the namespace of %q", archiveID, workflowID)
 	}
-	payload, err := proto.Marshal(first)
-	if err != nil {
-		return fmt.Errorf("history: marshal event: %w", err)
-	}
-	rec, err := record.Encode(payload)
-	if err != nil {
-		return fmt.Errorf("history: %w", err)
+	var rec []byte
+	need := FormatBase
+	for _, ev := range append([]*HistoryEvent{first}, more...) {
+		payload, err := proto.Marshal(ev)
+		if err != nil {
+			return fmt.Errorf("history: marshal event: %w", err)
+		}
+		r, err := record.Encode(payload)
+		if err != nil {
+			return fmt.Errorf("history: %w", err)
+		}
+		rec = append(rec, r...)
+		need = max(need, ev.GetMinReaderFormat())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.requireFormatLocked(first.GetMinReaderFormat()); err != nil {
+	if err := s.requireFormatLocked(need); err != nil {
 		return err
 	}
 	cur, arch := s.path(workflowID), s.path(archiveID)
@@ -475,7 +482,7 @@ func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent)
 		werr = cerr
 	}
 	if werr != nil {
-		return fmt.Errorf("history: write the first event of %s's next run: %w", workflowID, werr)
+		return fmt.Errorf("history: write the start of %s's next run: %w", workflowID, werr)
 	}
 	if err := os.Rename(next, cur); err != nil {
 		return fmt.Errorf("history: start %s's next run: %w", workflowID, err)

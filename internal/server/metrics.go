@@ -28,6 +28,7 @@ type engineMetrics struct {
 	startsRefused       *metrics.CounterVec // reason: max_active_workflows | max_starts_per_minute
 	runsArchived        *metrics.Counter    // finished runs exported before retention deleted them
 	archiveFailures     *metrics.Counter    // exports that failed (the run is kept)
+	workflowsReset      *metrics.Counter    // finished runs an operator started again from a point
 
 	// Polyglot: workflow decisions made by external SDK workers.
 	workflowTasksDispatched  *metrics.Counter
@@ -80,6 +81,8 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func
 			"Finished runs exported to the archive before retention deleted them."),
 		archiveFailures: reg.Counter("workflowd_archive_failures_total",
 			"Archive exports that failed; the run stays on disk and is retried at the next retention pass."),
+		workflowsReset: reg.Counter("workflowd_workflows_reset_total",
+			"Finished runs an operator reset: started again as a new run from a point in their history."),
 		historyLimit: reg.CounterVec("workflowd_history_limit_total",
 			"Histories that crossed the warning share of their event or size limit (warned) or reached it and failed their workflow (failed).", "kind"),
 		activityTimeouts: reg.CounterVec("workflowd_activity_timeouts_total",

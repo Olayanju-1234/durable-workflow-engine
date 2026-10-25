@@ -38,6 +38,7 @@ import (
 //	POST /api/workflows/{id}/terminate       {"reason"}
 //	POST /api/workflows/{id}/cancel          {"reason"}
 //	POST /api/workflows/{id}/signal          {"name","payload"}
+//	POST /api/workflows/{id}/reset           {"event_id","reason"}  a finished run, again from a point
 //	GET  /api/workflows/{id}/history[?run_id=]   the run's events, as protobuf JSON
 //	GET  /api/namespaces
 //	GET  /api/events                         the namespace's changes, as server-sent events
@@ -181,6 +182,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/workflows/{id}/terminate", a.terminateWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", a.cancelWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
+	mux.HandleFunc("POST /api/workflows/{id}/reset", a.resetWorkflow)
 	mux.HandleFunc("GET /api/namespaces", a.listNamespaces)
 	mux.HandleFunc("GET /api/events", a.events)
 	// Polyglot SDK transport (see httpapi_polyglot.go).
@@ -370,6 +372,16 @@ type workflowDTO struct {
 	// A graceful cancel was requested: the code has been told.
 	CancelRequested bool   `json:"cancel_requested,omitempty"`
 	CancelReason    string `json:"cancel_reason,omitempty"`
+	// The run this one was reset from, and where a reset of this finished run
+	// would start over by default.
+	ResetFromRunID string         `json:"reset_from_run_id,omitempty"`
+	ResetPoint     *resetPointDTO `json:"reset_point,omitempty"`
+}
+
+type resetPointDTO struct {
+	EventID  int64  `json:"event_id"`
+	StepName string `json:"step_name,omitempty"`
+	Sequence int64  `json:"sequence,omitempty"`
 }
 
 // health is answered by every node, leader or not: a follower is healthy too.
@@ -577,7 +589,7 @@ func toWorkflowDTO(resp *GetWorkflowResponse) *workflowDTO {
 			TaskQueue:    s.GetTaskQueue(),
 		})
 	}
-	return &workflowDTO{
+	dto := &workflowDTO{
 		summaryDTO:   *toSummaryDTO(resp.GetSummary()),
 		Input:        string(resp.GetInput()),
 		InputBase64:  base64Twin(resp.GetInput()),
@@ -589,7 +601,12 @@ func toWorkflowDTO(resp *GetWorkflowResponse) *workflowDTO {
 		ContinuedAsNewRunID: resp.GetContinuedAsNewRunId(),
 		CancelRequested:     resp.GetCancelRequested(),
 		CancelReason:        resp.GetCancelReason(),
+		ResetFromRunID:      resp.GetResetFromRunId(),
 	}
+	if resp.GetResetEventId() > 0 {
+		dto.ResetPoint = &resetPointDTO{EventID: resp.GetResetEventId(), StepName: resp.GetResetStepName(), Sequence: resp.GetResetStepSequence()}
+	}
+	return dto
 }
 
 // runDTO is one run of a workflow id.
@@ -816,6 +833,44 @@ func (a *HTTPAPI) endWorkflow(w http.ResponseWriter, r *http.Request, done strin
 		writeError(w, http.StatusInternalServerError, err)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": done})
+	}
+}
+
+// resetWorkflow starts a finished run again from a point in its history
+// (event_id; omitted or 0 picks the step whose failure ended it).
+func (a *HTTPAPI) resetWorkflow(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		EventID int64  `json:"event_id"`
+		Reason  string `json:"reason"`
+	}
+	if r.ContentLength > 0 {
+		if err := a.decodeJSON(r, &body); err != nil {
+			writeError(w, decodeStatus(err), err)
+			return
+		}
+	}
+	e := a.scope(w, r)
+	if e == nil {
+		return
+	}
+	res, err := e.ResetWorkflow(r.PathValue("id"), ResetOptions{EventID: body.EventID, Reason: body.Reason})
+	switch {
+	case err == nil, res.RunID != "":
+		// A run that reset but could not resume yet is still reset.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"workflow_id": r.PathValue("id"), "run_id": res.RunID, "previous_run_id": res.PreviousRunID,
+			"reset_event_id": res.ResetEventID, "reapplied_signals": res.ReappliedSignals,
+		})
+	case errors.Is(err, ErrNotLeader):
+		a.writeNotLeader(w, err)
+	case errors.Is(err, ErrNotFound):
+		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, ErrNotFinished):
+		writeError(w, http.StatusConflict, err)
+	case errors.Is(err, ErrInvalidArgument):
+		writeError(w, http.StatusBadRequest, err)
+	default:
+		writeError(w, http.StatusInternalServerError, err)
 	}
 }
 

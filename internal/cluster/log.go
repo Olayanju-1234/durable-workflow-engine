@@ -28,8 +28,8 @@ func (l *replicatedLog) Delete(workflowID string) error {
 	return l.propose(&Command{Command: &Command_Delete{Delete: &DeleteWorkflow{WorkflowId: workflowID}}})
 }
 
-func (l *replicatedLog) NewRun(workflowID, archiveID string, first *history.HistoryEvent) error {
-	return l.propose(&Command{Command: &Command_NewRun{NewRun: &NewRun{WorkflowId: workflowID, ArchiveId: archiveID, Event: first}}})
+func (l *replicatedLog) NewRun(workflowID, archiveID string, first *history.HistoryEvent, more ...*history.HistoryEvent) error {
+	return l.propose(&Command{Command: &Command_NewRun{NewRun: &NewRun{WorkflowId: workflowID, ArchiveId: archiveID, Event: first, MoreEvents: more}}})
 }
 
 func (l *replicatedLog) propose(cmd *Command) error {

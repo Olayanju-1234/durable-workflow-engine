@@ -55,6 +55,7 @@ const (
 	opSignal
 	opCancel
 	opTerminate
+	opReset
 	opSchedule // schedule changes
 )
 
@@ -107,7 +108,7 @@ func (g *Guard) admit(grant Grant, o op, ip string) error {
 	switch {
 	case p.ReadOnly && o.clientWrite():
 		g.count("read_only")
-		return fmt.Errorf("%w: namespace %q is read-only: it refuses starts, signals, cancels, terminations and schedule changes",
+		return fmt.Errorf("%w: namespace %q is read-only: it refuses starts, signals, cancels, terminations, resets and schedule changes",
 			ErrReadOnly, grant.Namespace)
 	case p.ReadOnlySchedules && o == opSchedule:
 		g.count("read_only")
@@ -243,6 +244,8 @@ func httpOp(r *http.Request) op {
 		return opCancel
 	case strings.HasSuffix(p, "/terminate"):
 		return opTerminate
+	case strings.HasSuffix(p, "/reset"):
+		return opReset
 	default:
 		return opOther
 	}
@@ -254,6 +257,7 @@ var grpcOps = map[string]op{
 	WorkflowService_SignalWorkflow_FullMethodName:       opSignal,
 	WorkflowService_CancelWorkflow_FullMethodName:       opCancel,
 	WorkflowService_TerminateWorkflow_FullMethodName:    opTerminate,
+	WorkflowService_ResetWorkflow_FullMethodName:        opReset,
 	WorkflowService_CreateSchedule_FullMethodName:       opSchedule,
 	WorkflowService_DeleteSchedule_FullMethodName:       opSchedule,
 	WorkflowService_PauseSchedule_FullMethodName:        opSchedule,

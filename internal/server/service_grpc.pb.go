@@ -29,6 +29,7 @@ const (
 	WorkflowService_TerminateWorkflow_FullMethodName    = "/workflow.v1.WorkflowService/TerminateWorkflow"
 	WorkflowService_CancelWorkflow_FullMethodName       = "/workflow.v1.WorkflowService/CancelWorkflow"
 	WorkflowService_ListWorkflowRuns_FullMethodName     = "/workflow.v1.WorkflowService/ListWorkflowRuns"
+	WorkflowService_ResetWorkflow_FullMethodName        = "/workflow.v1.WorkflowService/ResetWorkflow"
 	WorkflowService_RegisterWorkflowType_FullMethodName = "/workflow.v1.WorkflowService/RegisterWorkflowType"
 	WorkflowService_PollWorkflowTask_FullMethodName     = "/workflow.v1.WorkflowService/PollWorkflowTask"
 	WorkflowService_CompleteWorkflowTask_FullMethodName = "/workflow.v1.WorkflowService/CompleteWorkflowTask"
@@ -87,6 +88,11 @@ type WorkflowServiceClient interface {
 	// ListWorkflowRuns lists every run kept for a workflow id: the current one
 	// and the earlier runs continue-as-new (or id reuse) left behind.
 	ListWorkflowRuns(ctx context.Context, in *ListWorkflowRunsRequest, opts ...grpc.CallOption) (*ListWorkflowRunsResponse, error)
+	// ResetWorkflow starts a finished run again from a point in its history: a
+	// new run under the same id keeps the events before that point, so the code
+	// replays them and carries on from there (by default, from the step whose
+	// failure ended the run). The finished run is kept as an earlier run.
+	ResetWorkflow(ctx context.Context, in *ResetWorkflowRequest, opts ...grpc.CallOption) (*ResetWorkflowResponse, error)
 	// ---- Polyglot workflow execution -------------------------------------
 	//
 	// Workflow code does not have to run inside the engine. These three RPCs let
@@ -241,6 +247,16 @@ func (c *workflowServiceClient) ListWorkflowRuns(ctx context.Context, in *ListWo
 	return out, nil
 }
 
+func (c *workflowServiceClient) ResetWorkflow(ctx context.Context, in *ResetWorkflowRequest, opts ...grpc.CallOption) (*ResetWorkflowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResetWorkflowResponse)
+	err := c.cc.Invoke(ctx, WorkflowService_ResetWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *workflowServiceClient) RegisterWorkflowType(ctx context.Context, in *RegisterWorkflowTypeRequest, opts ...grpc.CallOption) (*RegisterWorkflowTypeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RegisterWorkflowTypeResponse)
@@ -387,6 +403,11 @@ type WorkflowServiceServer interface {
 	// ListWorkflowRuns lists every run kept for a workflow id: the current one
 	// and the earlier runs continue-as-new (or id reuse) left behind.
 	ListWorkflowRuns(context.Context, *ListWorkflowRunsRequest) (*ListWorkflowRunsResponse, error)
+	// ResetWorkflow starts a finished run again from a point in its history: a
+	// new run under the same id keeps the events before that point, so the code
+	// replays them and carries on from there (by default, from the step whose
+	// failure ended the run). The finished run is kept as an earlier run.
+	ResetWorkflow(context.Context, *ResetWorkflowRequest) (*ResetWorkflowResponse, error)
 	// ---- Polyglot workflow execution -------------------------------------
 	//
 	// Workflow code does not have to run inside the engine. These three RPCs let
@@ -470,6 +491,9 @@ func (UnimplementedWorkflowServiceServer) CancelWorkflow(context.Context, *Cance
 }
 func (UnimplementedWorkflowServiceServer) ListWorkflowRuns(context.Context, *ListWorkflowRunsRequest) (*ListWorkflowRunsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListWorkflowRuns not implemented")
+}
+func (UnimplementedWorkflowServiceServer) ResetWorkflow(context.Context, *ResetWorkflowRequest) (*ResetWorkflowResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetWorkflow not implemented")
 }
 func (UnimplementedWorkflowServiceServer) RegisterWorkflowType(context.Context, *RegisterWorkflowTypeRequest) (*RegisterWorkflowTypeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterWorkflowType not implemented")
@@ -702,6 +726,24 @@ func _WorkflowService_ListWorkflowRuns_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkflowService_ResetWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetWorkflowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkflowServiceServer).ResetWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkflowService_ResetWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkflowServiceServer).ResetWorkflow(ctx, req.(*ResetWorkflowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _WorkflowService_RegisterWorkflowType_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterWorkflowTypeRequest)
 	if err := dec(in); err != nil {
@@ -928,6 +970,10 @@ var WorkflowService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListWorkflowRuns",
 			Handler:    _WorkflowService_ListWorkflowRuns_Handler,
+		},
+		{
+			MethodName: "ResetWorkflow",
+			Handler:    _WorkflowService_ResetWorkflow_Handler,
 		},
 		{
 			MethodName: "RegisterWorkflowType",

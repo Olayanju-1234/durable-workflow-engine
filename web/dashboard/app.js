@@ -22,7 +22,11 @@ const state = {
   detail: null,      // the last describe of the selected run
   chain: [],         // its events, as shown in the card chain
   chainFor: '',      // `${id}|${run}` the chain belongs to
+  picked: new Set(), // workflow ids selected for a bulk action
 };
+
+const LIVE = ['RUNNING', 'WAITING'];
+const FINISHED = ['COMPLETED', 'FAILED', 'TERMINATED', 'CANCELLED', 'TIMED_OUT'];
 
 /* ---------- tiny helpers ---------- */
 
@@ -316,6 +320,7 @@ async function loadFloor() {
     const res = await api(`/api/workflows?${listQuery(state.limit)}`);
     if (seq !== floorSeq) return; // a newer load has the floor
     state.rows = new Map((res.workflows || []).map((w) => [w.workflow_id, w]));
+    for (const id of state.picked) if (!state.rows.has(id)) state.picked.delete(id);
     takeCounts(res);
     renderFloor();
     if (stream.mode === 'polling') setConn('ok', 'polling');
@@ -405,7 +410,8 @@ function matches(w) {
 }
 
 function renderEmpty(msg) {
-  $('rows').innerHTML = `<tr class="empty"><td colspan="6">${msg}</td></tr>`;
+  $('rows').innerHTML = `<tr class="empty"><td colspan="7">${msg}</td></tr>`;
+  renderBulkBar();
 }
 
 function emptyMessage() {
@@ -417,7 +423,9 @@ function emptyMessage() {
 
 function rowCells(w) {
   const href = urlFor(w.workflow_id, '', 'weave');
+  const picked = state.picked.has(w.workflow_id) ? ' checked' : '';
   return `
+      <td class="sel"><input type="checkbox" class="row-sel"${picked} aria-label="Select ${esc(w.workflow_id)}"></td>
       <td class="wf-id"><a href="${esc(href)}" tabindex="-1">${esc(w.workflow_id)}</a></td>
       <td class="wf-type">${esc(w.workflow_type) || '<span class="muted">—</span>'}</td>
       <td><span class="badge" data-s="${esc(w.status)}">${esc(w.status)}</span></td>
@@ -451,6 +459,7 @@ function renderFloor() {
   const body = $('rows');
   body.replaceChildren(...list.map(buildRow));
   renderFloorNote();
+  renderBulkBar();
 }
 
 // keepAnchor runs fn without moving what the reader is looking at: rows
@@ -481,6 +490,8 @@ function applyChange(w) {
   if (w.deleted || !matches(w)) {
     if (had) {
       state.rows.delete(id);
+      state.picked.delete(id);
+      renderBulkBar();
       keepAnchor(() => tr?.remove());
       if (!state.rows.size) renderEmpty(emptyMessage());
       renderFloorNote();
@@ -760,9 +771,18 @@ function renderDetail(w) {
     $('d-steps').dataset.html = html;
   }
 
-  // Only the current run of a live workflow can be signalled, cancelled or terminated.
-  const live = (w.status === 'RUNNING' || w.status === 'WAITING') && viewingCurrent();
+  // Only the current run of a live workflow can be signalled, cancelled or terminated;
+  // only the current run of a finished one can be reset.
+  const live = LIVE.includes(w.status) && viewingCurrent();
   $('d-actions').hidden = !live;
+  const resettable = FINISHED.includes(w.status) && viewingCurrent() && !!w.reset_point;
+  $('d-reset').hidden = !resettable;
+  $('d-chain').classList.toggle('can-reset', resettable);
+  if (resettable) {
+    const p = w.reset_point;
+    $('reset-note').textContent = `Start a new run from ${resetSummary(w)}.`;
+    $('d-reset-go').textContent = p.step_name ? `Retry from #${p.sequence} ${p.step_name}` : 'Run its ending again';
+  }
 }
 
 // setPayload redraws a payload only when it changed, so a live refresh keeps
@@ -936,6 +956,7 @@ function eventHTML(ev, t0, seen) {
           <code class="ev-kind">${esc(kind)}</code>
           ${format}
           <span class="ev-time" title="${esc(fmtAbs(iso))}">${at && t0 ? `+${esc(fmtDur(at - t0))}` : ''}</span>
+          ${Number(ev.event_id) >= 2 ? `<button class="linkish ev-reset" type="button" data-event="${esc(ev.event_id)}" title="Start a new run that keeps the cards before this one">reset to here</button>` : ''}
         </div>
         ${fields ? `<dl class="ev-fields">${fields}</dl>` : ''}
         ${error}${payloads}
@@ -1048,21 +1069,201 @@ async function cancelWorkflow(graceful) {
   }
 }
 
+// checkSignal validates the payload as the chosen format and says so; a
+// JSON payload that does not parse cannot be sent.
+function checkSignal() {
+  const text = $('sig-payload').value;
+  const json = $('sig-mode').value === 'json';
+  const out = $('sig-check');
+  let ok = true;
+  if (!json) {
+    out.textContent = text ? `sent as plain text (${new TextEncoder().encode(text).length} bytes)` : 'empty payload';
+  } else if (!text.trim()) {
+    out.textContent = 'empty payload';
+  } else {
+    try {
+      JSON.parse(text);
+      out.textContent = 'valid JSON';
+    } catch (err) {
+      ok = false;
+      out.textContent = `not valid JSON: ${err.message}`;
+    }
+  }
+  out.dataset.ok = ok ? '1' : '';
+  $('sig-payload').setAttribute('aria-invalid', ok ? 'false' : 'true');
+  $('d-signal').disabled = !ok;
+  return ok;
+}
+
 async function sendSignal() {
   const id = state.selected;
   const name = $('sig-name').value.trim();
   if (!id || !name) { toast('Signal name is required', 'error'); return; }
+  if (!checkSignal()) { toast('Fix the payload: it is not valid JSON (or switch to text)', 'error'); return; }
+  const json = $('sig-mode').value === 'json';
+  const raw = $('sig-payload').value;
+  const btn = $('d-signal');
+  btn.disabled = true;
   try {
     await api(`/api/workflows/${enc(id)}/signal`, {
       method: 'POST',
-      body: JSON.stringify({ name, payload: $('sig-payload').value }),
+      body: JSON.stringify({ name, payload: json ? raw.trim() : raw }),
     });
     toast(`Shuttle passed — “${name}” delivered`);
     $('sig-name').value = ''; $('sig-payload').value = '';
+    checkSignal();
     refreshDetail(false);
   } catch (err) {
     toast(err.message, 'error');
+  } finally {
+    btn.disabled = !checkSignal();
   }
+}
+
+// resetTo starts the open, finished run again from an event (0: the default
+// point, the step whose failure ended it).
+async function resetTo(eventId) {
+  const id = state.selected;
+  const w = state.detail;
+  if (!id || !w) return;
+  const point = eventId || w.reset_point?.event_id;
+  const what = eventId
+    ? `card ${eventId}: the new run keeps cards 1 to ${eventId - 1} and carries on from there`
+    : resetSummary(w);
+  if (!confirm(`Weave ${id} again from ${what}?\n\nThe ${w.status.toLowerCase()} run is kept as an earlier run.`)) return;
+  try {
+    const res = await api(`/api/workflows/${enc(id)}/reset`, {
+      method: 'POST',
+      body: JSON.stringify({ event_id: point, reason: $('reset-reason').value.trim() }),
+    });
+    toast(`New run ${res.run_id.slice(0, 8)} from card ${res.reset_event_id}${res.reapplied_signals ? `, ${res.reapplied_signals} signal(s) carried over` : ''}`, 'success');
+    $('reset-reason').value = '';
+    state.run = '';
+    state.chainFor = '';
+    go(true);
+    refreshDetail(true);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function resetSummary(w) {
+  const p = w.reset_point;
+  if (!p) return '';
+  return p.step_name
+    ? `step #${p.sequence} ${p.step_name} (card ${p.event_id}): the steps before it are not run again`
+    : `card ${p.event_id}: its code decides again how to end`;
+}
+
+/* ---------- bulk actions ---------- */
+
+const BULK = {
+  request_cancel: { title: 'Request cancel', verb: 'ask to cancel', done: 'asked to cancel', needs: LIVE,
+    path: (id) => `/api/workflows/${enc(id)}/cancel`, body: (reason) => ({ reason, graceful: true }) },
+  cancel: { title: 'Cancel', verb: 'cancel', done: 'cancelled', needs: LIVE,
+    path: (id) => `/api/workflows/${enc(id)}/cancel`, body: (reason) => ({ reason }) },
+  terminate: { title: 'Cut the warps', verb: 'terminate', done: 'terminated', needs: LIVE, danger: true,
+    path: (id) => `/api/workflows/${enc(id)}/terminate`, body: (reason) => ({ reason }) },
+  reset: { title: 'Weave again', verb: 'reset', done: 'reset', needs: FINISHED,
+    path: (id) => `/api/workflows/${enc(id)}/reset`, body: (reason) => ({ reason }) },
+};
+
+const confirmState = { action: null, ids: [], running: false };
+
+function renderBulkBar() {
+  const n = state.picked.size;
+  $('bulk-bar').hidden = n === 0;
+  $('bulk-count').textContent = `${n} selected`;
+  const shown = [...state.rows.keys()];
+  const all = $('sel-all');
+  all.checked = shown.length > 0 && shown.every((id) => state.picked.has(id));
+  all.indeterminate = !all.checked && shown.some((id) => state.picked.has(id));
+}
+
+function pick(id, on) {
+  if (on) state.picked.add(id);
+  else state.picked.delete(id);
+  renderBulkBar();
+}
+
+function openConfirm(action) {
+  const a = BULK[action];
+  const chosen = [...state.picked];
+  const ids = chosen.filter((id) => a.needs.includes(state.rows.get(id)?.status));
+  const skipped = chosen.length - ids.length;
+  confirmState.action = action;
+  confirmState.ids = ids;
+  $('confirm-title').textContent = `${a.title}: ${ids.length} workflow${ids.length === 1 ? '' : 's'}`;
+  const which = a.needs === LIVE ? 'running or waiting' : 'finished';
+  $('confirm-text').textContent = (ids.length
+    ? `This will ${a.verb} ${ids.length} workflow${ids.length === 1 ? '' : 's'}.`
+    : `None of the selected workflows can be: only ${which} ones.`)
+    + (skipped ? ` ${skipped} selected ${skipped === 1 ? 'is' : 'are'} not ${which} and ${skipped === 1 ? 'is' : 'are'} left alone.` : '')
+    + (action === 'terminate' ? ' Terminating cannot be undone (a reset starts a new run).' : '')
+    + (action === 'reset' ? ' Each starts a new run from the step whose failure ended it; the finished runs are kept.' : '');
+  const shown = ids.slice(0, 8);
+  $('confirm-list').innerHTML = shown.map((id) => `<li><code>${esc(id)}</code></li>`).join('')
+    + (ids.length > shown.length ? `<li class="muted">and ${ids.length - shown.length} more</li>` : '');
+  $('confirm-go').textContent = ids.length ? `${a.title} (${ids.length})` : a.title;
+  $('confirm-go').disabled = !ids.length;
+  $('confirm-go').className = `btn ${a.danger ? 'btn-danger' : 'btn-primary'}`;
+  $('confirm-progress').textContent = '';
+  $('confirm-reason').value = '';
+  $('confirm-modal').hidden = false;
+  $('modal-scrim').hidden = false;
+  $('confirm-reason').focus();
+}
+
+function closeConfirm() {
+  if (confirmState.running) return;
+  $('confirm-modal').hidden = true;
+  $('modal-scrim').hidden = true;
+}
+
+// runBulk acts on each workflow, four at a time; every one is its own API
+// call, so the engine's rate limits and read-only modes apply to each.
+async function runBulk(e) {
+  e.preventDefault();
+  const a = BULK[confirmState.action];
+  const ids = confirmState.ids;
+  if (!a || !ids.length || confirmState.running) return;
+  confirmState.running = true;
+  $('confirm-go').disabled = true;
+  const reason = $('confirm-reason').value.trim();
+  const failures = [];
+  let done = 0;
+  let next = 0;
+  const worker = async () => {
+    while (next < ids.length) {
+      const id = ids[next++];
+      try {
+        await api(a.path(id), { method: 'POST', body: JSON.stringify(a.body(reason)) });
+      } catch (err) {
+        failures.push(`${id}: ${err.message}`);
+      }
+      done++;
+      $('confirm-progress').textContent = `${done} of ${ids.length} done${failures.length ? `, ${failures.length} failed` : ''}`;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
+  confirmState.running = false;
+  const ok = ids.length - failures.length;
+  if (failures.length) {
+    $('confirm-progress').textContent = `${ok} ${a.done}, ${failures.length} failed — ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? '…' : ''}`;
+    $('confirm-go').disabled = false;
+    confirmState.ids = ids.filter((id) => failures.some((f) => f.startsWith(`${id}: `)));
+    $('confirm-go').textContent = `Retry the ${failures.length} that failed`;
+  } else {
+    closeConfirm();
+    toast(`${ok} ${a.done}`, 'success');
+  }
+  for (const id of ids) if (!confirmState.ids.includes(id) || !failures.length) state.picked.delete(id);
+  renderBulkBar();
+  for (const tr of $('rows').querySelectorAll('input.row-sel')) {
+    tr.checked = state.picked.has(tr.closest('tr').dataset.id);
+  }
+  if (stream.mode !== 'live') loadFloor();
+  if (state.selected && ids.includes(state.selected)) refreshDetail(false);
 }
 
 async function startWorkflow(e) {
@@ -1328,6 +1529,7 @@ async function loadNamespaces() {
 
 function switchNamespace(next) {
   namespace = next;
+  state.picked.clear();
   try { sessionStorage.setItem(NS_KEY, next); } catch { /* storage blocked */ }
   closeWorkflow(false);
   state.filters.type = ''; // types differ between namespaces
@@ -1391,7 +1593,7 @@ function initTheme() {
 
 function onRowActivate(e) {
   const tr = e.target.closest('tr[data-id]');
-  if (!tr) return;
+  if (!tr || e.target.closest('td.sel')) return; // the checkbox picks, it does not open
   // Let the id's link open a new tab as links do.
   if (e.type === 'click' && (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1)) return;
   if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
@@ -1417,11 +1619,35 @@ function init() {
 
   $('rows').addEventListener('click', onRowActivate);
   $('rows').addEventListener('keydown', onRowActivate);
+  $('rows').addEventListener('change', (e) => {
+    if (e.target.matches('input.row-sel')) pick(e.target.closest('tr').dataset.id, e.target.checked);
+  });
+  $('sel-all').addEventListener('change', (e) => {
+    for (const id of state.rows.keys()) pick(id, e.target.checked);
+    for (const box of $('rows').querySelectorAll('input.row-sel')) box.checked = e.target.checked;
+  });
+  for (const b of $('bulk-bar').querySelectorAll('[data-bulk]')) b.addEventListener('click', () => openConfirm(b.dataset.bulk));
+  $('bulk-clear').addEventListener('click', () => {
+    state.picked.clear();
+    for (const box of $('rows').querySelectorAll('input.row-sel')) box.checked = false;
+    renderBulkBar();
+  });
+  $('confirm-form').addEventListener('submit', runBulk);
+  $('confirm-back').addEventListener('click', closeConfirm);
+  $('confirm-close').addEventListener('click', closeConfirm);
+  $('reset-form').addEventListener('submit', (e) => { e.preventDefault(); resetTo(0); });
+  $('d-chain').addEventListener('click', (e) => {
+    const b = e.target.closest('.ev-reset');
+    if (b) resetTo(Number(b.dataset.event));
+  });
+  $('sig-payload').addEventListener('input', checkSignal);
+  $('sig-mode').addEventListener('change', checkSignal);
+  checkSignal();
 
   $('refresh').addEventListener('click', resyncAll);
   $('new-wf').addEventListener('click', openStartModal);
   $('s-cancel').addEventListener('click', closeStartModal);
-  $('modal-scrim').addEventListener('click', closeStartModal);
+  $('modal-scrim').addEventListener('click', () => { closeStartModal(); closeConfirm(); });
   $('start-form').addEventListener('submit', startWorkflow);
 
   $('d-close').addEventListener('click', () => closeWorkflow(true));
@@ -1443,6 +1669,7 @@ function init() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!$('start-modal').hidden) { closeStartModal(); return; }
+    if (!$('confirm-modal').hidden) { closeConfirm(); return; }
     if (state.selected) closeWorkflow(true);
   });
   window.addEventListener('popstate', () => applyRoute(routeFromLocation(), false));

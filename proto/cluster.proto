@@ -31,12 +31,15 @@ message DeleteWorkflow {
 }
 
 // NewRun keeps a workflow's finished history under archive_id and starts its
-// next run with event (continue-as-new, or a reused id). The history must end
-// with a terminal event, or every node rejects it.
+// next run with event (continue-as-new, or a reused id), followed by
+// more_events (a reset run starts with the events it keeps). The history must
+// end with a terminal event, or every node rejects it. A node before 0.5.0
+// ignores more_events, so reset only once every node runs 0.5.0.
 message NewRun {
   string workflow_id = 1;
   string archive_id = 2;
   history.v1.HistoryEvent event = 3;
+  repeated history.v1.HistoryEvent more_events = 4;
 }
 
 // A history snapshot is a SnapshotHeader record followed by one

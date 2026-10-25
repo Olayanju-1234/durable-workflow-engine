@@ -118,10 +118,20 @@
       <span class="floor-note muted" id="floor-note"></span>
     </div>
 
+    <div class="bulk-bar" id="bulk-bar" hidden role="toolbar" aria-label="Act on the selected workflows">
+      <span class="bulk-count" id="bulk-count"></span>
+      <button class="btn btn-secondary" type="button" data-bulk="request_cancel" title="Tell each workflow's code it is being cancelled">Request cancel</button>
+      <button class="btn btn-secondary" type="button" data-bulk="cancel" title="End each as CANCELLED now">Cancel</button>
+      <button class="btn btn-danger" type="button" data-bulk="terminate" title="Emergency stop: end each as TERMINATED">Cut the warps</button>
+      <button class="btn" type="button" data-bulk="reset" title="Start each finished run again from the step that failed">Weave again</button>
+      <button class="linkish" type="button" id="bulk-clear">clear selection</button>
+    </div>
+
     <div class="table-scroll">
       <table class="wf-table">
         <thead>
           <tr>
+            <th class="sel"><input type="checkbox" id="sel-all" aria-label="Select every workflow shown"></th>
             <th>Workflow</th>
             <th>Type</th>
             <th>Status</th>
@@ -131,7 +141,7 @@
           </tr>
         </thead>
         <tbody id="rows">
-          <tr class="empty"><td colspan="6">Reading the card chain…</td></tr>
+          <tr class="empty"><td colspan="7">Reading the card chain…</td></tr>
         </tbody>
       </table>
     </div>
@@ -253,12 +263,31 @@
       <ol class="runs" id="d-runs"></ol>
     </div>
 
+    <div class="drawer-actions" id="d-reset" hidden>
+      <h3 class="sec"><span class="sec-no">05</span>Weave again</h3>
+      <p class="action-note" id="reset-note"></p>
+      <form class="action-row" id="reset-form">
+        <input type="text" id="reset-reason" placeholder="why (optional, recorded on the new run)" aria-label="Reset reason">
+        <button class="btn btn-primary" id="d-reset-go" type="submit">Retry from the failed step</button>
+      </form>
+      <p class="action-note muted">Or reset to any card in the card chain. The run you are looking at stays, as an earlier run.</p>
+    </div>
+
     <div class="drawer-actions" id="d-actions" hidden>
       <h3 class="sec"><span class="sec-no">05</span>Hands on</h3>
-      <form class="action-row" id="signal-form">
-        <input type="text" id="sig-name" placeholder="signal name" aria-label="Signal name" required>
-        <input type="text" id="sig-payload" placeholder="payload" aria-label="Signal payload">
-        <button class="btn btn-secondary" id="d-signal" type="submit">Pass shuttle</button>
+      <form class="signal-form" id="signal-form" novalidate>
+        <div class="action-row">
+          <input type="text" id="sig-name" placeholder="signal name" aria-label="Signal name" required>
+          <select id="sig-mode" aria-label="Payload format">
+            <option value="json">JSON</option>
+            <option value="text">text</option>
+          </select>
+        </div>
+        <textarea id="sig-payload" rows="3" placeholder='{"approved": true}' aria-label="Signal payload" spellcheck="false" aria-describedby="sig-check"></textarea>
+        <div class="action-row">
+          <span class="sig-check" id="sig-check" aria-live="polite"></span>
+          <button class="btn btn-secondary" id="d-signal" type="submit">Pass shuttle</button>
+        </div>
       </form>
       <form class="action-row" id="terminate-form">
         <input type="text" id="term-reason" placeholder="reason (optional)" aria-label="Cancel or terminate reason">
@@ -298,6 +327,27 @@
     <p class="modal-hint" id="s-hint">The engine records WorkflowStarted on its own card chain before anything runs.</p>
     <div class="modal-actions">
       <button type="submit" class="btn btn-primary" id="s-submit">Start workflow</button>
+    </div>
+  </form>
+</div>
+
+<!-- Confirm an action on several workflows -->
+<div class="modal" id="confirm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+  <div class="modal-head">
+    <h2 id="confirm-title">—</h2>
+    <button class="btn btn-icon" id="confirm-close" title="Close" aria-label="Close">✕</button>
+  </div>
+  <form id="confirm-form">
+    <p class="modal-text" id="confirm-text"></p>
+    <ul class="confirm-list" id="confirm-list"></ul>
+    <label class="field">
+      <span>Reason <em>optional, recorded in each history</em></span>
+      <input id="confirm-reason" autocomplete="off">
+    </label>
+    <p class="modal-hint" id="confirm-progress" aria-live="polite"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn" id="confirm-back">Back</button>
+      <button type="submit" class="btn btn-danger" id="confirm-go">Go</button>
     </div>
   </form>
 </div>

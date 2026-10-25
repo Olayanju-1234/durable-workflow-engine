@@ -120,11 +120,13 @@ func (w *wfState) track(ev *history.HistoryEvent, l Limits) {
 	}
 }
 
-// reset makes the cache a new run holding only first.
-func (w *wfState) reset(first *history.HistoryEvent, l Limits) {
+// reset makes the cache a new run holding only events.
+func (w *wfState) reset(l Limits, events ...*history.HistoryEvent) {
 	w.loaded, w.events, w.fold, w.bytes, w.suggestAt = true, nil, state.NewFolder(), 0, 0
-	w.track(first, l)
-	_ = w.fold.Apply(first)
+	for _, ev := range events {
+		w.track(ev, l)
+		_ = w.fold.Apply(ev)
+	}
 }
 
 // forget drops the cached history, so the next operation reads the store.

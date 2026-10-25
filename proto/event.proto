@@ -57,6 +57,13 @@ message WorkflowStartedEvent {
   // they name another. Empty is the default queue. A non-default queue needs
   // history format 6: older binaries would hand its tasks to default pollers.
   string task_queue = 7;
+  // Set on a run an operator reset: the run it was reset from, the id of the
+  // first event of that run it left out, and why. The run starts with the
+  // events before that one, copied unchanged, so its code replays them as
+  // before. Older binaries ignore these and read an ordinary run.
+  string reset_from_run_id = 8;
+  int64 reset_event_id = 9;
+  string reset_reason = 10;
 }
 
 message StepScheduledEvent {

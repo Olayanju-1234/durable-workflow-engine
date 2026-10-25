@@ -1,6 +1,7 @@
 package ctl
 
 import (
+	"bufio"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -28,8 +29,9 @@ func commands() map[string]command {
 		{"runs", "<workflow-id>", "List a workflow id's runs: the current one and earlier ones.", setupRuns},
 		{"start", "<workflow-type>", "Start a workflow.", setupStart},
 		{"signal", "<workflow-id> <signal>", "Send a signal to a workflow.", setupSignal},
-		{"cancel", "<workflow-id>", "Cancel a workflow (--graceful lets its code compensate first).", setupCancel},
-		{"terminate", "<workflow-id>", "End a workflow at once, recording why.", setupTerminate},
+		{"cancel", "<workflow-id>...", "Cancel workflows (--graceful lets their code compensate first); or every match of --status/--type/--query.", setupCancel},
+		{"terminate", "<workflow-id>...", "End workflows at once, recording why; or every match of --status/--type/--query.", setupTerminate},
+		{"reset", "<workflow-id>...", "Start finished runs again from the step that failed (or --event); or every match of --status/--type/--query.", setupReset},
 		{"schedule list", "", "List schedules.", setupScheduleList},
 		{"schedule create", "<schedule-id>", "Create a schedule, or replace one with the same id.", setupScheduleCreate},
 		{"schedule delete", "<schedule-id>", "Delete a schedule (its runs carry on).", setupScheduleDelete},
@@ -497,29 +499,189 @@ func setupSignal(fs *flag.FlagSet) func(*cli, []string) error {
 func setupCancel(fs *flag.FlagSet) func(*cli, []string) error {
 	reason := fs.String("reason", "", "recorded in the workflow's history")
 	graceful := fs.Bool("graceful", false, "tell the workflow code instead, so it can compensate before it ends CANCELLED")
+	sel := selectionFlags(fs)
 	return func(c *cli, pos []string) error {
-		if err := wantArgs(pos, "<workflow-id>"); err != nil {
-			return err
-		}
 		body := map[string]any{"reason": *reason}
-		done := "cancelled " + pos[0]
+		verb, done := "cancel", "cancelled"
 		if *graceful {
 			body["graceful"] = true
-			done = "cancel requested for " + pos[0]
+			verb, done = "request cancel of", "cancel requested"
 		}
-		return c.simple(http.MethodPost, "/api/workflows/"+url.PathEscape(pos[0])+"/cancel", body, done)
+		return c.bulk(sel, pos, verb, done, func(id string) (map[string]any, error) {
+			return c.post("/api/workflows/"+url.PathEscape(id)+"/cancel", body)
+		})
 	}
 }
 
 func setupTerminate(fs *flag.FlagSet) func(*cli, []string) error {
 	reason := fs.String("reason", "", "recorded in the workflow's history")
+	sel := selectionFlags(fs)
 	return func(c *cli, pos []string) error {
-		if err := wantArgs(pos, "<workflow-id>"); err != nil {
+		return c.bulk(sel, pos, "terminate", "terminated", func(id string) (map[string]any, error) {
+			return c.post("/api/workflows/"+url.PathEscape(id)+"/terminate", map[string]any{"reason": *reason})
+		})
+	}
+}
+
+func setupReset(fs *flag.FlagSet) func(*cli, []string) error {
+	reason := fs.String("reason", "", "recorded on the new run")
+	event := fs.Int64("event", 0, "reset to just before this event (see `history`); default: the opening event of the step whose failure ended the run")
+	sel := selectionFlags(fs)
+	return func(c *cli, pos []string) error {
+		if *event != 0 && (len(pos) != 1 || sel.active()) {
+			return usagef("--event names a point in one run: give exactly one workflow id")
+		}
+		body := map[string]any{"reason": *reason}
+		if *event != 0 {
+			body["event_id"] = *event
+		}
+		return c.bulk(sel, pos, "reset", "reset", func(id string) (map[string]any, error) {
+			res, err := c.post("/api/workflows/"+url.PathEscape(id)+"/reset", body)
+			if err == nil && !c.json {
+				fmt.Fprintf(c.out, "%s: new run %s from event %v (was run %s; %v signal(s) reapplied)\n",
+					id, res["run_id"], res["reset_event_id"], res["previous_run_id"], res["reapplied_signals"])
+			}
+			return res, err
+		})
+	}
+}
+
+// selection picks workflows by filter instead of by id, for bulk actions.
+type selection struct {
+	status, typ, query *string
+	yes                *bool
+}
+
+func selectionFlags(fs *flag.FlagSet) selection {
+	return selection{
+		status: fs.String("status", "", "act on every workflow in this status (instead of naming ids)"),
+		typ:    fs.String("type", "", "act on every workflow of this type"),
+		query:  fs.String("query", "", "act on every workflow whose id or type contains this text"),
+		yes:    fs.Bool("yes", false, "do not ask before acting on several workflows"),
+	}
+}
+
+func (s selection) active() bool { return *s.status != "" || *s.typ != "" || *s.query != "" }
+
+// targets lists the workflow ids a bulk action acts on: the ones named, or
+// every match of the filters.
+func (c *cli) targets(s selection, pos []string) ([]string, error) {
+	if s.active() == (len(pos) > 0) {
+		return nil, usagef("name workflow ids, or select them with --status, --type or --query (not both)")
+	}
+	if !s.active() {
+		return pos, nil
+	}
+	q := url.Values{"limit": {"1000"}}
+	for k, v := range map[string]string{"status": strings.ToUpper(*s.status), "type": *s.typ, "q": *s.query} {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	var ids []string
+	for off := 0; ; {
+		q.Set("offset", strconv.Itoa(off))
+		var page struct {
+			Workflows []summary `json:"workflows"`
+			Total     int       `json:"total"`
+		}
+		var raw []byte
+		if err := c.request(http.MethodGet, "/api/workflows", q, nil, &raw); err != nil {
+			return nil, err
+		}
+		if err := jsonUnmarshal(raw, &page); err != nil {
+			return nil, err
+		}
+		for _, w := range page.Workflows {
+			ids = append(ids, w.WorkflowID)
+		}
+		off += len(page.Workflows)
+		if len(page.Workflows) == 0 || off >= page.Total {
+			return ids, nil
+		}
+	}
+}
+
+// bulk runs act on each target, after asking when there is more than one
+// (unless --yes), and reports each outcome. It fails if any did.
+func (c *cli) bulk(s selection, pos []string, verb, done string, act func(id string) (map[string]any, error)) error {
+	ids, err := c.targets(s, pos)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		fmt.Fprintln(c.errOut, "no workflows match")
+		return nil
+	}
+	if len(ids) > 1 && !*s.yes {
+		if err := c.confirm(verb, ids); err != nil {
 			return err
 		}
-		return c.simple(http.MethodPost, "/api/workflows/"+url.PathEscape(pos[0])+"/terminate",
-			map[string]any{"reason": *reason}, "terminated "+pos[0])
 	}
+	type outcome struct {
+		WorkflowID string         `json:"workflow_id"`
+		OK         bool           `json:"ok"`
+		Error      string         `json:"error,omitempty"`
+		Result     map[string]any `json:"result,omitempty"`
+	}
+	var results []outcome
+	failed := 0
+	for _, id := range ids {
+		res, err := act(id)
+		o := outcome{WorkflowID: id, OK: err == nil, Result: res}
+		if err != nil {
+			o.Error = err.Error()
+			failed++
+			if !c.json {
+				fmt.Fprintf(c.errOut, "%s: %v\n", id, err)
+			}
+		} else if !c.json && verb != "reset" {
+			fmt.Fprintf(c.out, "%s %s\n", done, id)
+		}
+		results = append(results, o)
+	}
+	if c.json {
+		fmt.Fprintln(c.out, compactJSON(map[string]any{"results": results}))
+	} else if len(ids) > 1 {
+		fmt.Fprintf(c.out, "%d %s, %d failed\n", len(ids)-failed, done, failed)
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d failed", failed, len(ids))
+	}
+	return nil
+}
+
+// confirm asks on stdin before acting on several workflows.
+func (c *cli) confirm(verb string, ids []string) error {
+	shown := ids
+	if len(shown) > 5 {
+		shown = shown[:5]
+	}
+	more := ""
+	if len(ids) > len(shown) {
+		more = fmt.Sprintf(" and %d more", len(ids)-len(shown))
+	}
+	fmt.Fprintf(c.errOut, "This will %s %d workflows: %s%s.\nType yes to go on: ", verb, len(ids), strings.Join(shown, ", "), more)
+	line, _ := bufio.NewReader(c.stdin).ReadString('\n')
+	if strings.TrimSpace(line) != "yes" {
+		return fmt.Errorf("nothing changed (answer yes, or pass --yes)")
+	}
+	return nil
+}
+
+// post sends a JSON body and decodes the JSON answer.
+func (c *cli) post(path string, body any) (map[string]any, error) {
+	var raw []byte
+	if err := c.request(http.MethodPost, path, nil, body, &raw); err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	if len(raw) > 0 {
+		if err := jsonUnmarshal(raw, &out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // simple sends a request whose answer is a line for people or JSON for scripts.

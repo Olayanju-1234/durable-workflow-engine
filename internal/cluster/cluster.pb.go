@@ -222,13 +222,16 @@ func (x *DeleteWorkflow) GetWorkflowId() string {
 }
 
 // NewRun keeps a workflow's finished history under archive_id and starts its
-// next run with event (continue-as-new, or a reused id). The history must end
-// with a terminal event, or every node rejects it.
+// next run with event (continue-as-new, or a reused id), followed by
+// more_events (a reset run starts with the events it keeps). The history must
+// end with a terminal event, or every node rejects it. A node before 0.5.0
+// ignores more_events, so reset only once every node runs 0.5.0.
 type NewRun struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkflowId    string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
-	ArchiveId     string                 `protobuf:"bytes,2,opt,name=archive_id,json=archiveId,proto3" json:"archive_id,omitempty"`
-	Event         *history.HistoryEvent  `protobuf:"bytes,3,opt,name=event,proto3" json:"event,omitempty"`
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	WorkflowId    string                  `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	ArchiveId     string                  `protobuf:"bytes,2,opt,name=archive_id,json=archiveId,proto3" json:"archive_id,omitempty"`
+	Event         *history.HistoryEvent   `protobuf:"bytes,3,opt,name=event,proto3" json:"event,omitempty"`
+	MoreEvents    []*history.HistoryEvent `protobuf:"bytes,4,rep,name=more_events,json=moreEvents,proto3" json:"more_events,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -280,6 +283,13 @@ func (x *NewRun) GetArchiveId() string {
 func (x *NewRun) GetEvent() *history.HistoryEvent {
 	if x != nil {
 		return x.Event
+	}
+	return nil
+}
+
+func (x *NewRun) GetMoreEvents() []*history.HistoryEvent {
+	if x != nil {
+		return x.MoreEvents
 	}
 	return nil
 }
@@ -408,13 +418,15 @@ const file_cluster_proto_rawDesc = "" +
 	"\x05event\x18\x02 \x01(\v2\x18.history.v1.HistoryEventR\x05event\"1\n" +
 	"\x0eDeleteWorkflow\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
-	"workflowId\"x\n" +
+	"workflowId\"\xb3\x01\n" +
 	"\x06NewRun\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1d\n" +
 	"\n" +
 	"archive_id\x18\x02 \x01(\tR\tarchiveId\x12.\n" +
-	"\x05event\x18\x03 \x01(\v2\x18.history.v1.HistoryEventR\x05event\"H\n" +
+	"\x05event\x18\x03 \x01(\v2\x18.history.v1.HistoryEventR\x05event\x129\n" +
+	"\vmore_events\x18\x04 \x03(\v2\x18.history.v1.HistoryEventR\n" +
+	"moreEvents\"H\n" +
 	"\x0eSnapshotHeader\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x1c\n" +
 	"\tworkflows\x18\x02 \x01(\x04R\tworkflows\"M\n" +
@@ -451,11 +463,12 @@ var file_cluster_proto_depIdxs = []int32{
 	3, // 2: cluster.v1.Command.new_run:type_name -> cluster.v1.NewRun
 	6, // 3: cluster.v1.AppendEvent.event:type_name -> history.v1.HistoryEvent
 	6, // 4: cluster.v1.NewRun.event:type_name -> history.v1.HistoryEvent
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	6, // 5: cluster.v1.NewRun.more_events:type_name -> history.v1.HistoryEvent
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_cluster_proto_init() }

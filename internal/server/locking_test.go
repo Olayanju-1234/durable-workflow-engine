@@ -141,8 +141,8 @@ type gatedLog struct {
 	failAt  atomic.Int64 // fail the append with this event id, after writing it
 }
 
-func (l *gatedLog) NewRun(id, archive string, ev *history.HistoryEvent) error {
-	return l.store.NewRun(id, archive, ev)
+func (l *gatedLog) NewRun(id, archive string, ev *history.HistoryEvent, more ...*history.HistoryEvent) error {
+	return l.store.NewRun(id, archive, ev, more...)
 }
 
 func (l *gatedLog) Append(id string, ev *history.HistoryEvent) error {
