@@ -153,6 +153,8 @@ type State struct {
 	ContinuedFromRunID string
 	// ResetFromRunID is the run an operator reset this one from, if any.
 	ResetFromRunID string
+	// Trace is the run's place in a distributed trace (nil: untraced).
+	Trace *history.TraceContext
 	// ContinuedAsNew describes the next run, once Status is StatusContinuedAsNew.
 	ContinuedAsNew *history.ContinuedAsNew
 	// CancelRequestedEventID is the event that asked to cancel the workflow
@@ -359,6 +361,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		st.StartedAt = ev.GetTimestamp()
 		st.ExecutionTimeout = time.Duration(ws.GetExecutionTimeoutMs()) * time.Millisecond
 		st.RunID, st.ContinuedFromRunID, st.ResetFromRunID = ws.GetRunId(), ws.GetContinuedFromRunId(), ws.GetResetFromRunId()
+		st.Trace = ws.GetTrace()
 		st.TaskQueue = ws.GetTaskQueue()
 		if st.RunID == "" {
 			st.RunID = LegacyRunID(ev.GetTimestamp())

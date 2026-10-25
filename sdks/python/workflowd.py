@@ -317,6 +317,9 @@ class Context:
         self._now = self._started_at  # the latest result the code has received
         self._random: Optional[random.Random] = None
         self.run_id: str = task.get("run_id", "")  # a workflow that continues as new gets a new one
+        # The run's span as a W3C traceparent ("" when the run is not traced): the same on every replay.
+        self.traceparent: str = task.get("traceparent", "")
+        self.tracestate: str = task.get("tracestate", "")
         self._suggest_at: int = task.get("suggest_continue_as_new_at") or 0
         self._observed_event_id = 0  # the newest result the code has received
         # Graceful cancellation: told at the first point the code waits. The
@@ -768,7 +771,8 @@ class _Connection:
                     return
             self.current = (self.current + 1) % len(self.addrs)
 
-    def request(self, method: str, path: str, body: Optional[dict] = None, attempts: int = 12, timeout: float = 40.0):
+    def request(self, method: str, path: str, body: Optional[dict] = None, attempts: int = 12, timeout: float = 40.0,
+                extra_headers: Optional[dict] = None):
         backoff = 0.05
         for attempt in range(1, attempts + 1):
             frm = self.base
@@ -778,6 +782,7 @@ class _Connection:
                 headers["Authorization"] = f"Bearer {self.token}"
             if self.namespace:
                 headers["X-Workflowd-Namespace"] = self.namespace
+            headers.update(extra_headers or {})
             req = urllib.request.Request(frm + path, data=data, method=method, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=timeout, context=self._ssl) as res:
@@ -908,6 +913,8 @@ class Worker:
         id_reuse_policy: Optional[str] = None,
         id_conflict_policy: Optional[str] = None,
         task_queue: Optional[str] = None,
+        traceparent: Optional[str] = None,
+        tracestate: Optional[str] = None,
     ) -> str:
         """Start a workflow and return its id. ``execution_timeout`` (seconds)
         ends it as TIMED_OUT if it has not finished by then; the policies and
@@ -920,6 +927,8 @@ class Worker:
             id_reuse_policy=id_reuse_policy,
             id_conflict_policy=id_conflict_policy,
             task_queue=task_queue,
+            traceparent=traceparent,
+            tracestate=tracestate,
         )["workflow_id"]
 
     def start(
@@ -932,6 +941,8 @@ class Worker:
         id_reuse_policy: Optional[str] = None,
         id_conflict_policy: Optional[str] = None,
         task_queue: Optional[str] = None,
+        traceparent: Optional[str] = None,
+        tracestate: Optional[str] = None,
     ) -> dict:
         """Start a workflow and say what happened: ``{"workflow_id", "run_id",
         "started"}``. ``id_reuse_policy`` ("ALLOW_DUPLICATE",
@@ -939,7 +950,9 @@ class Worker:
         whether an id whose run has finished may start a new run;
         ``id_conflict_policy="USE_EXISTING"`` returns the run that holds a taken
         id (started False) instead of failing with a 409. ``task_queue`` runs
-        it on another task queue than this worker's."""
+        it on another task queue than this worker's. ``traceparent`` (and
+        ``tracestate``), a W3C Trace Context, makes the run a child span of the
+        caller's; an activity's ``info["traceparent"]`` passes it on."""
         # Chosen here so a retry after a lost reply cannot start a second execution.
         wid = workflow_id or f"{workflow_type}-{random.randrange(16**16):016x}"
         body = _put_payload({"type": workflow_type, "workflow_id": wid}, "input", payload)
@@ -953,8 +966,10 @@ class Worker:
         queue = task_queue if task_queue is not None else self.task_queue
         if queue and queue != "default":
             body["task_queue"] = queue
+        # Sent as the standard headers, which an engine before 0.5.0 ignores.
+        trace = {k: v for k, v in (("traceparent", traceparent), ("tracestate", tracestate)) if v}
         try:
-            res = self.conn.request("POST", "/api/workflows", body) or {}
+            res = self.conn.request("POST", "/api/workflows", body, extra_headers=trace) or {}
         except _HTTPError as err:
             if not (err.status == 409 and not workflow_id):
                 raise

@@ -74,6 +74,11 @@ For an engine with auth and TLS: `Worker(address="https://…:8233", token=..., 
 (`ca_file` only for a private CA). With a namespace's token the worker works in that namespace;
 with the engine's token, pick one with `namespace="acme"` (engine 0.4.0+).
 
+Tracing (engine 0.5.0+): `worker.start("Order", order, traceparent=headers["traceparent"])` makes
+the run a child span of the caller's (W3C Trace Context). The code reads the run's span as
+`ctx.traceparent`; an activity taking `info` gets its attempt's span as `info["traceparent"]` to
+put on the requests it makes, so they join the trace.
+
 Task queues (engine 0.4.0+): `Worker(task_queue="billing")` polls only the `billing` queue, and
 its `start()` calls run workflows there; their activities run there too unless a call says
 `ctx.activity("send", payload, task_queue="email")`. Without one, everything uses the default

@@ -1324,7 +1324,11 @@ type WorkflowTask struct {
 	// The history's size in bytes, as stored.
 	HistorySizeBytes int64 `protobuf:"varint,8,opt,name=history_size_bytes,json=historySizeBytes,proto3" json:"history_size_bytes,omitempty"`
 	// The task queue the task was routed by ("default" for the default queue).
-	TaskQueue     string `protobuf:"bytes,9,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	TaskQueue string `protobuf:"bytes,9,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	// The run's span as a W3C traceparent (and tracestate), empty when the run
+	// is not traced. The same on every task of the run, so replay can read it.
+	Traceparent   string `protobuf:"bytes,10,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
+	Tracestate    string `protobuf:"bytes,11,opt,name=tracestate,proto3" json:"tracestate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1418,6 +1422,20 @@ func (x *WorkflowTask) GetHistorySizeBytes() int64 {
 func (x *WorkflowTask) GetTaskQueue() string {
 	if x != nil {
 		return x.TaskQueue
+	}
+	return ""
+}
+
+func (x *WorkflowTask) GetTraceparent() string {
+	if x != nil {
+		return x.Traceparent
+	}
+	return ""
+}
+
+func (x *WorkflowTask) GetTracestate() string {
+	if x != nil {
+		return x.Tracestate
 	}
 	return ""
 }
@@ -2327,7 +2345,11 @@ type StartWorkflowRequest struct {
 	// The task queue the workflow runs on: its workflow tasks, and its
 	// activities unless they name another. Empty is the default queue, which
 	// workers that name no queue poll.
-	TaskQueue     string `protobuf:"bytes,7,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	TaskQueue string `protobuf:"bytes,7,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	// Optional W3C Trace Context of the caller (as in the HTTP headers): the
+	// run becomes a child span of it, and its tasks carry the trace on.
+	Traceparent   string `protobuf:"bytes,8,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
+	Tracestate    string `protobuf:"bytes,9,opt,name=tracestate,proto3" json:"tracestate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2407,6 +2429,20 @@ func (x *StartWorkflowRequest) GetIdConflictPolicy() IdConflictPolicy {
 func (x *StartWorkflowRequest) GetTaskQueue() string {
 	if x != nil {
 		return x.TaskQueue
+	}
+	return ""
+}
+
+func (x *StartWorkflowRequest) GetTraceparent() string {
+	if x != nil {
+		return x.Traceparent
+	}
+	return ""
+}
+
+func (x *StartWorkflowRequest) GetTracestate() string {
+	if x != nil {
+		return x.Tracestate
 	}
 	return ""
 }
@@ -2561,7 +2597,12 @@ type Task struct {
 	// good idempotency key for the side effect the activity performs.
 	ActivityId string `protobuf:"bytes,9,opt,name=activity_id,json=activityId,proto3" json:"activity_id,omitempty"`
 	// The task queue the task was routed by ("default" for the default queue).
-	TaskQueue     string `protobuf:"bytes,10,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	TaskQueue string `protobuf:"bytes,10,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	// This attempt's span as a W3C traceparent (and tracestate), a child of the
+	// run's span; empty when the run is not traced. Pass it on to the calls the
+	// activity makes, and they join the workflow's trace.
+	Traceparent   string `protobuf:"bytes,11,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
+	Tracestate    string `protobuf:"bytes,12,opt,name=tracestate,proto3" json:"tracestate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2662,6 +2703,20 @@ func (x *Task) GetActivityId() string {
 func (x *Task) GetTaskQueue() string {
 	if x != nil {
 		return x.TaskQueue
+	}
+	return ""
+}
+
+func (x *Task) GetTraceparent() string {
+	if x != nil {
+		return x.Traceparent
+	}
+	return ""
+}
+
+func (x *Task) GetTracestate() string {
+	if x != nil {
+		return x.Tracestate
 	}
 	return ""
 }
@@ -4255,7 +4310,7 @@ const file_service_proto_rawDesc = "" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12%\n" +
 	"\x0eworkflow_types\x18\x02 \x03(\tR\rworkflowTypes\x12\x1d\n" +
 	"\n" +
-	"task_queue\x18\x03 \x01(\tR\ttaskQueue\"\xee\x02\n" +
+	"task_queue\x18\x03 \x01(\tR\ttaskQueue\"\xb0\x03\n" +
 	"\fWorkflowTask\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12#\n" +
@@ -4268,7 +4323,12 @@ const file_service_proto_rawDesc = "" +
 	"\x1asuggest_continue_as_new_at\x18\a \x01(\x03R\x16suggestContinueAsNewAt\x12,\n" +
 	"\x12history_size_bytes\x18\b \x01(\x03R\x10historySizeBytes\x12\x1d\n" +
 	"\n" +
-	"task_queue\x18\t \x01(\tR\ttaskQueue\"I\n" +
+	"task_queue\x18\t \x01(\tR\ttaskQueue\x12 \n" +
+	"\vtraceparent\x18\n" +
+	" \x01(\tR\vtraceparent\x12\x1e\n" +
+	"\n" +
+	"tracestate\x18\v \x01(\tR\n" +
+	"tracestate\"I\n" +
 	"\x18PollWorkflowTaskResponse\x12-\n" +
 	"\x04task\x18\x01 \x01(\v2\x19.workflow.v1.WorkflowTaskR\x04task\"\xbd\x02\n" +
 	"\x17ScheduleActivityCommand\x12\x1b\n" +
@@ -4331,7 +4391,7 @@ const file_service_proto_rawDesc = "" +
 	"\acommand\x18\x03 \x01(\v2\x1c.workflow.v1.WorkflowCommandR\acommand\x12!\n" +
 	"\freplay_error\x18\x04 \x01(\tR\vreplayError\x128\n" +
 	"\bcommands\x18\x05 \x03(\v2\x1c.workflow.v1.WorkflowCommandR\bcommands\"\x1e\n" +
-	"\x1cCompleteWorkflowTaskResponse\"\xd4\x02\n" +
+	"\x1cCompleteWorkflowTaskResponse\"\x96\x03\n" +
 	"\x14StartWorkflowRequest\x12#\n" +
 	"\rworkflow_type\x18\x01 \x01(\tR\fworkflowType\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1f\n" +
@@ -4341,7 +4401,11 @@ const file_service_proto_rawDesc = "" +
 	"\x0fid_reuse_policy\x18\x05 \x01(\x0e2\x1a.workflow.v1.IdReusePolicyR\ridReusePolicy\x12K\n" +
 	"\x12id_conflict_policy\x18\x06 \x01(\x0e2\x1d.workflow.v1.IdConflictPolicyR\x10idConflictPolicy\x12\x1d\n" +
 	"\n" +
-	"task_queue\x18\a \x01(\tR\ttaskQueue\"i\n" +
+	"task_queue\x18\a \x01(\tR\ttaskQueue\x12 \n" +
+	"\vtraceparent\x18\b \x01(\tR\vtraceparent\x12\x1e\n" +
+	"\n" +
+	"tracestate\x18\t \x01(\tR\n" +
+	"tracestate\"i\n" +
 	"\x15StartWorkflowResponse\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x15\n" +
@@ -4352,7 +4416,7 @@ const file_service_proto_rawDesc = "" +
 	"\n" +
 	"step_names\x18\x02 \x03(\tR\tstepNames\x12\x1d\n" +
 	"\n" +
-	"task_queue\x18\x03 \x01(\tR\ttaskQueue\"\xd7\x02\n" +
+	"task_queue\x18\x03 \x01(\tR\ttaskQueue\"\x99\x03\n" +
 	"\x04Task\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12\x1b\n" +
@@ -4368,7 +4432,11 @@ const file_service_proto_rawDesc = "" +
 	"activityId\x12\x1d\n" +
 	"\n" +
 	"task_queue\x18\n" +
-	" \x01(\tR\ttaskQueue\"9\n" +
+	" \x01(\tR\ttaskQueue\x12 \n" +
+	"\vtraceparent\x18\v \x01(\tR\vtraceparent\x12\x1e\n" +
+	"\n" +
+	"tracestate\x18\f \x01(\tR\n" +
+	"tracestate\"9\n" +
 	"\x10PollTaskResponse\x12%\n" +
 	"\x04task\x18\x01 \x01(\v2\x11.workflow.v1.TaskR\x04task\"\x90\x02\n" +
 	"\x13CompleteTaskRequest\x12\x1f\n" +

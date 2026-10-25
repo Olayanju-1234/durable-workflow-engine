@@ -204,6 +204,21 @@ func (g *GaugeFunc) write(w io.Writer) {
 	fmt.Fprintf(w, "%s %s\n", g.fqName, formatFloat(g.fn()))
 }
 
+// CounterFunc is a counter something else keeps, read at scrape time.
+type CounterFunc struct {
+	meta
+	fn func() float64
+}
+
+func (r *Registry) CounterFunc(name, help string, fn func() float64) {
+	r.register(&CounterFunc{meta: meta{fqName: name, help: help, typ: "counter"}, fn: fn})
+}
+
+func (c *CounterFunc) write(w io.Writer) {
+	c.writeHeader(w)
+	fmt.Fprintf(w, "%s %s\n", c.fqName, formatFloat(c.fn()))
+}
+
 // GaugeVecFunc is a labelled gauge family read at scrape time: fn returns
 // each child's value keyed by its label values joined with "\x00".
 type GaugeVecFunc struct {

@@ -314,4 +314,8 @@ type Info struct {
 	ContinuedFromRunID string
 	// TaskQueue is the task queue the run is on ("default" for the default one).
 	TaskQueue string
+	// TraceParent is the run's span as a W3C traceparent ("" when the run is
+	// not traced): the same on every replay. Activities get spans of their own
+	// (worker.ActivityInfo.TraceParent).
+	TraceParent string
 }

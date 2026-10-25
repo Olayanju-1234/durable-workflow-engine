@@ -187,6 +187,7 @@ func resetRun(events []*history.HistoryEvent, cut int64, runID, fromRunID, reaso
 		c.RaftIndex = 0
 		if ws := c.GetWorkflowStarted(); ws != nil {
 			ws.RunId, ws.ResetFromRunId, ws.ResetEventId, ws.ResetReason = runID, fromRunID, cut, reason
+			ws.Trace = childTrace(ws.GetTrace())
 			if ws.ExecutionTimeoutMs > 0 {
 				// The deadline is derived from the start, which replay needs unchanged.
 				ws.ExecutionTimeoutMs += now.Sub(time.Unix(0, c.GetTimestamp())).Milliseconds()

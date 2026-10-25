@@ -174,6 +174,14 @@ public final class E2E {
             return "released";
         });
 
+        // Tracing: a start's traceparent reaches the workflow (its run's span, the same on
+        // every replay) and the activity (a span of its own, in the same trace).
+        worker.workflow("JavaTraced", ctx -> {
+            String first = ctx.sideEffect("first-traceparent", ctx::traceparent);
+            String seen = ctx.activity("java-traced", "");
+            return first + " " + ctx.traceparent() + " " + ctx.tracestate() + " " + seen;
+        });
+        worker.activityWithContext("java-traced", (input, actx) -> actx.traceparent() + " " + actx.tracestate());
         worker.workflow("JavaAfterRestart", ctx -> ctx.activity("java-tick", ""));
         // The same activity name as the task-queue worker below: each queue's worker must get
         // only its own queue's tasks.
@@ -194,6 +202,18 @@ public final class E2E {
             fail("clock: output " + clock.get("output"));
         }
         if (!steps(clock).contains("maybe=CANCELLED maybe.timeout=COMPLETED")) fail("clock: steps " + steps(clock));
+
+        String callerTP = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        Workflowd.Started tracedRun = worker.start("JavaTraced", "", "",
+                new Workflowd.StartOptions().withTraceParent(callerTP, "java=e2e"));
+        String[] traced = String.valueOf(waitDone(worker, tracedRun.workflowId).get("output")).split(" ");
+        String[] run = traced[1].split("-");
+        String[] act = traced[3].split("-");
+        if (traced.length != 5 || !traced[0].equals(traced[1]) || !run[1].equals("0af7651916cd43dd8448eb211c80319c")
+                || run[2].equals("b7ad6b7169203331") || !act[1].equals(run[1]) || act[2].equals(run[2])
+                || !traced[2].equals("java=e2e") || !traced[4].equals("java=e2e")) {
+            fail("tracing: " + String.join(" ", traced));
+        }
 
         Map<String, Object> cancel = waitDone(worker, worker.startWorkflow("JavaCancel", "", ""));
         if (!"cancelled".equals(cancel.get("output"))) fail("cancel: output " + cancel.get("output"));

@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
@@ -56,5 +57,29 @@ func TestHTTPMetricsSummary(t *testing.T) {
 		if code, _ := h.do(t, "GET", "/api/metrics?window="+bad, ""); code != http.StatusBadRequest {
 			t.Errorf("window=%s: %d, want 400", bad, code)
 		}
+	}
+}
+
+// Over HTTP, the standard traceparent header on a start is what traces the
+// run, and polling workers get the trace on their tasks.
+func TestHTTPTraceparent(t *testing.T) {
+	h := newAPIHarness(t, state.WorkflowDefinition{Type: "Flow", Steps: state.Activities("one")})
+	req, _ := http.NewRequest("POST", h.srv.URL+"/api/workflows", strings.NewReader(`{"type":"Flow","workflow_id":"tp-1"}`))
+	req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	req.Header.Set("tracestate", "congo=t61")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil || res.StatusCode != http.StatusCreated {
+		t.Fatalf("start: %v %v", res, err)
+	}
+	res.Body.Close()
+	_, task := h.do(t, "GET", "/api/activity-tasks?activities=one&worker_id=w", "")
+	tp, _ := task["traceparent"].(string)
+	if !strings.HasPrefix(tp, "00-0af7651916cd43dd8448eb211c80319c-") || strings.Contains(tp, "b7ad6b7169203331") || task["tracestate"] != "congo=t61" {
+		t.Fatalf("activity task %v", task)
+	}
+	_, hist := h.do(t, "GET", "/api/workflows/tp-1/history", "")
+	first := hist["events"].([]any)[0].(map[string]any)["workflow_started"].(map[string]any)
+	if _, ok := first["trace"]; !ok {
+		t.Fatalf("WorkflowStarted carries no trace: %v", first)
 	}
 }

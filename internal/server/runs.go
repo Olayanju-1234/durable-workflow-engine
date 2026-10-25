@@ -140,6 +140,7 @@ func (e *Engine) continueAsNewLocked(w *wfState, d state.Decision) error {
 	if d.TaskQueue == "" {
 		next.TaskQueue = st.TaskQueue
 	}
+	next.Trace = childTrace(st.Trace)
 	ended := &history.HistoryEvent{Attributes: &history.HistoryEvent_WorkflowCompleted{
 		WorkflowCompleted: &history.WorkflowCompletedEvent{ContinuedAsNew: next},
 	}}
@@ -167,7 +168,7 @@ func (e *Engine) startNextRunLocked(w *wfState) error {
 			WorkflowId: localID(w.id), WorkflowType: next.GetWorkflowType(), Input: next.GetInput(),
 			ExecutionTimeoutMs: next.GetExecutionTimeoutMs(),
 			RunId:              next.GetRunId(), ContinuedFromRunId: st.RunID,
-			TaskQueue: next.GetTaskQueue(),
+			TaskQueue: next.GetTaskQueue(), Trace: next.GetTrace(),
 		},
 	}}
 	if err := e.newRunLocked(w, first); err != nil {

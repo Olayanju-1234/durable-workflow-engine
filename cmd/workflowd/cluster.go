@@ -108,7 +108,7 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 		NewEngine: func(hl server.HistoryLog) *server.Engine {
 			e := server.NewEngine(store, logger, server.WithHistoryLog(hl), server.WithLimits(cfg.limits),
 				server.WithNamespaces(cfg.sec.namespaces), server.WithGuardrails(cfg.sec.guardrails),
-				server.WithArchive(cfg.archive))
+				server.WithArchive(cfg.archive), server.WithTracer(cfg.tracer))
 			registerDemoTypes(e)
 			return e
 		},

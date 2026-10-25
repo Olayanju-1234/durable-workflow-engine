@@ -202,6 +202,15 @@ worker.activity('ts-fixable', async (seen) => {
   return seen;
 }, { as: 'json' });
 
+// Tracing: a start's traceparent reaches the workflow (its run's span, the
+// same on every replay) and the activity (a span of its own, in the same trace).
+worker.workflow('TsTraced', async (ctx) => {
+  const first = await ctx.sideEffect('first-traceparent', () => ctx.traceparent);
+  const seen = await ctx.activity('ts-traced', '');
+  return { first, now: ctx.traceparent, state: ctx.tracestate, seen };
+});
+worker.activity('ts-traced', async (_input, task) => `${task.traceparent ?? ''}|${task.tracestate ?? ''}`);
+
 // The same activity name as the task-queue worker below: each queue's worker
 // must get only its own queue's tasks.
 worker.activity('ts-shared', async () => 'default worker');
@@ -354,6 +363,17 @@ const [firstSeen, againSeen] = fixableSeen;
 if (onceCalls !== 1 || fixableSeen.length !== 2 || JSON.stringify(firstSeen) !== JSON.stringify(againSeen) ||
     JSON.stringify(JSON.parse(reset.output)) !== JSON.stringify(firstSeen) || reset.reset_from_run_id !== resetBody.previous_run_id) {
   fail(`reset: once ran ${onceCalls}x, fixable saw ${JSON.stringify(fixableSeen)}, output ${reset.output}`);
+}
+
+const callerTP = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+const tracedRun = await worker.start('TsTraced', '', { traceparent: callerTP, tracestate: 'ts=e2e' });
+const tracedOut = JSON.parse((await waitDone(tracedRun.workflowId)).output);
+const [, runTrace, runSpan] = tracedOut.now.split('-');
+const [activityTP, activityState] = tracedOut.seen.split('|');
+const [, actTrace, actSpan] = activityTP.split('-');
+if (tracedOut.first !== tracedOut.now || runTrace !== '0af7651916cd43dd8448eb211c80319c' || runSpan === 'b7ad6b7169203331' ||
+    actTrace !== runTrace || actSpan === runSpan || actSpan === 'b7ad6b7169203331' || tracedOut.state !== 'ts=e2e' || activityState !== 'ts=e2e') {
+  fail(`tracing: ${JSON.stringify(tracedOut)}`);
 }
 
 const foreverId = await worker.startWorkflow('TsForever', '', '', { executionTimeoutMs: 300 });

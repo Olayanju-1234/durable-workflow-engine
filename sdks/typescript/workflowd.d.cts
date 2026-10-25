@@ -79,6 +79,9 @@ export interface StartWorkflowOptions {
   idConflictPolicy?: 'FAIL' | 'USE_EXISTING';
   /** The task queue it runs on (default: the worker's own). */
   taskQueue?: string;
+  /** The caller's W3C Trace Context: the run becomes a child span of it (sent as the traceparent header). */
+  traceparent?: string;
+  tracestate?: string;
 }
 
 /** What start() did: the run it began, or with USE_EXISTING the run that held the id. */
@@ -95,6 +98,9 @@ export interface Context {
   readonly workflowId: string;
   /** This run's id: a workflow that continues as new gets a new one. */
   readonly runId: string;
+  /** The run's span as a W3C traceparent ('' when the run is not traced): the same on every replay. */
+  readonly traceparent: string;
+  readonly tracestate: string;
   /** True once a graceful cancel has reached the code (what it awaited rejected with CancelledFailure). */
   readonly cancelRequested: boolean;
   /**
@@ -180,6 +186,9 @@ export interface ActivityTask {
   /** "<workflow_id>/<sequence>": the same for every attempt, so an idempotency key for the side effect. */
   activityId: string;
   activity_id: string;
+  /** This attempt's span as a W3C traceparent, a child of the run's (absent when the run is not traced): pass it on to the calls the activity makes. */
+  traceparent?: string;
+  tracestate?: string;
   [field: string]: unknown;
 }
 

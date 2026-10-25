@@ -268,6 +268,10 @@ message WorkflowTask {
   int64 history_size_bytes = 8;
   // The task queue the task was routed by ("default" for the default queue).
   string task_queue = 9;
+  // The run's span as a W3C traceparent (and tracestate), empty when the run
+  // is not traced. The same on every task of the run, so replay can read it.
+  string traceparent = 10;
+  string tracestate = 11;
 }
 
 message PollWorkflowTaskResponse {
@@ -425,6 +429,10 @@ message StartWorkflowRequest {
   // activities unless they name another. Empty is the default queue, which
   // workers that name no queue poll.
   string task_queue = 7;
+  // Optional W3C Trace Context of the caller (as in the HTTP headers): the
+  // run becomes a child span of it, and its tasks carry the trace on.
+  string traceparent = 8;
+  string tracestate = 9;
 }
 
 // IdReusePolicy decides whether a start may begin a new run under a workflow
@@ -490,6 +498,11 @@ message Task {
   string activity_id = 9;
   // The task queue the task was routed by ("default" for the default queue).
   string task_queue = 10;
+  // This attempt's span as a W3C traceparent (and tracestate), a child of the
+  // run's span; empty when the run is not traced. Pass it on to the calls the
+  // activity makes, and they join the workflow's trace.
+  string traceparent = 11;
+  string tracestate = 12;
 }
 
 message PollTaskResponse {

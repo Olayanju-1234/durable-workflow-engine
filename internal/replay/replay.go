@@ -17,6 +17,7 @@ import (
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/tracing"
 	"github.com/olayanju-1234/durable-workflow-engine/workflow"
 )
 
@@ -141,6 +142,7 @@ func newContext(st *state.State, events []*history.HistoryEvent, logger *slog.Lo
 		info: workflow.Info{
 			WorkflowID: events[0].GetWorkflowStarted().GetWorkflowId(), WorkflowType: st.WorkflowType,
 			RunID: st.RunID, ContinuedFromRunID: st.ContinuedFromRunID, TaskQueue: state.QueueName(st.TaskQueue),
+			TraceParent: tracing.FromIDs(st.Trace.GetTraceId(), st.Trace.GetSpanId(), st.Trace.GetSampled(), "").Traceparent(),
 		},
 		resolvedAt: make(map[int64]int64),
 		now:        events[0].GetTimestamp(),

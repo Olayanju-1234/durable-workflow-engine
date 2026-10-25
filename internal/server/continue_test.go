@@ -359,7 +359,8 @@ func TestRetentionPurgesArchivedRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFinished(t, e, "cd", 5*time.Second)
-	id, _ := e.StartWorkflow("Slow", nil, "")
+	// On a queue no worker polls: the test's worker takes any task on the default one.
+	id, _ := e.StartWorkflow("Slow", nil, "", WithTaskQueue("nobody-polls-this"))
 	if err := e.CancelWorkflow(id, ""); err != nil {
 		t.Fatal(err)
 	}
