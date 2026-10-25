@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/archive"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/audit"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/ctl"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/raft"
@@ -54,6 +56,8 @@ func main() {
 		checkFmt    = flag.Bool("check-format", false, "report the data directory's history format and whether this binary can serve it, then exit (run with the engine stopped)")
 		keysFile    = flag.String("encryption-keys", "", "encrypt history at rest with the keys in this JSON file ({\"active\": id, \"keys\": [{\"id\", \"key\"}]}); new events are sealed with the active key, and every key listed opens events sealed with it. Keep it out of the data directory and its backups: a lost key loses its events (docs: Encryption)")
 		encryptAll  = flag.Bool("encrypt-all", false, "with --encryption-keys: rewrite every history in --data-dir sealed with the active key (so older keys can be retired), then exit; run with the engine stopped")
+		auditLog    = flag.String("audit-log", "", "where to record operator actions (starts, signals, cancels, terminations, resets, schedule changes, backups, reloads) as JSON lines; default <data-dir>/audit/audit.log, \"off\" records none")
+		reloadEvery = flag.Duration("reload-interval", 10*time.Second, "how often to check the token, namespaces and key files for changes and apply them (0: only on SIGHUP)")
 		decryptAll  = flag.Bool("decrypt-all", false, "with --encryption-keys: rewrite every history in --data-dir as plaintext (so a binary before 0.5.0 can read it again), then exit; run with the engine stopped")
 		rescanFmt   = flag.Bool("rescan-format", false, "like --check-format, then record the format the histories need now (lowers it once newer histories are gone)")
 
@@ -136,6 +140,20 @@ func main() {
 			addr: *addr, metricsAddr: *metricsAddr, httpAddr: *httpAddr,
 			sec: sec, demoWorker: *demoWorker, retention: *retention,
 			limits: server.Limits{MaxHistoryEvents: *maxEvents, MaxHistoryBytes: *maxBytes, MaxPayloadBytes: *maxPayload},
+			reload: reloadConfig{authTokenFile: secFlags.authTokenFile, metricsTokenFile: secFlags.metricsTokenFile,
+				namespacesFile: secFlags.namespacesFile, keysFile: *keysFile, interval: *reloadEvery},
+		}
+		if *auditLog != "off" {
+			path := *auditLog
+			if path == "" {
+				path = filepath.Join(*dataDir, "audit", "audit.log")
+			}
+			if cfg.sec.audit, err = audit.Open(path); err != nil {
+				logger.Error("open the audit log", "err", err)
+				os.Exit(1)
+			}
+			defer cfg.sec.audit.Close()
+			logger.Info("operator actions are recorded", "audit_log", path)
 		}
 		if err := cfg.limits.Validate(); err != nil {
 			logger.Error("invalid limits", "err", err)
@@ -181,6 +199,7 @@ const shutdownGracePeriod = 10 * time.Second
 type serveConfig struct {
 	addr, metricsAddr, httpAddr string
 	sec                         security
+	reload                      reloadConfig
 	demoWorker                  bool
 	retention                   time.Duration
 	archive                     archive.Store // nil: retention deletes outright
@@ -244,6 +263,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 	defer stop()
 
 	startEngineServices(ctx, &bg, engine, logger, cfg)
+	startReloader(ctx, &bg, store, logger, cfg)
 
 	// Two HTTP listeners, deliberately separate from each other and from gRPC:
 	// the dashboard + JSON API are for humans and operators, while /metrics is
@@ -290,6 +310,18 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// startReloader re-reads the token, namespaces and key files on SIGHUP and
+// when they change, for as long as the process serves.
+func startReloader(ctx context.Context, bg *sync.WaitGroup, store *history.HistoryStore, logger *slog.Logger, cfg serveConfig) {
+	r := newReloader(cfg.reload, &cfg.sec, store, logger)
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		r.run(ctx)
+	}()
+	logger.Info("reloads", "covers", cfg.reload.describe())
 }
 
 // startEngineServices runs the in-process helpers an engine may have (the demo

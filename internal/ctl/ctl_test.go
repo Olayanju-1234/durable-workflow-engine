@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/archive"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/audit"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/replay"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
@@ -51,7 +52,12 @@ func newHarness(t *testing.T, opts ...server.Option) *harness {
 	for _, ns := range []string{"", "acme"} {
 		e.In(ns).RegisterWorkflow("Approval", approval)
 	}
-	api := server.NewHTTPAPI(e, logger, server.WithAuthToken("admin"), server.WithNamespaceSet(set))
+	auditLog, err := audit.Open(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { auditLog.Close() })
+	api := server.NewHTTPAPI(e, logger, server.WithAuthToken("admin"), server.WithNamespaceSet(set), server.WithAudit(auditLog))
 	srv := httptest.NewServer(api.Wrap(api.Handler()))
 	t.Cleanup(srv.Close)
 	for name, tok := range map[string]string{"admin.token": "admin", "acme.token": "acme-token"} {
@@ -321,5 +327,28 @@ func TestBulkActionsAndReset(t *testing.T) {
 	if err := json.Unmarshal([]byte(h.ok("reset", "--status", "cancelled", "--yes", "--json")), &res); err != nil ||
 		len(res.Results) != 1 || res.Results[0].WorkflowID != "b3" || !res.Results[0].OK || res.Results[0].Result["run_id"] == "" {
 		t.Fatalf("reset --json by status: %+v %v", res, err)
+	}
+}
+
+func TestAuditCommand(t *testing.T) {
+	h := newHarness(t)
+	h.ok("start", "Approval", "--id", "au1", "--input", "private")
+	h.ok("terminate", "au1", "--reason", "cleanup")
+	out := h.ok("audit")
+	contains(t, "audit", out, "ACTOR", "workflow.terminate", "au1", "reason=cleanup", "workflow.start", "engine:")
+	if strings.Contains(out, "private") {
+		t.Fatalf("the audit shows an input:\n%s", out)
+	}
+	if strings.Index(out, "workflow.terminate") > strings.Index(out, "workflow.start") {
+		t.Fatalf("not newest first:\n%s", out)
+	}
+	contains(t, "audit --action", h.ok("audit", "--action", "workflow.start"), "workflow.start")
+	if out := h.ok("audit", "--action", "workflow.start"); strings.Contains(out, "terminate") {
+		t.Fatalf("--action did not filter:\n%s", out)
+	}
+	// A namespace token sees its namespace only.
+	h.env[envTokenFile] = filepath.Join(h.dir, "acme.token")
+	if out := h.ok("audit"); strings.Contains(out, "au1") {
+		t.Fatalf("acme's token sees the default namespace's actions:\n%s", out)
 	}
 }

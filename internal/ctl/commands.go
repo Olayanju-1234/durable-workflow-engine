@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ func commands() map[string]command {
 		{"cancel", "<workflow-id>...", "Cancel workflows (--graceful lets their code compensate first); or every match of --status/--type/--query.", setupCancel},
 		{"terminate", "<workflow-id>...", "End workflows at once, recording why; or every match of --status/--type/--query.", setupTerminate},
 		{"reset", "<workflow-id>...", "Start finished runs again from the step that failed (or --event); or every match of --status/--type/--query.", setupReset},
+		{"audit", "", "Show operator actions, newest first: who started, signalled, cancelled, terminated or reset what, and when.", setupAudit},
 		{"schedule list", "", "List schedules.", setupScheduleList},
 		{"schedule create", "<schedule-id>", "Create a schedule, or replace one with the same id.", setupScheduleCreate},
 		{"schedule delete", "<schedule-id>", "Delete a schedule (its runs carry on).", setupScheduleDelete},
@@ -393,6 +395,69 @@ func setupRuns(*flag.FlagSet) func(*cli, []string) error {
 		}
 		return t.flush()
 	}
+}
+
+func setupAudit(fs *flag.FlagSet) func(*cli, []string) error {
+	limit := fs.Int("limit", 50, "show at most this many (1-1000)")
+	action := fs.String("action", "", "only actions starting with this, e.g. workflow.reset or schedule.")
+	target := fs.String("target", "", "only actions on this workflow or schedule id")
+	return func(c *cli, pos []string) error {
+		if err := wantArgs(pos); err != nil {
+			return err
+		}
+		q := url.Values{"limit": {strconv.Itoa(*limit)}}
+		if *action != "" {
+			q.Set("action", *action)
+		}
+		if *target != "" {
+			q.Set("target", *target)
+		}
+		var r struct {
+			Enabled bool `json:"enabled"`
+			Entries []struct {
+				Time      string            `json:"time"`
+				Actor     string            `json:"actor"`
+				Namespace string            `json:"namespace"`
+				Action    string            `json:"action"`
+				Target    string            `json:"target"`
+				Outcome   string            `json:"outcome"`
+				Status    int               `json:"status"`
+				Error     string            `json:"error"`
+				Via       string            `json:"via"`
+				Details   map[string]string `json:"details"`
+			} `json:"entries"`
+		}
+		if printed, err := c.getJSON("/api/audit", q, &r); printed || err != nil {
+			return err
+		}
+		if !r.Enabled {
+			fmt.Fprintln(c.errOut, "this engine records no audit log (--audit-log off)")
+			return nil
+		}
+		t := newTable(c.out)
+		t.row("WHEN", "ACTOR", "NAMESPACE", "ACTION", "TARGET", "OUTCOME", "DETAILS")
+		for _, e := range r.Entries {
+			outcome := e.Outcome
+			if e.Error != "" {
+				outcome += ": " + e.Error
+			}
+			var details []string
+			for _, k := range sortedKeys(e.Details) {
+				details = append(details, k+"="+e.Details[k])
+			}
+			t.row(ago(e.Time), e.Actor, e.Namespace, e.Action, e.Target, outcome, strings.Join(details, " "))
+		}
+		return t.flush()
+	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // payloadFlags registers --<name> and --<name>-file, and returns what reads

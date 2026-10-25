@@ -123,6 +123,11 @@ func runCluster(logger *slog.Logger, store *history.HistoryStore, dataDir string
 	}
 	// Deferred first, so it runs last: the API servers drain before Raft stops.
 	defer cl.Stop()
+	var bg sync.WaitGroup
+	defer bg.Wait()
+	rctx, endReloads := context.WithCancel(ctx)
+	defer endReloads() // before bg.Wait, even when serving fails
+	startReloader(rctx, &bg, store, logger, cfg)
 	logger.Info("cluster member running", "node_id", cc.nodeID, "raft_addr", cc.raftAddr, "version", version.Version)
 
 	var httpSrvs []*http.Server

@@ -38,6 +38,14 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   key, `--decrypt-all` goes back to plaintext; `--check-format --encryption-keys` reports which
   keys seal how many events. `/api/health` reports `encryption`. Sealed events need history
   format 7. A lost key loses its events: see the docs.
+- **Reloading without a restart** (ADR-0023): `SIGHUP`, or a change to the file (checked every
+  `--reload-interval`, 10 s), re-reads `--auth-token-file`, `--metrics-auth-token-file`,
+  `--namespaces` and `--encryption-keys`, all or nothing; the old token stops working on the next
+  call and workers stay connected. `SIGHUP` no longer stops the engine.
+- **An audit log** (ADR-0023) of operator actions: starts, signals, cancels, terminations, resets,
+  schedule changes, backups and reloads, with when, who (a hash of the token, never the token),
+  namespace, target, outcome, address and settings, never a payload. JSON lines at `--audit-log`
+  (default `<data-dir>/audit/audit.log`, rotated), `GET /api/audit`, `workflowd ctl audit`.
 - **Bulk actions**: `workflowd ctl cancel`, `terminate` and `reset` take several ids or every
   match of `--status` / `--type` / `--query`, asking first (`--yes`); the dashboard selects rows
   and confirms before acting. The dashboard's signal form checks a JSON payload before sending it.

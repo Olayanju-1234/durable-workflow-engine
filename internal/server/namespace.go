@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
@@ -85,8 +87,84 @@ type Namespace struct {
 }
 
 // NamespaceSet is the engine's configured namespaces. It always holds default.
+// The engine, the guard and the authorizer share one set, so Replace (a
+// reload of --namespaces) reaches them all at once.
 type NamespaceSet struct {
+	mu     sync.RWMutex
 	byName map[string]*Namespace
+}
+
+// Replace makes the set hold what next holds: its namespaces, tokens and
+// settings. next is not used afterwards.
+func (s *NamespaceSet) Replace(next *NamespaceSet) {
+	next.mu.RLock()
+	byName := next.byName
+	next.mu.RUnlock()
+	s.mu.Lock()
+	s.byName = byName
+	s.mu.Unlock()
+}
+
+// Diff describes how next differs from s, for the audit log: namespaces
+// added and removed, and those whose tokens or settings changed.
+func (s *NamespaceSet) Diff(next *NamespaceSet) (added, removed, changed []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	next.mu.RLock()
+	defer next.mu.RUnlock()
+	for name, ns := range next.byName {
+		old, ok := s.byName[name]
+		switch {
+		case !ok:
+			added = append(added, name)
+		case !sameNamespace(old, ns):
+			changed = append(changed, name)
+		}
+	}
+	for name := range s.byName {
+		if _, ok := next.byName[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(changed)
+	return added, removed, changed
+}
+
+func sameNamespace(a, b *Namespace) bool {
+	if fmt.Sprint(a.tokens) != fmt.Sprint(b.tokens) {
+		return false
+	}
+	ac, bc := a.cfg, b.cfg
+	ac.Tokens, bc.Tokens, ac.TokenSHA256, bc.TokenSHA256 = nil, nil, nil, nil
+	return fmt.Sprintf("%+v", deref(ac)) == fmt.Sprintf("%+v", deref(bc))
+}
+
+// deref spells a config's optional settings out by value, so two configs
+// that say the same compare equal.
+func deref(c NamespaceConfig) []any {
+	out := []any{c.Name}
+	for _, p := range []*int{c.MaxActiveWorkflows, c.MaxStartsPerMinute, c.RateLimitPerMinute, c.RateLimitBurst} {
+		if p == nil {
+			out = append(out, nil)
+		} else {
+			out = append(out, *p)
+		}
+	}
+	for _, p := range []*bool{c.ReadOnly, c.ReadOnlySchedules} {
+		if p == nil {
+			out = append(out, nil)
+		} else {
+			out = append(out, *p)
+		}
+	}
+	if c.Retention == nil {
+		out = append(out, nil)
+	} else {
+		out = append(out, *c.Retention)
+	}
+	return out
 }
 
 // NewNamespaceSet validates cfgs: names are unique and valid, and a token
@@ -206,6 +284,8 @@ func (s *NamespaceSet) Get(name string) *Namespace {
 		}
 		return nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.byName[name]
 }
 
@@ -214,6 +294,8 @@ func (s *NamespaceSet) Names() []string {
 	if s == nil {
 		return []string{DefaultNamespace}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	names := make([]string, 0, len(s.byName))
 	for n := range s.byName {
 		if n != DefaultNamespace {
@@ -232,6 +314,8 @@ func (s *NamespaceSet) byToken(token string) *Namespace {
 	}
 	h := sha256.Sum256([]byte(token))
 	var found *Namespace
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, ns := range s.byName {
 		for _, t := range ns.tokens {
 			if subtle.ConstantTimeCompare(h[:], t[:]) == 1 {
@@ -294,6 +378,16 @@ type Grant struct {
 	Admin     bool
 	Anonymous bool
 	Client    string
+	// Actor names the caller in the audit log: "engine:<hash>" for the engine
+	// token, "token:<hash>" for a namespace token, "anonymous" without one.
+	// A hash is the first 16 hex digits of the token's SHA-256.
+	Actor string
+}
+
+// tokenHash is how the audit log names a token without revealing it.
+func tokenHash(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:8])
 }
 
 // Authorizer turns a call's bearer token and requested namespace into a
@@ -306,7 +400,7 @@ type Grant struct {
 //     no engine token and no default-namespace token are set (or, with public
 //     reads, for reads).
 type Authorizer struct {
-	adminToken  string
+	admin       atomic.Pointer[string] // the engine token ("" for none)
 	publicReads bool
 	namespaces  *NamespaceSet
 }
@@ -314,8 +408,19 @@ type Authorizer struct {
 // NewAuthorizer builds an Authorizer. An empty adminToken and a nil set give
 // the open single-namespace engine every release before 0.4.0 was.
 func NewAuthorizer(adminToken string, publicReads bool, namespaces *NamespaceSet) *Authorizer {
-	return &Authorizer{adminToken: adminToken, publicReads: publicReads, namespaces: namespaces}
+	a := &Authorizer{publicReads: publicReads, namespaces: namespaces}
+	a.admin.Store(&adminToken)
+	return a
 }
+
+// SetAdminToken replaces the engine token (a reload of --auth-token-file);
+// the old one stops working at once.
+func (a *Authorizer) SetAdminToken(token string) { a.admin.Store(&token) }
+
+// AdminToken is the engine token in force ("" for none).
+func (a *Authorizer) AdminToken() string { return a.adminToken() }
+
+func (a *Authorizer) adminToken() string { return *a.admin.Load() }
 
 // Namespaces is the configured set (nil: only default).
 func (a *Authorizer) Namespaces() *NamespaceSet {
@@ -334,7 +439,7 @@ func (a *Authorizer) open() bool {
 		return true
 	}
 	d := a.namespaces.Get(DefaultNamespace)
-	return a.adminToken == "" && (d == nil || len(d.tokens) == 0)
+	return a.adminToken() == "" && (d == nil || len(d.tokens) == 0)
 }
 
 // Authorize decides which namespace a call may use. token is the bearer token
@@ -350,14 +455,14 @@ func (a *Authorizer) Authorize(token, requested string, read bool) (Grant, error
 		if requested != "" && requested != DefaultNamespace {
 			return Grant{}, fmt.Errorf("%w: namespace %q needs a token", ErrUnauthenticated, requested)
 		}
-		return Grant{Namespace: DefaultNamespace, Anonymous: token == ""}, nil
+		return Grant{Namespace: DefaultNamespace, Anonymous: token == "", Actor: "anonymous"}, nil
 	}
 	if token != "" {
-		if a.adminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(a.adminToken)) == 1 {
+		if admin := a.adminToken(); admin != "" && subtle.ConstantTimeCompare([]byte(token), []byte(admin)) == 1 {
 			if requested == "" {
 				requested = DefaultNamespace
 			}
-			return Grant{Namespace: requested, Admin: true}, nil
+			return Grant{Namespace: requested, Admin: true, Actor: "engine:" + tokenHash(token)}, nil
 		}
 		ns := a.namespaces.byToken(token)
 		if ns == nil {
@@ -366,8 +471,7 @@ func (a *Authorizer) Authorize(token, requested string, read bool) (Grant, error
 		if requested != "" && requested != ns.Name {
 			return Grant{}, fmt.Errorf("%w: this token is for namespace %q, not %q", ErrForbidden, ns.Name, requested)
 		}
-		h := sha256.Sum256([]byte(token))
-		return Grant{Namespace: ns.Name, Client: "token:" + hex.EncodeToString(h[:8])}, nil
+		return Grant{Namespace: ns.Name, Client: "token:" + tokenHash(token), Actor: "token:" + tokenHash(token)}, nil
 	}
 	if requested == "" {
 		requested = DefaultNamespace
@@ -376,7 +480,7 @@ func (a *Authorizer) Authorize(token, requested string, read bool) (Grant, error
 		return Grant{}, fmt.Errorf("%w: namespace %q needs a token", ErrUnauthenticated, requested)
 	}
 	if a.open() || (read && a.publicReads) {
-		return Grant{Namespace: DefaultNamespace, Anonymous: true}, nil
+		return Grant{Namespace: DefaultNamespace, Anonymous: true, Actor: "anonymous"}, nil
 	}
 	return Grant{}, ErrUnauthenticated
 }
