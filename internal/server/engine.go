@@ -1142,7 +1142,12 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 			ev.MinReaderFormat = need
 		}
 	}
-	if err := e.hlog.Append(workflowID, ev); err != nil {
+	// Sealed before the log sees it: a cluster's Raft log holds ciphertext too.
+	rec, err := e.store.Seal(ev)
+	if err != nil {
+		return fmt.Errorf("server: append %s: %w", workflowID, err)
+	}
+	if err := e.hlog.Append(workflowID, rec); err != nil {
 		// The event may or may not have reached the log; read it back next time.
 		w.forget()
 		e.indexLocked(w)
@@ -1266,6 +1271,8 @@ type EngineStats struct {
 	HistoryFormat uint32
 	// Archive says where finished runs are archived ("": nowhere).
 	Archive string
+	// EncryptionKey is the key new events are sealed with ("": encryption off).
+	EncryptionKey string
 }
 
 // Stats returns the current gauge values. Cheap: atomic, channel-length and
@@ -1277,6 +1284,7 @@ func (e *Engine) Stats() EngineStats {
 		WorkflowTaskQueueDepth: e.workflowQueue.depth(),
 		HistoryFormat:          e.store.Format(),
 		Archive:                archiveName(e.archive),
+		EncryptionKey:          e.store.Keyring().Active(),
 	}
 }
 

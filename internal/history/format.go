@@ -27,9 +27,11 @@ const (
 	FormatRuns uint32 = 5
 	// FormatNamespaces: a history outside the default namespace (0.4.0).
 	FormatNamespaces uint32 = 6
+	// FormatEncrypted: an event encrypted at rest (0.5.0, ADR-0022).
+	FormatEncrypted uint32 = 7
 
 	// FormatVersion is the newest format this binary reads and writes.
-	FormatVersion = FormatNamespaces
+	FormatVersion = FormatEncrypted
 )
 
 // FormatRelease names the first release (and commit) whose binary reads each
@@ -41,6 +43,7 @@ var FormatRelease = map[uint32]string{
 	FormatClosedSteps:   "workflowd 0.2.0 or later",
 	FormatRuns:          "workflowd 0.3.0 or later",
 	FormatNamespaces:    "workflowd 0.4.0 or later",
+	FormatEncrypted:     "workflowd 0.5.0 or later",
 }
 
 // ErrFormatTooNew means the data directory, or one of its histories, was

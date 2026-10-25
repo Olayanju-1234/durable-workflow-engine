@@ -84,7 +84,11 @@ func (e *Engine) newRunLocked(w *wfState, first *history.HistoryEvent) error {
 	}
 	archive := archiveID(w.id, st.RunID, events[len(events)-1].GetTimestamp())
 	first.EventId, first.Timestamp = 1, time.Now().UnixNano()
-	if err := e.hlog.NewRun(w.id, archive, first); err != nil {
+	rec, err := e.store.Seal(first)
+	if err != nil {
+		return fmt.Errorf("server: new run of %s: %w", w.id, err)
+	}
+	if err := e.hlog.NewRun(w.id, archive, rec); err != nil {
 		w.forget()
 		e.indexLocked(w)
 		return fmt.Errorf("server: new run of %s: %w", w.id, err)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -45,8 +46,36 @@ type HistoryStore struct {
 	// Guarded by mu.
 	format uint32
 
+	// keyring seals new events and opens sealed ones (nil: encryption off).
+	keyring atomic.Pointer[Keyring]
+
 	// writeFile is (*os.File).Write; tests swap it to inject a torn write.
 	writeFile func(f *os.File, b []byte) (int, error)
+}
+
+// SetKeyring turns encryption at rest on (or, with nil, off for new events:
+// sealed ones then cannot be read). It may be called while the store is in
+// use; reloading the key file does.
+func (s *HistoryStore) SetKeyring(k *Keyring) { s.keyring.Store(k) }
+
+// Keyring is the keyring in use (nil: encryption off).
+func (s *HistoryStore) Keyring() *Keyring { return s.keyring.Load() }
+
+// Seal returns ev encrypted under the active key, or ev with encryption off.
+// The engine seals before handing an event to its history log, so a cluster's
+// Raft log holds ciphertext too.
+func (s *HistoryStore) Seal(ev *HistoryEvent) (*HistoryEvent, error) {
+	return s.keyring.Load().Seal(ev)
+}
+
+// Open returns ev decrypted (see Keyring.Open).
+func (s *HistoryStore) Open(ev *HistoryEvent) (*HistoryEvent, error) {
+	return s.keyring.Load().Open(ev)
+}
+
+// OpenAll opens every sealed event of a history read as raw records.
+func (s *HistoryStore) OpenAll(events []*HistoryEvent) ([]*HistoryEvent, error) {
+	return s.keyring.Load().OpenAll(events)
 }
 
 // NewHistoryStore opens a store rooted at dir, creating the directory if needed.
@@ -152,6 +181,10 @@ func (s *HistoryStore) append(workflowID string, event *HistoryEvent, sync bool)
 	if err := validateWorkflowID(workflowID); err != nil {
 		return err
 	}
+	event, err := s.Seal(event)
+	if err != nil {
+		return err
+	}
 	if need := event.GetMinReaderFormat(); need > FormatBase {
 		if err := s.RequireFormat(need); err != nil {
 			return err
@@ -206,11 +239,30 @@ func (s *HistoryStore) dropHandle(workflowID string, f *os.File) {
 	}
 }
 
-// ReadAll returns every event in the workflow's history, in append order. A
-// missing history file yields an empty slice. A trailing torn record (a crash
-// mid-append) is treated as the end of the log; a CRC mismatch on an otherwise
-// complete record is a hard error.
+// ReadAll returns every event in the workflow's history, in append order,
+// sealed ones opened. A missing history file yields an empty slice. A
+// trailing torn record (a crash mid-append) is treated as the end of the log;
+// a CRC mismatch on an otherwise complete record is a hard error, and so is a
+// sealed event the keyring cannot open.
 func (s *HistoryStore) ReadAll(workflowID string) ([]*HistoryEvent, error) {
+	events, err := s.ReadSealed(workflowID)
+	if err != nil {
+		return nil, err
+	}
+	k := s.keyring.Load()
+	for i, ev := range events {
+		if IsSealed(ev) {
+			if events[i], err = k.Open(ev); err != nil {
+				return nil, fmt.Errorf("%w (history %s)", err, workflowID)
+			}
+		}
+	}
+	return events, nil
+}
+
+// ReadSealed is ReadAll without opening sealed events: their headers (ids,
+// times, format stamps, key ids) are all it needs no key for.
+func (s *HistoryStore) ReadSealed(workflowID string) ([]*HistoryEvent, error) {
 	if err := validateWorkflowID(workflowID); err != nil {
 		return nil, err
 	}
@@ -423,6 +475,10 @@ func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent,
 	var rec []byte
 	need := FormatBase
 	for _, ev := range append([]*HistoryEvent{first}, more...) {
+		ev, err := s.Seal(ev)
+		if err != nil {
+			return err
+		}
 		payload, err := proto.Marshal(ev)
 		if err != nil {
 			return fmt.Errorf("history: marshal event: %w", err)
@@ -488,6 +544,42 @@ func (s *HistoryStore) NewRun(workflowID, archiveID string, first *HistoryEvent,
 		return fmt.Errorf("history: start %s's next run: %w", workflowID, err)
 	}
 	return syncDir(s.dirOf(workflowID))
+}
+
+// Rewrite replaces a history with events, written as given (sealed or not),
+// through a temp file renamed into place, so a crash leaves the old history or
+// the new one. It is for offline tools (--encrypt-all): run it with the
+// engine stopped.
+func (s *HistoryStore) Rewrite(workflowID string, events []*HistoryEvent) error {
+	if err := validateWorkflowID(workflowID); err != nil {
+		return err
+	}
+	var data []byte
+	need := FormatBase
+	for _, ev := range events {
+		payload, err := proto.Marshal(ev)
+		if err != nil {
+			return fmt.Errorf("history: marshal event: %w", err)
+		}
+		r, err := record.Encode(payload)
+		if err != nil {
+			return fmt.Errorf("history: %w", err)
+		}
+		data = append(data, r...)
+		need = max(need, ev.GetMinReaderFormat())
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireFormatLocked(need); err != nil {
+		return err
+	}
+	s.releaseLocked(workflowID)
+	delete(s.dirty, workflowID)
+	_, name := SplitKey(workflowID)
+	if err := record.ReplaceFile(s.dirOf(workflowID), name+historyExt, data); err != nil {
+		return fmt.Errorf("history: rewrite %s: %w", workflowID, err)
+	}
+	return nil
 }
 
 // syncFile fsyncs a file through a fresh descriptor.

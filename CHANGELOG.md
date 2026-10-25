@@ -30,6 +30,14 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `GET /api/metrics`, which the engine computes from its own metrics sampled every 10 seconds; no
   Prometheus needed. New `workflowd_namespace_*` families split started, finished, task results,
   step latency, queue depths and live workflows by namespace; the existing families are unchanged.
+- **Encryption at rest** (ADR-0022): `--encryption-keys FILE` seals each event's contents
+  (names, payloads, errors) with AES-256-GCM under the active key, bound to the key id and event
+  id; ids and timestamps stay in the clear. The data directory, backups, archived runs and a
+  cluster's Raft log hold ciphertext; the APIs, dashboard and SDKs see plaintext. Plaintext
+  histories stay readable. Rotation by key id; `--encrypt-all` reseals everything with the active
+  key, `--decrypt-all` goes back to plaintext; `--check-format --encryption-keys` reports which
+  keys seal how many events. `/api/health` reports `encryption`. Sealed events need history
+  format 7. A lost key loses its events: see the docs.
 - **Bulk actions**: `workflowd ctl cancel`, `terminate` and `reset` take several ids or every
   match of `--status` / `--type` / `--query`, asking first (`--yes`); the dashboard selects rows
   and confirms before acting. The dashboard's signal form checks a JSON payload before sending it.
