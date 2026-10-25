@@ -152,7 +152,7 @@ func (e *Engine) failAtLimitLocked(w *wfState, why string) error {
 		return err
 	}
 	e.metrics.historyLimit.With("failed").Inc()
-	e.metrics.workflowsFinished.With("failed").Inc()
+	e.metrics.finished(nsOf(w.id), "failed")
 	e.metrics.workflowsActive.Dec()
 	e.log.Error("workflow failed at its history limit", "workflow_id", w.id, "reason", why)
 	return fmt.Errorf("%w: %s: %s", ErrHistoryLimit, w.id, why)

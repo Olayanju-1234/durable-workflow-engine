@@ -97,6 +97,7 @@ type Engine struct {
 	idx   visibilityIndex
 	sched scheduler
 	feed  feed
+	pulse pulse
 
 	closeOnce sync.Once
 	done      chan struct{} // closed by Close; ends long polls
@@ -176,6 +177,7 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 		tombstones:       make(map[string]string),
 		pendingDecisions: make(map[string]*decisionTask),
 		quota:            quotas{reserved: map[string]int{}, starts: map[string]*limiter{}},
+		pulse:            pulse{interval: defaultPulseInterval},
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -184,6 +186,8 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 	e.metrics = newEngineMetrics(e.registry,
 		func() float64 { return float64(e.queue.depth()) },
 		func() float64 { return float64(e.workflowQueue.depth()) })
+	e.registerNamespaceGauges()
+	go e.runPulse()
 	e.timers = timer.New(e.onTimerFired)
 	e.timers.Start()
 	e.retryTimers = timer.New(e.onRetryDue)
@@ -662,8 +666,7 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 		}
 		// The attempt is over; its lease is spent (a retry gets a fresh one).
 		e.dropLease(workflowID, sequence)
-		e.metrics.taskResults.With("failed").Inc()
-		e.metrics.stepDuration.Observe(time.Since(claimedAt).Seconds())
+		e.metrics.stepResult(nsOf(workflowID), "failed", time.Since(claimedAt))
 		e.log.Warn("step failed", "workflow_id", workflowID, "step", stepName, "sequence", sequence,
 			"error", stepErr, "error_type", failure.Type, "non_retryable", failure.NonRetryable,
 			"attempt", attempt.Attempts, "will_retry", willRetry)
@@ -681,8 +684,7 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 		return err
 	}
 	e.dropLease(workflowID, sequence)
-	e.metrics.taskResults.With("completed").Inc()
-	e.metrics.stepDuration.Observe(time.Since(claimedAt).Seconds())
+	e.metrics.stepResult(nsOf(workflowID), "completed", time.Since(claimedAt))
 	e.log.Info("step completed", "workflow_id", workflowID, "step", stepName, "sequence", sequence)
 	return e.advanceIfRegisteredLocked(w, workflowType)
 }
@@ -1056,7 +1058,7 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 			if err := e.appendLocked(w, done, nextID); err != nil {
 				return err
 			}
-			e.metrics.workflowsFinished.With("completed").Inc()
+			e.metrics.finished(nsOf(workflowID), "completed")
 			e.metrics.workflowsActive.Dec()
 			e.log.Info("workflow completed", "workflow_id", workflowID)
 			return nil
@@ -1078,7 +1080,7 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 			if cancelled {
 				how = "cancelled"
 			}
-			e.metrics.workflowsFinished.With(how).Inc()
+			e.metrics.finished(nsOf(workflowID), how)
 			e.metrics.workflowsActive.Dec()
 			e.log.Warn("workflow "+how, "workflow_id", workflowID, "error", decision.Error)
 			return nil

@@ -145,3 +145,47 @@ func TestConcurrentUpdatesAndScrapes(t *testing.T) {
 		t.Errorf("vec child a = %d, want 4000", got)
 	}
 }
+
+func TestHistogramVecRendersLabelsBeforeLe(t *testing.T) {
+	r := NewRegistry()
+	v := r.HistogramVec("step_seconds", "Step latency.", []float64{0.1, 1}, "namespace")
+	v.With("b").Observe(0.05)
+	v.With("a").Observe(0.5)
+	v.With("a").Observe(5)
+
+	want := "# HELP step_seconds Step latency.\n" +
+		"# TYPE step_seconds histogram\n" +
+		"step_seconds_bucket{namespace=\"a\",le=\"0.1\"} 0\n" +
+		"step_seconds_bucket{namespace=\"a\",le=\"1\"} 1\n" +
+		"step_seconds_bucket{namespace=\"a\",le=\"+Inf\"} 2\n" +
+		"step_seconds_sum{namespace=\"a\"} 5.5\n" +
+		"step_seconds_count{namespace=\"a\"} 2\n" +
+		"step_seconds_bucket{namespace=\"b\",le=\"0.1\"} 1\n" +
+		"step_seconds_bucket{namespace=\"b\",le=\"1\"} 1\n" +
+		"step_seconds_bucket{namespace=\"b\",le=\"+Inf\"} 1\n" +
+		"step_seconds_sum{namespace=\"b\"} 0.05\n" +
+		"step_seconds_count{namespace=\"b\"} 1\n"
+	if got := scrape(r); got != want {
+		t.Errorf("scrape:\n got %q\nwant %q", got, want)
+	}
+	snap := v.Snapshots()["a"]
+	if snap.Count != 2 || snap.Counts[0] != 0 || snap.Counts[1] != 1 || snap.Sum != 5.5 {
+		t.Errorf("snapshot %+v", snap)
+	}
+}
+
+func TestGaugeVecFuncAndCounterValues(t *testing.T) {
+	r := NewRegistry()
+	r.GaugeVecFunc("depth", "Queued.", []string{"namespace", "kind"}, func() map[string]float64 {
+		return map[string]float64{"b\x00task": 2, "a\x00task": 1}
+	})
+	got := scrape(r)
+	if !strings.Contains(got, "depth{namespace=\"a\",kind=\"task\"} 1\ndepth{namespace=\"b\",kind=\"task\"} 2\n") {
+		t.Errorf("scrape:\n%s", got)
+	}
+	c := r.CounterVec("done_total", "Done.", "namespace", "status")
+	c.With("a", "ok").Inc()
+	if v := c.Values()["a\x00ok"]; v != 1 {
+		t.Errorf("Values = %v", c.Values())
+	}
+}

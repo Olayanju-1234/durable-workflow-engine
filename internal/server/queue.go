@@ -57,6 +57,17 @@ func (q *routedQueue[T]) depth() int {
 	return len(q.pending)
 }
 
+// depthBy counts the pending items by key (a namespace, say).
+func (q *routedQueue[T]) depthBy(key func(T) string) map[string]int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := map[string]int{}
+	for _, item := range q.pending {
+		out[key(item)]++
+	}
+	return out
+}
+
 // poll blocks until an item in scope whose route is in routes is available,
 // or ctx ends. Passing no routes accepts any item in scope. Long-poll is a
 // worker's normal idle state.

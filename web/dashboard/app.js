@@ -1542,6 +1542,7 @@ function switchNamespace(next) {
   loadNamespaces();
   loadFloor();
   loadSchedules();
+  loadPulse();
   startStream();
 }
 
@@ -1569,6 +1570,310 @@ function openStartModal() {
 function closeStartModal() {
   $('start-modal').hidden = true;
   $('modal-scrim').hidden = true;
+}
+
+/* ---------- the pulse: metrics without a Prometheus server ---------- */
+
+// GET /api/metrics samples the engine's own per-namespace families; these
+// charts draw it. Hand-drawn SVG, one axis each, thin marks, a crosshair and
+// a readout listing every series, and a table view of the same numbers.
+const PULSE_MS = 10000;
+const pulse = { window: '15m', data: null, table: false, timer: null, seq: 0 };
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function fmtLatency(ms) {
+  if (ms == null) return '—';
+  if (ms === 0) return '0';
+  if (ms < 1) return `${ms.toFixed(2)} ms`;
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+}
+
+// fmtClock shows seconds when the points span less than ten minutes.
+function fmtClock(iso) {
+  const pts = pulse.data?.points || [];
+  const span = pts.length > 1 ? Date.parse(pts[pts.length - 1].at) - Date.parse(pts[0].at) : 0;
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: span < 600000 ? '2-digit' : undefined });
+}
+
+async function loadPulse() {
+  const seq = ++pulse.seq;
+  $('pulse-body').classList.add('is-loading'); // the old render stays, dimmed
+  try {
+    const data = await api(`/api/metrics?window=${pulse.window}`);
+    if (seq !== pulse.seq) return;
+    pulse.data = data;
+    $('pulse').hidden = false;
+    renderPulse();
+  } catch (err) {
+    if (err.status === 404) $('pulse').hidden = true; // an engine before 0.5.0
+  } finally {
+    if (seq === pulse.seq) $('pulse-body').classList.remove('is-loading');
+  }
+}
+
+function schedulePulse() {
+  clearInterval(pulse.timer);
+  pulse.timer = setInterval(() => {
+    if (state.live && !document.hidden && $('pulse-fold').getAttribute('aria-expanded') === 'true') loadPulse();
+  }, PULSE_MS);
+}
+
+function renderPulse() {
+  const d = pulse.data;
+  if (!d) return;
+  const t = d.totals;
+  const finished = t.completed + t.failed + t.other;
+  const rate = t.failure_rate == null ? '—' : `${(t.failure_rate * 100).toFixed(t.failure_rate < 0.1 ? 1 : 0)}%`;
+  const waiting = d.now.activity_queue + d.now.workflow_queue;
+  const span = { '5m': '5 min', '15m': '15 min', '1h': 'hour' }[pulse.window];
+  const kpi = (label, value, note) => `<div class="kpi"><span class="kpi-label">${esc(label)}</span>`
+    + `<span class="kpi-value">${esc(value)}</span><span class="kpi-note">${esc(note)}</span></div>`;
+  $('pulse-kpis').innerHTML = [
+    kpi('Finished per minute', t.finished_per_minute.toFixed(t.finished_per_minute < 10 ? 1 : 0),
+      `${finished} in the last ${span}: ${t.completed} completed, ${t.failed} failed, ${t.other} cancelled or cut`),
+    kpi('Failure rate', rate, t.completed + t.failed ? `${t.failed} of ${t.completed + t.failed} completed or failed` : 'nothing finished yet'),
+    kpi('Step latency, p95', fmtLatency(t.step_p95_ms),
+      t.steps ? `p50 ${fmtLatency(t.step_p50_ms)} · p99 ${fmtLatency(t.step_p99_ms)} · ${t.steps} steps` : 'no steps finished yet'),
+    kpi('Tasks waiting', String(waiting), `${d.now.activity_queue} activities, ${d.now.workflow_queue} decisions · ${d.now.active} workflows live`),
+  ].join('');
+
+  const pts = d.points || [];
+  drawChart($('ch-finished'), {
+    title: 'Workflows finished', unit: (v) => String(v), stacked: true, points: pts,
+    series: [
+      { key: 'completed', name: 'completed', color: 'var(--chart-a)' },
+      { key: 'failed', name: 'failed or timed out', color: 'var(--chart-b)' },
+      { key: 'other', name: 'cancelled or cut', color: 'var(--chart-muted)' },
+    ],
+  });
+  drawChart($('ch-latency'), {
+    title: 'Step latency', unit: fmtLatency, points: pts,
+    series: [
+      { key: 'step_p95_ms', name: 'p95', color: 'var(--chart-a)' },
+      { key: 'step_p50_ms', name: 'p50', color: 'var(--chart-muted)' },
+    ],
+  });
+  drawChart($('ch-queue'), {
+    title: 'Tasks waiting', unit: (v) => String(v), points: pts, integer: true,
+    series: [
+      { key: 'activity_queue', name: 'activities', color: 'var(--chart-a)' },
+      { key: 'workflow_queue', name: 'decisions', color: 'var(--chart-muted)' },
+    ],
+  });
+  const since = d.since ? new Date(d.since) : null;
+  const short = since && Date.now() - since.getTime() < d.window_seconds * 1000 - d.step_seconds * 1000;
+  $('pulse-note').textContent = `Each point is ${d.step_seconds || 10} s, sampled by the engine every 10 s for the ${d.namespace} namespace.`
+    + (short ? ` The engine started ${fmtTime(d.since)}, so the window is shorter.` : '');
+  renderPulseTable();
+}
+
+// niceMax rounds a maximum up to 1, 2, 2.5 or 5 times a power of ten.
+function niceMax(v, integer) {
+  if (!(v > 0)) return integer ? 4 : 1;
+  const p = 10 ** Math.floor(Math.log10(v));
+  const n = [1, 2, 2.5, 5, 10].find((m) => m * p >= v) * p;
+  return integer ? Math.max(4, Math.ceil(n)) : n;
+}
+
+function svgEl(name, attrs, parent) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (parent) parent.appendChild(el);
+  return el;
+}
+
+// A rectangle with its top corners rounded (r), square at the baseline.
+function roundTop(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h);
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+}
+
+function drawChart(fig, spec) {
+  const W = Math.max(240, Math.round(fig.clientWidth || 320));
+  const H = 150;
+  const m = { top: 10, right: 44, bottom: 20, left: 40 };
+  const pw = W - m.left - m.right;
+  const ph = H - m.top - m.bottom;
+  const pts = spec.points;
+  const value = (p, s) => p[s.key];
+  const top = spec.stacked
+    ? Math.max(0, ...pts.map((p) => spec.series.reduce((sum, s) => sum + (value(p, s) || 0), 0)))
+    : Math.max(0, ...pts.flatMap((p) => spec.series.map((s) => value(p, s) ?? 0)));
+  const ymax = niceMax(top, spec.integer || spec.stacked);
+  const y = (v) => m.top + ph - (v / ymax) * ph;
+  const n = Math.max(pts.length, 1);
+  const band = pw / n;
+  const x = (i) => m.left + band * (i + 0.5);
+
+  fig.replaceChildren();
+  const cap = document.createElement('figcaption');
+  const title = document.createElement('span');
+  title.className = 'chart-title';
+  title.textContent = spec.title;
+  cap.appendChild(title);
+  const legend = document.createElement('span');
+  legend.className = 'legend';
+  for (const s of spec.series) {
+    const item = document.createElement('span');
+    item.className = `key ${spec.stacked ? 'key-rect' : 'key-line'}`;
+    item.style.setProperty('--key', s.color);
+    item.appendChild(document.createTextNode(s.name));
+    legend.appendChild(item);
+  }
+  cap.appendChild(legend);
+  fig.appendChild(cap);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: 'img', 'aria-label': `${spec.title}, last ${pulse.window}` }, fig);
+  // Recessive hairline grid at 0, half and the top; clean tick labels.
+  for (const v of [0, ymax / 2, ymax]) {
+    svgEl('line', { x1: m.left, x2: m.left + pw, y1: y(v), y2: y(v), class: 'grid' }, svg);
+    const label = svgEl('text', { x: m.left - 6, y: y(v) + 3.5, class: 'tick', 'text-anchor': 'end' }, svg);
+    label.textContent = spec.unit(Number.isInteger(v) ? v : Number(v.toFixed(1)));
+  }
+  if (pts.length) {
+    for (const [i, anchor] of [[0, 'start'], [pts.length - 1, 'end']]) {
+      const t = svgEl('text', { x: anchor === 'start' ? m.left : m.left + pw, y: H - 5, class: 'tick', 'text-anchor': anchor }, svg);
+      t.textContent = fmtClock(pts[i].at);
+    }
+  }
+
+  if (spec.stacked) {
+    const bw = Math.min(24, Math.max(2, band - 2)); // capped; the band's leftover is air
+    pts.forEach((p, i) => {
+      let base = 0;
+      const parts = spec.series.map((s) => ({ s, v: value(p, s) || 0 })).filter((part) => part.v > 0);
+      parts.forEach((part, k) => {
+        const y0 = y(base);
+        const y1 = y(base + part.v);
+        const gap = k > 0 ? 2 : 0; // the surface gap between stacked segments
+        const h = Math.max(0, y0 - y1 - gap);
+        const bx = x(i) - bw / 2;
+        if (k === parts.length - 1) svgEl('path', { d: roundTop(bx, y1, bw, h, 4), fill: part.s.color }, svg);
+        else svgEl('rect', { x: bx, y: y1, width: bw, height: h, fill: part.s.color }, svg);
+        base += part.v;
+      });
+    });
+  } else {
+    for (const s of spec.series) {
+      let d = '';
+      let pen = false;
+      pts.forEach((p, i) => {
+        const v = value(p, s);
+        if (v == null) { pen = false; return; }
+        d += `${pen ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`;
+        pen = true;
+      });
+      if (d) svgEl('path', { d, class: 'series-line', stroke: s.color }, svg);
+      // Label the end, never every point.
+      const lastIdx = pts.map((p) => value(p, s)).findLastIndex((v) => v != null);
+      if (lastIdx >= 0) {
+        const v = value(pts[lastIdx], s);
+        svgEl('circle', { cx: x(lastIdx), cy: y(v), r: 4, fill: s.color, class: 'end-dot' }, svg);
+        const t = svgEl('text', { x: x(lastIdx) + 8, y: y(v) + 3.5, class: 'end-label' }, svg);
+        t.textContent = spec.unit(v);
+      }
+    }
+  }
+
+  // The hover layer: a crosshair snapping to the nearest point, and one
+  // readout listing every series there.
+  const hair = svgEl('line', { y1: m.top, y2: m.top + ph, class: 'crosshair', visibility: 'hidden' }, svg);
+  const hit = svgEl('rect', { x: m.left, y: m.top, width: pw, height: ph, fill: 'transparent' }, svg);
+  const tip = document.createElement('div');
+  tip.className = 'chart-tip';
+  tip.hidden = true;
+  fig.appendChild(tip);
+  let at = pts.length - 1;
+  const show = (i) => {
+    if (!pts.length) return;
+    at = Math.max(0, Math.min(pts.length - 1, i));
+    const p = pts[at];
+    hair.setAttribute('x1', x(at));
+    hair.setAttribute('x2', x(at));
+    hair.setAttribute('visibility', 'visible');
+    tip.replaceChildren();
+    const when = document.createElement('div');
+    when.className = 'tip-when';
+    when.textContent = fmtClock(p.at);
+    tip.appendChild(when);
+    for (const s of spec.series) {
+      const row = document.createElement('div');
+      row.className = 'tip-row';
+      row.style.setProperty('--key', s.color);
+      const v = document.createElement('strong');
+      v.textContent = value(p, s) == null ? '—' : spec.unit(value(p, s));
+      const name = document.createElement('span');
+      name.textContent = s.name;
+      row.append(v, name);
+      tip.appendChild(row);
+    }
+    tip.hidden = false;
+    const left = (x(at) / W) * fig.clientWidth;
+    tip.style.left = `${Math.min(Math.max(left - 60, 0), fig.clientWidth - 140)}px`;
+  };
+  const hide = () => { hair.setAttribute('visibility', 'hidden'); tip.hidden = true; };
+  hit.addEventListener('pointermove', (e) => {
+    const r = svg.getBoundingClientRect();
+    const px = ((e.clientX - r.left) / r.width) * W;
+    show(Math.round((px - m.left) / band - 0.5));
+  });
+  hit.addEventListener('pointerleave', hide);
+  fig.onfocus = () => show(at);
+  fig.onblur = hide;
+  fig.onkeydown = (e) => {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); show(at - 1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); show(at + 1); }
+  };
+}
+
+function renderPulseTable() {
+  const el = $('pulse-table');
+  el.hidden = !pulse.table;
+  $('pulse-charts').hidden = pulse.table;
+  $('pulse-table-toggle').textContent = pulse.table ? 'show as charts' : 'show as table';
+  $('pulse-table-toggle').setAttribute('aria-pressed', pulse.table ? 'true' : 'false');
+  if (!pulse.table || !pulse.data) return;
+  const rows = (pulse.data.points || []).map((p) => `<tr>
+    <td>${esc(fmtClock(p.at))}</td><td class="num">${p.started}</td><td class="num">${p.completed}</td>
+    <td class="num">${p.failed}</td><td class="num">${p.other}</td><td class="num">${p.steps}</td>
+    <td class="num">${esc(fmtLatency(p.step_p50_ms))}</td><td class="num">${esc(fmtLatency(p.step_p95_ms))}</td>
+    <td class="num">${p.activity_queue}</td><td class="num">${p.workflow_queue}</td><td class="num">${p.active}</td></tr>`).join('');
+  el.innerHTML = `<table class="wf-table pulse-grid"><thead><tr>
+    <th>Until</th><th class="num">Started</th><th class="num">Completed</th><th class="num">Failed</th><th class="num">Cancelled or cut</th>
+    <th class="num">Steps</th><th class="num">p50</th><th class="num">p95</th><th class="num">Activities waiting</th>
+    <th class="num">Decisions waiting</th><th class="num">Live</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function initPulse() {
+  for (const chip of $('pulse-window').querySelectorAll('.chip')) {
+    chip.addEventListener('click', () => {
+      $('pulse-window').querySelector('.is-active')?.classList.remove('is-active');
+      chip.classList.add('is-active');
+      pulse.window = chip.dataset.window;
+      loadPulse();
+    });
+  }
+  $('pulse-table-toggle').addEventListener('click', () => { pulse.table = !pulse.table; renderPulseTable(); });
+  let folded = false;
+  try { folded = localStorage.getItem('workflowd-pulse-folded') === '1'; } catch { /* storage blocked */ }
+  const fold = (on) => {
+    $('pulse-body').hidden = on;
+    $('pulse-fold').textContent = on ? 'show' : 'hide';
+    $('pulse-fold').setAttribute('aria-expanded', on ? 'false' : 'true');
+    for (const el of $('pulse-window').querySelectorAll('.chip, #pulse-table-toggle')) el.hidden = on;
+    try { localStorage.setItem('workflowd-pulse-folded', on ? '1' : '0'); } catch { /* storage blocked */ }
+  };
+  fold(folded);
+  $('pulse-fold').addEventListener('click', () => {
+    const on = $('pulse-fold').getAttribute('aria-expanded') === 'true';
+    fold(on);
+    if (!on) loadPulse();
+  });
+  let resize = null;
+  window.addEventListener('resize', () => { clearTimeout(resize); resize = setTimeout(renderPulse, 150); });
+  loadPulse();
+  schedulePulse();
 }
 
 /* ---------- wiring ---------- */
@@ -1679,6 +1984,7 @@ function init() {
     if (state.live) {
       stream.retry = 0;
       resyncAll(); // what happened while paused
+      loadPulse();
     }
     startStream();
   });
@@ -1689,6 +1995,7 @@ function init() {
   $('sched-form').addEventListener('submit', createSchedule);
 
   applyRoute(routeFromLocation(), true);
+  initPulse();
   loadSchedules();
   loadNodeInfo();
   loadNamespaces();

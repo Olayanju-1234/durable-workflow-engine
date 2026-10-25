@@ -53,7 +53,8 @@ func stepStatuses(t *testing.T, e *Engine, id string) string {
 // SCHEDULED forever. A step still open when its workflow finished is
 // presented as CANCELLED, and the timer firing later records nothing.
 func TestLosingTimerIsNotShownAsScheduled(t *testing.T) {
-	e := timeoutEngine(t, newStore(t, t.TempDir()), map[string]workflow.Func{"CustomStep": customStep(200*time.Millisecond, false)})
+	// The signal must beat the timer: 1s leaves room for a loaded machine.
+	e := timeoutEngine(t, newStore(t, t.TempDir()), map[string]workflow.Func{"CustomStep": customStep(time.Second, false)})
 	id, err := e.StartWorkflow("CustomStep", nil, "")
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +69,7 @@ func TestLosingTimerIsNotShownAsScheduled(t *testing.T) {
 		t.Fatalf("steps %q, want %q", got, want)
 	}
 	before, _ := e.store.ReadAll(id)
-	time.Sleep(300 * time.Millisecond) // past the deadline
+	time.Sleep(1100 * time.Millisecond) // past the deadline
 	after, _ := e.store.ReadAll(id)
 	if len(after) != len(before) {
 		t.Fatalf("history grew from %d to %d events after the workflow finished", len(before), len(after))

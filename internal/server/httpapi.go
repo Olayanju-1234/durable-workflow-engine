@@ -42,6 +42,7 @@ import (
 //	GET  /api/workflows/{id}/history[?run_id=]   the run's events, as protobuf JSON
 //	GET  /api/namespaces
 //	GET  /api/events                         the namespace's changes, as server-sent events
+//	GET  /api/metrics[?window=15m]           the namespace's throughput, failures, step latency, queue depth
 //	GET  /api/admin/backup                   a tar.gz of every history (engine token only)
 //
 // Every route but health works in one namespace: the one the caller's token
@@ -185,6 +186,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/workflows/{id}/reset", a.resetWorkflow)
 	mux.HandleFunc("GET /api/namespaces", a.listNamespaces)
 	mux.HandleFunc("GET /api/events", a.events)
+	mux.HandleFunc("GET /api/metrics", a.metricsSummary)
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
 	a.registerScheduleRoutes(mux)
@@ -517,6 +519,25 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		"counts":    counts,
 		"types":     typeList,
 	})
+}
+
+// metricsSummary answers the metrics panel: the namespace's pulse over a
+// window from 1 minute to an hour (default 15 minutes).
+func (a *HTTPAPI) metricsSummary(w http.ResponseWriter, r *http.Request) {
+	window := 15 * time.Minute
+	if v := r.URL.Query().Get("window"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute || d > pulseKeep {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("%w: window must be a duration from 1m to 1h", ErrInvalidArgument))
+			return
+		}
+		window = d
+	}
+	e := a.scope(w, r)
+	if e == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, e.MetricsSummary(window))
 }
 
 // parseTimeParam reads an RFC 3339 time from the query as unix nanoseconds

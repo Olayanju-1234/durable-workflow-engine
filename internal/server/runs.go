@@ -104,7 +104,7 @@ func (e *Engine) startRunLocked(w *wfState) error {
 	if st.ExecutionTimeout > 0 {
 		e.armExecutionDeadline(w.id, st.RunID, time.Unix(0, st.StartedAt).Add(st.ExecutionTimeout))
 	}
-	e.metrics.workflowsStarted.Inc()
+	e.metrics.started(nsOf(w.id))
 	e.metrics.workflowsActive.Inc()
 	e.log.Info("workflow started", "workflow_id", w.id, "run_id", st.RunID, "type", st.WorkflowType,
 		"continued_from", st.ContinuedFromRunID)
@@ -142,7 +142,7 @@ func (e *Engine) continueAsNewLocked(w *wfState, d state.Decision) error {
 	if err := e.appendLocked(w, ended, int64(len(events)+1)); err != nil {
 		return err
 	}
-	e.metrics.workflowsFinished.With("continued_as_new").Inc()
+	e.metrics.finished(nsOf(w.id), "continued_as_new")
 	e.metrics.workflowsActive.Dec()
 	e.log.Info("workflow continued as new", "workflow_id", w.id, "run_id", st.RunID, "next_run_id", next.RunId,
 		"events", len(events)+1)

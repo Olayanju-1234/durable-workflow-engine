@@ -87,6 +87,29 @@
     </div>
   </section>
 
+  <section class="panel pulse" id="pulse" aria-labelledby="pulse-title" hidden>
+    <div class="panel-head">
+      <h2 id="pulse-title">The pulse <span class="panel-sub">metrics</span></h2>
+      <div class="filters" id="pulse-window" role="group" aria-label="Time window">
+        <button class="chip" type="button" data-window="5m">5 min</button>
+        <button class="chip is-active" type="button" data-window="15m">15 min</button>
+        <button class="chip" type="button" data-window="1h">1 hour</button>
+        <button class="linkish" id="pulse-table-toggle" type="button" aria-pressed="false">show as table</button>
+        <button class="linkish" id="pulse-fold" type="button" aria-expanded="true" aria-controls="pulse-body">hide</button>
+      </div>
+    </div>
+    <div class="pulse-body" id="pulse-body">
+      <div class="kpis" id="pulse-kpis"></div>
+      <div class="charts" id="pulse-charts">
+        <figure class="chart" id="ch-finished" tabindex="0" aria-describedby="pulse-note"></figure>
+        <figure class="chart" id="ch-latency" tabindex="0" aria-describedby="pulse-note"></figure>
+        <figure class="chart" id="ch-queue" tabindex="0" aria-describedby="pulse-note"></figure>
+      </div>
+      <div class="pulse-table table-scroll" id="pulse-table" hidden></div>
+      <p class="pulse-note" id="pulse-note"></p>
+    </div>
+  </section>
+
   <section class="panel">
     <div class="panel-head">
       <h2>The floor</h2>

@@ -25,6 +25,11 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   `workflowd ctl reset`, and the dashboard (*Retry from …*, or *reset to here* on any event).
   Describe shows `reset_point` for a finished run and `reset_from_run_id` for a reset one. No new
   history format: older binaries read a reset run as an ordinary run.
+- **The pulse**: a metrics panel in the dashboard (finished per minute, failure rate, step
+  latency p50/p95/p99, waiting tasks) per namespace over 5 minutes to an hour, from
+  `GET /api/metrics`, which the engine computes from its own metrics sampled every 10 seconds; no
+  Prometheus needed. New `workflowd_namespace_*` families split started, finished, task results,
+  step latency, queue depths and live workflows by namespace; the existing families are unchanged.
 - **Bulk actions**: `workflowd ctl cancel`, `terminate` and `reset` take several ids or every
   match of `--status` / `--type` / `--query`, asking first (`--yes`); the dashboard selects rows
   and confirms before acting. The dashboard's signal form checks a JSON payload before sending it.

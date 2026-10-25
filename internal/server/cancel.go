@@ -126,7 +126,7 @@ func (e *Engine) endWorkflow(workflowID, how, reason string, ev *history.Workflo
 	if err := e.appendLocked(w, end, int64(len(events)+1)); err != nil {
 		return err
 	}
-	e.metrics.workflowsFinished.With(how).Inc()
+	e.metrics.finished(nsOf(workflowID), how)
 	e.metrics.workflowsActive.Dec()
 	e.log.Warn("workflow "+how, "workflow_id", workflowID, "reason", reason)
 	return nil

@@ -41,3 +41,20 @@ func TestHTTPResetWorkflow(t *testing.T) {
 		t.Fatalf("runs = %v", runs)
 	}
 }
+
+func TestHTTPMetricsSummary(t *testing.T) {
+	h := newAPIHarness(t, state.WorkflowDefinition{Type: "Flow", Steps: state.Activities("one")})
+	h.do(t, "POST", "/api/workflows", `{"type":"Flow"}`)
+	code, body := h.do(t, "GET", "/api/metrics?window=5m", "")
+	if code != http.StatusOK || body["namespace"] != "default" || body["window_seconds"] != float64(300) {
+		t.Fatalf("metrics: %d %v", code, body)
+	}
+	if now := body["now"].(map[string]any); now["activity_queue"] != float64(1) {
+		t.Fatalf("now = %v, want the started workflow's queued task", now)
+	}
+	for _, bad := range []string{"30s", "2h", "soon"} {
+		if code, _ := h.do(t, "GET", "/api/metrics?window="+bad, ""); code != http.StatusBadRequest {
+			t.Errorf("window=%s: %d, want 400", bad, code)
+		}
+	}
+}
