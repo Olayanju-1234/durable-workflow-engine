@@ -49,6 +49,7 @@ schedule next step → record result.** Four components, built across phases:
 | Auth + TLS       | `internal/tlsconfig`, `internal/server/auth.go`, `cmd/workflowd/security.go` | — ✅ | Opt-in TLS on every listener, bearer token on HTTP + gRPC, metrics token, Raft mTLS. |
 | Formats + runs   | `internal/history/format.go`, `internal/server/runs.go`, `limits.go`, `cancel.go` | 0.3.0 ✅ | History formats/`FORMAT` (ADR-0011), continue-as-new + archived runs + limits (ADR-0012), id reuse (ADR-0013), graceful cancel (ADR-0014). |
 | Tenancy + ops    | `internal/server/{namespace,scope,taskqueue,guard,quota,archive,schedule_controls}.go`, `internal/archive`, `internal/ctl` | 0.4.0 ✅ | Namespaces (ADR-0015), named task queues (ADR-0016), `workflowd ctl` + backup/restore (ADR-0017), quotas/rate limits/read-only (ADR-0018), archiving to a dir or S3/R2 (ADR-0019), schedule controls (ADR-0020). |
+| Operability      | `internal/server/{feed,httpapi_events,reset,pulse,audit,trace}.go`, `internal/history/seal.go`, `internal/audit`, `internal/tracing`, `cmd/workflowd/{reload,encryption,tracing}.go` | 0.5.0 ✅ | Live dashboard over SSE, reset + bulk actions (ADR-0021), metrics panel (`/api/metrics`), encryption at rest (ADR-0022), hot reload + audit log (ADR-0023), W3C tracing + OTLP export (ADR-0024). |
 
 ## Build / test / regenerate
 
@@ -88,6 +89,12 @@ This is how context survives across sessions and machines. The in-repo docs are 
 source of truth because they travel with `git clone`; the global memory is the local cache.
 
 ## Current status
+
+**Session 29 (0.5.0, SDKs 0.5.0):** live dashboard (SSE, deep links, timeline, filters), reset from
+the failed step + bulk actions (ADR-0021), the pulse metrics panel, encryption at rest (ADR-0022, format 7
+only when used), hot reload + audit log (ADR-0023), W3C tracing + OTLP export (ADR-0024). Demo and liftoff
+engines run `7e1dc62` with the same flags as 0.4.0; encryption and OTLP are off (owner's keys/collector);
+npm + PyPI `workflowd` 0.5.0.
 
 **Session 28 (0.4.0, SDKs 0.4.0):** namespaces (ADR-0015), named task queues (ADR-0016),
 `workflowd ctl` (ADR-0017), guardrails (ADR-0018), archiving (ADR-0019), schedule controls
@@ -204,6 +211,16 @@ before it looks up or makes one; `X-Forwarded-For` is read right to left and onl
 `--trusted-proxies`. A finished run is deleted only after its archive copy is confirmed (a failed
 upload keeps it). A paused schedule arms no timer; jitter is a hash of (schedule, fire time); a
 `BUFFER_ONE` held fire starts before any newer one; backfill reuses fire ids, so it is idempotent.
+
+**Operability invariants worth not breaking (0.5.0):** a reset copies the old run's events up to the
+point unchanged (ids, times) and changes only `WorkflowStarted` (new run id, reset fields); it reapplies later
+signals, never cancel requests; the default point never passes a graceful cancel request; only a finished run resets.
+A multi-event `NewRun` is one rename and one Raft entry. Every write path seals (append, `NewRun`, rewrite); the
+AAD binds key id and event id; a missing key is an error, never plaintext; plaintext histories stay readable. A
+reload is all or nothing, and namespaces are replaced in place. Audit happens at the transport edge from the
+guard's classification (a test fails if a mutating route isn't classified), never with payloads or raw tokens.
+The change feed never blocks the engine (a slow subscriber is told to resync). A run's trace lives on
+`WorkflowStarted`, every workflow task carries the same run span (replay reads one value), and export never blocks.
 
 **Timeout/cancel invariants worth not breaking:** every deadline is a duration recorded next to
 the event it starts from, and recovery re-arms it; heartbeats extend the lease, never
