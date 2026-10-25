@@ -8,7 +8,7 @@ durable workflow engine. Zero dependencies: the JDK only (Java 11+).
 <dependency>
   <groupId>io.github.olayanju-1234</groupId>
   <artifactId>workflowd</artifactId>
-  <version>0.4.0</version>
+  <version>0.5.0</version>
 </dependency>
 ```
 

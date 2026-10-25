@@ -88,6 +88,7 @@ SDKs keep working against newer engines.
 | 0.1.x | 0.1.0 | |
 | 0.2.0 | 0.2.0 for timeouts, cancellation, error types, `ctx.now()` | TS `ctx.now()` needs `started_at` on workflow tasks |
 | 0.3.0 | 0.3.0 for continue-as-new, id reuse policies, graceful cancellation | |
+| 0.5.0 | 0.5.0 for trace context on tasks (`ctx.traceparent`, an activity's `traceparent`) | Against an older engine the start's `traceparent` headers are ignored and tasks carry none, so the values are empty; nothing else changes |
 | 0.4.0 | 0.4.0 for namespaces and task queues | An engine before 0.4.0 ignores the namespace header and the poll's `task_queue`, so a namespaced or queued worker would work in `default` there; it is refused instead only if it uses a namespace token. Starts and commands that name a queue get `400 unknown field` |
 
 When an SDK sends a field an older engine does not know, the engine refuses the request
@@ -95,6 +96,13 @@ When an SDK sends a field an older engine does not know, the engine refuses the 
 types); otherwise the feature is simply unavailable until the engine is upgraded.
 
 ## Release notes on rollback
+
+- **0.5.0:** encryption at rest (`--encryption-keys`) raises the directory to format 7 at the
+  first sealed event; `--decrypt-all` (engine stopped) rewrites everything as plaintext and lowers
+  it again, the way back to an older binary. Nothing else in 0.5.0 changes a format: a reset run
+  and a traced run read as ordinary runs to an older binary, and the audit log
+  (`<data-dir>/audit/`) is a file older binaries never look at. In a cluster, every node must run
+  0.5.0 before a workflow is reset.
 
 - **0.4.0:** the first history in a namespace other than `default`, the first event naming a
   task queue other than the default one, or the first schedule paused, jittered or set to

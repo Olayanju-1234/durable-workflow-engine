@@ -1,6 +1,6 @@
 {
   "name": "workflowd",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "TypeScript/JavaScript SDK for workflowd, a single-binary durable workflow engine. Zero dependencies.",
   "type": "module",
   "main": "./workflowd.cjs",

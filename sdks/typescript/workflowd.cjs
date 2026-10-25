@@ -870,7 +870,7 @@ class Worker {
     address = 'http://localhost:8233',
     addresses,
     workerId,
-    sdk = 'typescript/0.4.0',
+    sdk = 'typescript/0.5.0',
     token,
     namespace,
     taskQueue,
