@@ -137,6 +137,18 @@ func (v *CounterVec) With(values ...string) *Counter {
 	return c
 }
 
+// Values returns each child's count, keyed by its label values joined with
+// "\x00" (in label order): a snapshot for code that reads its own metrics.
+func (v *CounterVec) Values() map[string]uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	out := make(map[string]uint64, len(v.children))
+	for k, c := range v.children {
+		out[k] = c.v.Load()
+	}
+	return out
+}
+
 func (v *CounterVec) write(w io.Writer) {
 	v.writeHeader(w)
 	v.mu.RLock()
@@ -192,17 +204,52 @@ func (g *GaugeFunc) write(w io.Writer) {
 	fmt.Fprintf(w, "%s %s\n", g.fqName, formatFloat(g.fn()))
 }
 
+// GaugeVecFunc is a labelled gauge family read at scrape time: fn returns
+// each child's value keyed by its label values joined with "\x00".
+type GaugeVecFunc struct {
+	meta
+	labels []string
+	fn     func() map[string]float64
+}
+
+func (r *Registry) GaugeVecFunc(name, help string, labels []string, fn func() map[string]float64) {
+	r.register(&GaugeVecFunc{meta: meta{fqName: name, help: help, typ: "gauge"}, labels: labels, fn: fn})
+}
+
+func (g *GaugeVecFunc) write(w io.Writer) {
+	g.writeHeader(w)
+	vals := g.fn()
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s%s %s\n", g.fqName, renderLabels(g.labels, strings.Split(k, "\x00")), formatFloat(vals[k]))
+	}
+}
+
 // Histogram counts observations into cumulative buckets, Prometheus-style:
 // each bucket counts observations ≤ its upper bound, plus a +Inf catch-all,
 // a running sum, and a total count. Quantiles are computed by the Prometheus
 // server from these, not here.
 type Histogram struct {
 	meta
+	labels string // a HistogramVec child's rendered labels, without braces
 	bounds []float64
 	mu     sync.Mutex
 	counts []uint64
 	sum    float64
 	count  uint64
+}
+
+// HistogramSnapshot is a histogram's state at one moment: cumulative counts
+// per upper bound (Counts[i] observations <= Bounds[i]), and the total.
+type HistogramSnapshot struct {
+	Bounds []float64
+	Counts []uint64
+	Count  uint64
+	Sum    float64
 }
 
 func (r *Registry) Histogram(name, help string, buckets []float64) *Histogram {
@@ -234,18 +281,109 @@ func (h *Histogram) Observe(v float64) {
 	h.count++
 }
 
-func (h *Histogram) write(w io.Writer) {
-	h.writeHeader(w)
+// Snapshot copies the histogram's buckets, cumulative, with its count and sum.
+func (h *Histogram) Snapshot() HistogramSnapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	s := HistogramSnapshot{Bounds: h.bounds, Counts: make([]uint64, len(h.bounds)), Count: h.count, Sum: h.sum}
 	var cum uint64
-	for i, b := range h.bounds {
+	for i := range h.bounds {
 		cum += h.counts[i]
-		fmt.Fprintf(w, "%s_bucket{le=%q} %d\n", h.fqName, formatFloat(b), cum)
+		s.Counts[i] = cum
 	}
-	fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", h.fqName, h.count)
-	fmt.Fprintf(w, "%s_sum %s\n", h.fqName, formatFloat(h.sum))
-	fmt.Fprintf(w, "%s_count %d\n", h.fqName, h.count)
+	return s
+}
+
+func (h *Histogram) write(w io.Writer) {
+	h.writeHeader(w)
+	h.writeSamples(w)
+}
+
+func (h *Histogram) writeSamples(w io.Writer) {
+	s := h.Snapshot()
+	sep, plain := "", ""
+	if h.labels != "" {
+		sep, plain = h.labels+",", "{"+h.labels+"}"
+	}
+	for i, b := range s.Bounds {
+		fmt.Fprintf(w, "%s_bucket{%sle=%q} %d\n", h.fqName, sep, formatFloat(b), s.Counts[i])
+	}
+	fmt.Fprintf(w, "%s_bucket{%sle=\"+Inf\"} %d\n", h.fqName, sep, s.Count)
+	fmt.Fprintf(w, "%s_sum%s %s\n", h.fqName, plain, formatFloat(s.Sum))
+	fmt.Fprintf(w, "%s_count%s %d\n", h.fqName, plain, s.Count)
+}
+
+// HistogramVec is a family of histograms split by label values, all with the
+// same buckets. Like CounterVec, children live forever: low-cardinality labels.
+type HistogramVec struct {
+	meta
+	labels   []string
+	bounds   []float64
+	mu       sync.RWMutex
+	children map[string]*Histogram
+}
+
+func (r *Registry) HistogramVec(name, help string, buckets []float64, labels ...string) *HistogramVec {
+	if len(buckets) == 0 {
+		buckets = DefBuckets
+	}
+	if !sort.Float64sAreSorted(buckets) {
+		panic(fmt.Sprintf("metrics: %s: histogram buckets must be sorted", name))
+	}
+	v := &HistogramVec{meta: meta{fqName: name, help: help, typ: "histogram"}, labels: labels, bounds: buckets,
+		children: make(map[string]*Histogram)}
+	r.register(v)
+	return v
+}
+
+// With returns the child histogram for the given label values, creating it
+// on first use.
+func (v *HistogramVec) With(values ...string) *Histogram {
+	if len(values) != len(v.labels) {
+		panic(fmt.Sprintf("metrics: %s expects %d label values, got %d", v.fqName, len(v.labels), len(values)))
+	}
+	key := strings.Join(values, "\x00")
+	v.mu.RLock()
+	h, ok := v.children[key]
+	v.mu.RUnlock()
+	if ok {
+		return h
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if h, ok = v.children[key]; ok {
+		return h
+	}
+	rendered := renderLabels(v.labels, values)
+	h = &Histogram{meta: meta{fqName: v.fqName}, labels: rendered[1 : len(rendered)-1], bounds: v.bounds,
+		counts: make([]uint64, len(v.bounds))}
+	v.children[key] = h
+	return h
+}
+
+// Snapshots returns each child's snapshot, keyed like CounterVec.Values.
+func (v *HistogramVec) Snapshots() map[string]HistogramSnapshot {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	out := make(map[string]HistogramSnapshot, len(v.children))
+	for k, h := range v.children {
+		out[k] = h.Snapshot()
+	}
+	return out
+}
+
+func (v *HistogramVec) write(w io.Writer) {
+	v.writeHeader(w)
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	keys := make([]string, 0, len(v.children))
+	for k := range v.children {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v.children[k].writeSamples(w)
+	}
 }
 
 // meta is the shared identity of a metric family: its name, help text, and

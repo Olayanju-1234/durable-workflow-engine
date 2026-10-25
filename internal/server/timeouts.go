@@ -98,7 +98,7 @@ func (e *Engine) onExecutionDeadline(tm timer.Timer) {
 		e.rearmCallback(e.deadlines, tm)
 		return
 	}
-	e.metrics.workflowsFinished.With("timed_out").Inc()
+	e.metrics.finished(nsOf(tm.WorkflowID), "timed_out")
 	e.metrics.workflowsActive.Dec()
 	e.log.Warn("workflow timed out", "workflow_id", tm.WorkflowID, "execution_timeout", st.ExecutionTimeout)
 }

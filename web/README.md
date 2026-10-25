@@ -60,8 +60,13 @@ the binary with `go:embed`, so there is still exactly one file to deploy.
 - Detail drawer ("inspection bench"): ledger, input/output cards, steps as weft
   picks with kind glyphs, attempt counts, per-step errors and outputs; the card
   chain (every recorded event, payloads pretty-printed, growing in place); runs
-- Actions: start a workflow (mount a warp), send a signal (pass a shuttle),
-  terminate (cut the warp)
+- The pulse: per-namespace throughput, failure rate, step latency and waiting
+  tasks from `GET /api/metrics`, drawn as hand-made SVG charts (one axis each,
+  a crosshair readout, a table view); chart hues are checked for colour-blind
+  separation in both themes
+- Actions: start a workflow (mount a warp), send a signal (pass a shuttle, with
+  JSON validation), cancel, terminate (cut the warp), reset (weave again), and
+  the same for a selection of rows
 
 Plain HTML/CSS/vanilla JS. Edit a file and rebuild the Go binary.
 

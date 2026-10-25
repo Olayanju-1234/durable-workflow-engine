@@ -45,13 +45,17 @@ func BearerAuth(token string, next http.Handler) http.Handler {
 	})
 }
 
-// isPublicRead reports whether r only reads workflows (list, describe, or
-// the live stream of list rows).
+// isPublicRead reports whether r only reads workflows (list, describe, the
+// live stream of list rows, or the metrics panel's summary of them).
 func isPublicRead(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
-	return r.URL.Path == "/api/workflows" || strings.HasPrefix(r.URL.Path, "/api/workflows/") || r.URL.Path == "/api/events"
+	switch r.URL.Path {
+	case "/api/workflows", "/api/events", "/api/metrics":
+		return true
+	}
+	return strings.HasPrefix(r.URL.Path, "/api/workflows/")
 }
 
 // GRPCAuth returns server options that require the bearer token in the

@@ -1,6 +1,10 @@
 package server
 
-import "github.com/olayanju-1234/durable-workflow-engine/internal/metrics"
+import (
+	"time"
+
+	"github.com/olayanju-1234/durable-workflow-engine/internal/metrics"
+)
 
 // engineMetrics bundles the engine's Prometheus instruments. Counters are
 // incremented at the exact point the corresponding event is durably recorded
@@ -29,6 +33,14 @@ type engineMetrics struct {
 	runsArchived        *metrics.Counter    // finished runs exported before retention deleted them
 	archiveFailures     *metrics.Counter    // exports that failed (the run is kept)
 	workflowsReset      *metrics.Counter    // finished runs an operator started again from a point
+
+	// Per-namespace twins of the counts above, for the dashboard's metrics
+	// panel and per-tenant Prometheus queries. The unlabelled families stay
+	// as they were, so existing queries and alerts keep their meaning.
+	nsStarted      *metrics.CounterVec   // namespace
+	nsFinished     *metrics.CounterVec   // namespace, status
+	nsResults      *metrics.CounterVec   // namespace, result
+	nsStepDuration *metrics.HistogramVec // namespace
 
 	// Polyglot: workflow decisions made by external SDK workers.
 	workflowTasksDispatched  *metrics.Counter
@@ -95,5 +107,34 @@ func newEngineMetrics(reg *metrics.Registry, queueDepth, workflowQueueDepth func
 			"Workflow tasks re-dispatched because an SDK worker went dark."),
 		workflowTaskReplayErrors: reg.Counter("workflowd_workflow_task_replay_errors_total",
 			"Workflows failed because an SDK could not replay their history."),
+		nsStarted: reg.CounterVec("workflowd_namespace_workflows_started_total",
+			"Workflow executions started, by namespace.", "namespace"),
+		nsFinished: reg.CounterVec("workflowd_namespace_workflows_finished_total",
+			"Workflow executions reaching a terminal state, by namespace and status.", "namespace", "status"),
+		nsResults: reg.CounterVec("workflowd_namespace_task_results_total",
+			"Worker-reported task results, by namespace and outcome.", "namespace", "result"),
+		nsStepDuration: reg.HistogramVec("workflowd_namespace_step_duration_seconds",
+			"Seconds from task dispatch to the worker's result, by namespace.", nil, "namespace"),
 	}
+}
+
+// started counts a run that began in namespace ns.
+func (m *engineMetrics) started(ns string) {
+	m.workflowsStarted.Inc()
+	m.nsStarted.With(ns).Inc()
+}
+
+// finished counts a run that ended in namespace ns, by how it ended.
+func (m *engineMetrics) finished(ns, status string) {
+	m.workflowsFinished.With(status).Inc()
+	m.nsFinished.With(ns, status).Inc()
+}
+
+// stepResult counts a worker's result for an activity attempt and how long
+// the attempt took from dispatch.
+func (m *engineMetrics) stepResult(ns, result string, took time.Duration) {
+	m.taskResults.With(result).Inc()
+	m.stepDuration.Observe(took.Seconds())
+	m.nsResults.With(ns, result).Inc()
+	m.nsStepDuration.With(ns).Observe(took.Seconds())
 }

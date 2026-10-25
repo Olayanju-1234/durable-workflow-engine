@@ -1468,8 +1468,17 @@ POST /api/schedules/preview  {a schedule, "count":5}            (a spec not yet 
         <tr><td><code>workflowd_timers_fired_total</code></td><td>counter</td><td>Durable timers that reached their deadline</td></tr>
         <tr><td><code>workflowd_task_queue_depth</code></td><td>gauge</td><td>Tasks buffered awaiting a worker</td></tr>
         <tr><td><code>workflowd_step_duration_seconds</code></td><td>histogram</td><td>Dispatch → worker result latency</td></tr>
+        <tr><td><code>workflowd_workflows_reset_total</code></td><td>counter</td><td>Finished runs an operator <a href="#reset">reset</a></td></tr>
+        <tr><td><code>workflowd_namespace_workflows_started_total{namespace}</code></td><td>counter</td><td>Executions started, per namespace</td></tr>
+        <tr><td><code>workflowd_namespace_workflows_finished_total{namespace,status}</code></td><td>counter</td><td>Terminal outcomes, per namespace</td></tr>
+        <tr><td><code>workflowd_namespace_task_results_total{namespace,result}</code></td><td>counter</td><td>Worker-reported results, per namespace</td></tr>
+        <tr><td><code>workflowd_namespace_step_duration_seconds{namespace}</code></td><td>histogram</td><td>Dispatch → worker result latency, per namespace</td></tr>
+        <tr><td><code>workflowd_namespace_task_queue_depth{namespace}</code>, <code>workflowd_namespace_workflow_task_queue_depth{namespace}</code></td><td>gauge</td><td>Activity tasks and workflow decisions waiting, per namespace</td></tr>
+        <tr><td><code>workflowd_namespace_workflows_active{namespace}</code></td><td>gauge</td><td>Running or waiting, per namespace</td></tr>
       </tbody>
     </table>
+    <p>The <code>workflowd_namespace_*</code> families split the engine-wide ones by namespace; the engine-wide families are
+      unchanged, so existing queries and alerts keep their meaning.</p>
 
     <h3>Useful queries</h3>
     <pre data-lang="sh"><code># Workflow failure rate over 5 minutes
@@ -1482,7 +1491,23 @@ workflowd_task_queue_depth
 histogram_quantile(0.95, rate(workflowd_step_duration_seconds_bucket[5m]))
 
 # Dead workers
-rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
+rate(workflowd_leases_expired_total[5m]) > 0
+
+# One tenant's failure rate
+sum(rate(workflowd_namespace_workflows_finished_total{namespace="liftoff",status=~"failed|timed_out"}[5m]))
+  / sum(rate(workflowd_namespace_workflows_finished_total{namespace="liftoff",status=~"completed|failed|timed_out"}[5m]))</code></pre>
+    <h3>Without Prometheus</h3>
+    <pre data-lang="sh"><code>GET /api/metrics?window=15m      (1m to 1h; the request's namespace)
+→ {"namespace":"default","window_seconds":900,"step_seconds":20,
+   "points":[{"at":"…","started":4,"completed":3,"failed":1,"other":0,"steps":9,"steps_failed":1,
+              "step_p50_ms":180,"step_p95_ms":940,"activity_queue":2,"workflow_queue":0,"active":5},…],
+   "totals":{"completed":41,"failed":3,"failure_rate":0.068,"finished_per_minute":2.9,"step_p95_ms":870,…},
+   "now":{"activity_queue":2,"workflow_queue":0,"active":5}}</code></pre>
+    <p>The engine samples its own per-namespace families every 10 seconds and keeps the last hour in memory (a restart
+      starts afresh). A summary is what <code>rate()</code> and <code>histogram_quantile()</code> would say over the same
+      families: each point is what happened in its interval (at most 60 points), <code>failed</code> counts failures and
+      timeouts, <code>other</code> cancellations and terminations, and the failure rate is failed over completed plus
+      failed. The dashboard's <em>pulse</em> panel draws it.</p>
 
     <h2 id="dashboard">Dashboard</h2>
     <p>
@@ -1502,7 +1527,11 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
       <li>a detail view with the step timeline rendered as woven weft picks (kinds, statuses, attempts, errors,
         outputs, the signal a step is parked on), the <em>card chain</em>: every recorded event in order, with
         payloads shown readably (JSON pretty-printed, bytes that are not text as hex), and the workflow's runs,</li>
-      <li>actions to send a signal to, cancel or terminate a live workflow.</li>
+      <li>actions to send a signal to, cancel or terminate a live workflow, to <a href="#reset">reset</a> a finished
+        one, and to act on several at once,</li>
+      <li><em>the pulse</em>: the namespace's finished workflows per minute, failure rate, step latency (p50, p95, p99)
+        and waiting tasks over the last 5 minutes, 15 minutes or hour, as charts or a table, from
+        <code>GET /api/metrics</code>: no Prometheus needed.</li>
     </ul>
     <p>It is plain HTML, CSS and vanilla JS — no build step, no npm, nothing to bundle.</p>
 
