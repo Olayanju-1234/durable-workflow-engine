@@ -275,3 +275,51 @@ func TestScheduleControlCommands(t *testing.T) {
 		t.Fatalf("future --to: exit %d %s", code, errOut)
 	}
 }
+
+func TestBulkActionsAndReset(t *testing.T) {
+	h := newHarness(t)
+	for _, id := range []string{"b1", "b2", "b3"} {
+		h.ok("start", "Approval", "--id", id)
+	}
+	// Several workflows: asked first, and nothing happens without a yes.
+	code, _, errOut := h.run("no\n", "terminate", "b1", "b2", "--reason", "cleanup")
+	if code == 0 || !strings.Contains(errOut, "terminate 2 workflows: b1, b2") || !strings.Contains(errOut, "nothing changed") {
+		t.Fatalf("declined bulk terminate: exit %d\n%s", code, errOut)
+	}
+	contains(t, "still waiting", h.ok("describe", "b1"), "WAITING")
+	code, out, errOut := h.run("yes\n", "terminate", "b1", "b2", "--reason", "cleanup")
+	if code != 0 {
+		t.Fatalf("bulk terminate: exit %d\n%s%s", code, out, errOut)
+	}
+	contains(t, "bulk terminate", out, "terminated b1", "terminated b2", "2 terminated, 0 failed")
+	// By filter, with --yes; a workflow that already finished fails, and the exit says so.
+	code, out, errOut = h.run("", "cancel", "--type", "Approval", "--yes")
+	if code != 1 || !strings.Contains(out, "cancelled b3") || !strings.Contains(out, "1 cancelled, 2 failed") || !strings.Contains(errOut, "b1:") {
+		t.Fatalf("cancel by filter: exit %d\n%s%s", code, out, errOut)
+	}
+	if code, _, errOut := h.run("", "cancel", "b1", "--type", "Approval"); code != 2 || !strings.Contains(errOut, "not both") {
+		t.Fatalf("ids and a filter: exit %d %s", code, errOut)
+	}
+
+	// Reset: the terminated run starts again, waiting for its signal.
+	contains(t, "reset", h.ok("reset", "b1", "--reason", "retry"), "b1: new run", "from event 2")
+	contains(t, "after reset", h.ok("describe", "b1"), "WAITING")
+	contains(t, "runs after reset", h.ok("runs", "b1"), "TERMINATED", "current")
+	if code, _, errOut := h.run("", "reset", "b1"); code != 1 || !strings.Contains(errOut, "still running") && !strings.Contains(errOut, "only a finished run") {
+		t.Fatalf("reset of a live run: exit %d %s", code, errOut)
+	}
+	if code, _, errOut := h.run("", "reset", "b2", "b3", "--event", "2"); code != 2 || !strings.Contains(errOut, "exactly one") {
+		t.Fatalf("--event with two ids: exit %d %s", code, errOut)
+	}
+	var res struct {
+		Results []struct {
+			WorkflowID string         `json:"workflow_id"`
+			OK         bool           `json:"ok"`
+			Result     map[string]any `json:"result"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(h.ok("reset", "--status", "cancelled", "--yes", "--json")), &res); err != nil ||
+		len(res.Results) != 1 || res.Results[0].WorkflowID != "b3" || !res.Results[0].OK || res.Results[0].Result["run_id"] == "" {
+		t.Fatalf("reset --json by status: %+v %v", res, err)
+	}
+}

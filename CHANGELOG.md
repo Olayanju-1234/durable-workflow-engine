@@ -17,6 +17,17 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   tab.
 - `GET /api/workflows` takes `started_after` / `started_before` and `sort` (`started`, `updated`,
   `-` for newest first), and answers `counts` per status and the namespace's `types`.
+- **Reset** (ADR-0021): start a finished run again from a point in its history, by default the
+  step whose failure ended it, once its cause is fixed. The new run keeps the earlier events
+  unchanged, so the code replays them as before and the steps before the point are not run again;
+  signals recorded after the point are carried over; the finished run is kept as an earlier run.
+  `ResetWorkflow` (gRPC), `POST /api/workflows/{id}/reset`, Go `client.ResetWorkflow`,
+  `workflowd ctl reset`, and the dashboard (*Retry from …*, or *reset to here* on any event).
+  Describe shows `reset_point` for a finished run and `reset_from_run_id` for a reset one. No new
+  history format: older binaries read a reset run as an ordinary run.
+- **Bulk actions**: `workflowd ctl cancel`, `terminate` and `reset` take several ids or every
+  match of `--status` / `--type` / `--query`, asking first (`--yes`); the dashboard selects rows
+  and confirms before acting. The dashboard's signal form checks a JSON payload before sending it.
 
 ## [0.4.0] - 2026-10-24
 

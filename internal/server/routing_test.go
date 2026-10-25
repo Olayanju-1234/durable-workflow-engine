@@ -178,7 +178,7 @@ func (l *recordingLog) Append(id string, ev *history.HistoryEvent) error {
 	return l.store.Append(id, ev)
 }
 
-func (l *recordingLog) NewRun(id, archive string, ev *history.HistoryEvent) error {
+func (l *recordingLog) NewRun(id, archive string, ev *history.HistoryEvent, _ ...*history.HistoryEvent) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.fail != nil {

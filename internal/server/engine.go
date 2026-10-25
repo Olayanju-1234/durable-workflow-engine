@@ -53,8 +53,8 @@ type HistoryLog interface {
 	Append(workflowID string, ev *history.HistoryEvent) error
 	Delete(workflowID string) error
 	// NewRun keeps a finished history under archiveID and starts the
-	// workflow's next run with first (see HistoryStore.NewRun).
-	NewRun(workflowID, archiveID string, first *history.HistoryEvent) error
+	// workflow's next run with first, then more (see HistoryStore.NewRun).
+	NewRun(workflowID, archiveID string, first *history.HistoryEvent, more ...*history.HistoryEvent) error
 }
 
 // Engine is the running heart of the workflow service: it owns the history
@@ -478,6 +478,19 @@ func (e *Engine) recoverLocked(w *wfState, c *recoveryCounts) error {
 	}
 	if st.Status.IsTerminal() || st.Status == state.StatusNotStarted {
 		return nil
+	}
+	return e.resumeRunLocked(w, c)
+}
+
+// resumeRunLocked puts a live run to work from its history alone: deadlines
+// re-armed, open activities queued, timers and retries re-armed, buffered
+// signals delivered, and a decision asked for if one is owed. Recovery uses it
+// for every live workflow, and reset for the run it starts. The caller holds w.mu.
+func (e *Engine) resumeRunLocked(w *wfState, c *recoveryCounts) error {
+	id := w.id
+	_, st, err := e.historyLocked(w)
+	if err != nil {
+		return fmt.Errorf("server: resume: %w", err)
 	}
 	// Recovered live workflows re-enter the active gauge (it is in-memory and
 	// died with the old process); advancing below may immediately retire one.

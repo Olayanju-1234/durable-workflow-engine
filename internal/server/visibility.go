@@ -141,7 +141,7 @@ func describeRun(workflowID string, events []*history.HistoryEvent, st *state.St
 			Marker:     s.Marker,
 		})
 	}
-	return &GetWorkflowResponse{
+	resp := &GetWorkflowResponse{
 		Summary:             summaryFrom(workflowID, events, st, bytes),
 		Steps:               steps,
 		Input:               st.Input,
@@ -150,7 +150,12 @@ func describeRun(workflowID string, events []*history.HistoryEvent, st *state.St
 		ContinuedAsNewRunId: st.ContinuedAsNew.GetRunId(),
 		CancelRequested:     st.CancelRequestedEventID > 0,
 		CancelReason:        st.CancelReason,
-	}, nil
+		ResetFromRunId:      st.ResetFromRunID,
+	}
+	if p, ok := DefaultResetPoint(events, st); ok {
+		resp.ResetEventId, resp.ResetStepName, resp.ResetStepSequence = p.EventID, p.StepName, p.Sequence
+	}
+	return resp, nil
 }
 
 // TerminateWorkflow is the operator kill switch: it durably closes a

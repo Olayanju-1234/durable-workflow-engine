@@ -3562,8 +3562,15 @@ type GetWorkflowResponse struct {
 	// told and is ending.
 	CancelRequested bool   `protobuf:"varint,7,opt,name=cancel_requested,json=cancelRequested,proto3" json:"cancel_requested,omitempty"`
 	CancelReason    string `protobuf:"bytes,8,opt,name=cancel_reason,json=cancelReason,proto3" json:"cancel_reason,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The run this one was reset from, if an operator reset it.
+	ResetFromRunId string `protobuf:"bytes,9,opt,name=reset_from_run_id,json=resetFromRunId,proto3" json:"reset_from_run_id,omitempty"`
+	// Where ResetWorkflow with no event id would reset this finished run (zero:
+	// it is not finished, or has no such step), and that step.
+	ResetEventId      int64  `protobuf:"varint,10,opt,name=reset_event_id,json=resetEventId,proto3" json:"reset_event_id,omitempty"`
+	ResetStepName     string `protobuf:"bytes,11,opt,name=reset_step_name,json=resetStepName,proto3" json:"reset_step_name,omitempty"`
+	ResetStepSequence int64  `protobuf:"varint,12,opt,name=reset_step_sequence,json=resetStepSequence,proto3" json:"reset_step_sequence,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GetWorkflowResponse) Reset() {
@@ -3650,6 +3657,34 @@ func (x *GetWorkflowResponse) GetCancelReason() string {
 		return x.CancelReason
 	}
 	return ""
+}
+
+func (x *GetWorkflowResponse) GetResetFromRunId() string {
+	if x != nil {
+		return x.ResetFromRunId
+	}
+	return ""
+}
+
+func (x *GetWorkflowResponse) GetResetEventId() int64 {
+	if x != nil {
+		return x.ResetEventId
+	}
+	return 0
+}
+
+func (x *GetWorkflowResponse) GetResetStepName() string {
+	if x != nil {
+		return x.ResetStepName
+	}
+	return ""
+}
+
+func (x *GetWorkflowResponse) GetResetStepSequence() int64 {
+	if x != nil {
+		return x.ResetStepSequence
+	}
+	return 0
 }
 
 type ListWorkflowRunsRequest struct {
@@ -4007,6 +4042,142 @@ func (*CancelWorkflowResponse) Descriptor() ([]byte, []int) {
 	return file_service_proto_rawDescGZIP(), []int{56}
 }
 
+type ResetWorkflowRequest struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowId string                 `protobuf:"bytes,1,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	// The first event of the finished run to leave out: the new run keeps
+	// events 1 to event_id - 1. Zero picks the opening event of the step whose
+	// failure ended the run (or the step it was waiting on when it was
+	// cancelled, terminated or timed out).
+	EventId int64 `protobuf:"varint,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	// Recorded on the new run's WorkflowStarted.
+	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResetWorkflowRequest) Reset() {
+	*x = ResetWorkflowRequest{}
+	mi := &file_service_proto_msgTypes[57]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetWorkflowRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetWorkflowRequest) ProtoMessage() {}
+
+func (x *ResetWorkflowRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[57]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetWorkflowRequest.ProtoReflect.Descriptor instead.
+func (*ResetWorkflowRequest) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{57}
+}
+
+func (x *ResetWorkflowRequest) GetWorkflowId() string {
+	if x != nil {
+		return x.WorkflowId
+	}
+	return ""
+}
+
+func (x *ResetWorkflowRequest) GetEventId() int64 {
+	if x != nil {
+		return x.EventId
+	}
+	return 0
+}
+
+func (x *ResetWorkflowRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type ResetWorkflowResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The new run.
+	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The event the reset left out, and the run it was reset from.
+	ResetEventId  int64  `protobuf:"varint,2,opt,name=reset_event_id,json=resetEventId,proto3" json:"reset_event_id,omitempty"`
+	PreviousRunId string `protobuf:"bytes,3,opt,name=previous_run_id,json=previousRunId,proto3" json:"previous_run_id,omitempty"`
+	// Signals recorded after that event, recorded again on the new run.
+	ReappliedSignals int32 `protobuf:"varint,4,opt,name=reapplied_signals,json=reappliedSignals,proto3" json:"reapplied_signals,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ResetWorkflowResponse) Reset() {
+	*x = ResetWorkflowResponse{}
+	mi := &file_service_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetWorkflowResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetWorkflowResponse) ProtoMessage() {}
+
+func (x *ResetWorkflowResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_service_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetWorkflowResponse.ProtoReflect.Descriptor instead.
+func (*ResetWorkflowResponse) Descriptor() ([]byte, []int) {
+	return file_service_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *ResetWorkflowResponse) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ResetWorkflowResponse) GetResetEventId() int64 {
+	if x != nil {
+		return x.ResetEventId
+	}
+	return 0
+}
+
+func (x *ResetWorkflowResponse) GetPreviousRunId() string {
+	if x != nil {
+		return x.PreviousRunId
+	}
+	return ""
+}
+
+func (x *ResetWorkflowResponse) GetReappliedSignals() int32 {
+	if x != nil {
+		return x.ReappliedSignals
+	}
+	return 0
+}
+
 var File_service_proto protoreflect.FileDescriptor
 
 const file_service_proto_rawDesc = "" +
@@ -4272,7 +4443,7 @@ const file_service_proto_rawDesc = "" +
 	"\n" +
 	"error_type\x18\v \x01(\tR\terrorType\x12\x1d\n" +
 	"\n" +
-	"task_queue\x18\f \x01(\tR\ttaskQueue\"\xe1\x02\n" +
+	"task_queue\x18\f \x01(\tR\ttaskQueue\"\x8a\x04\n" +
 	"\x13GetWorkflowResponse\x126\n" +
 	"\asummary\x18\x01 \x01(\v2\x1c.workflow.v1.WorkflowSummaryR\asummary\x12+\n" +
 	"\x05steps\x18\x02 \x03(\v2\x15.workflow.v1.StepInfoR\x05steps\x12\x14\n" +
@@ -4281,7 +4452,12 @@ const file_service_proto_rawDesc = "" +
 	"\x15continued_from_run_id\x18\x05 \x01(\tR\x12continuedFromRunId\x124\n" +
 	"\x17continued_as_new_run_id\x18\x06 \x01(\tR\x13continuedAsNewRunId\x12)\n" +
 	"\x10cancel_requested\x18\a \x01(\bR\x0fcancelRequested\x12#\n" +
-	"\rcancel_reason\x18\b \x01(\tR\fcancelReason\":\n" +
+	"\rcancel_reason\x18\b \x01(\tR\fcancelReason\x12)\n" +
+	"\x11reset_from_run_id\x18\t \x01(\tR\x0eresetFromRunId\x12$\n" +
+	"\x0ereset_event_id\x18\n" +
+	" \x01(\x03R\fresetEventId\x12&\n" +
+	"\x0freset_step_name\x18\v \x01(\tR\rresetStepName\x12.\n" +
+	"\x13reset_step_sequence\x18\f \x01(\x03R\x11resetStepSequence\":\n" +
 	"\x17ListWorkflowRunsRequest\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\"\xab\x01\n" +
@@ -4304,7 +4480,17 @@ const file_service_proto_rawDesc = "" +
 	"workflowId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x1a\n" +
 	"\bgraceful\x18\x03 \x01(\bR\bgraceful\"\x18\n" +
-	"\x16CancelWorkflowResponse*\x85\x01\n" +
+	"\x16CancelWorkflowResponse\"j\n" +
+	"\x14ResetWorkflowRequest\x12\x1f\n" +
+	"\vworkflow_id\x18\x01 \x01(\tR\n" +
+	"workflowId\x12\x19\n" +
+	"\bevent_id\x18\x02 \x01(\x03R\aeventId\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xa9\x01\n" +
+	"\x15ResetWorkflowResponse\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12$\n" +
+	"\x0ereset_event_id\x18\x02 \x01(\x03R\fresetEventId\x12&\n" +
+	"\x0fprevious_run_id\x18\x03 \x01(\tR\rpreviousRunId\x12+\n" +
+	"\x11reapplied_signals\x18\x04 \x01(\x05R\x10reappliedSignals*\x85\x01\n" +
 	"\rOverlapPolicy\x12\x1e\n" +
 	"\x1aOVERLAP_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13OVERLAP_POLICY_SKIP\x10\x01\x12\x1d\n" +
@@ -4328,7 +4514,7 @@ const file_service_proto_rawDesc = "" +
 	"\x10IdConflictPolicy\x12\"\n" +
 	"\x1eID_CONFLICT_POLICY_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17ID_CONFLICT_POLICY_FAIL\x10\x01\x12#\n" +
-	"\x1fID_CONFLICT_POLICY_USE_EXISTING\x10\x022\xb3\x0e\n" +
+	"\x1fID_CONFLICT_POLICY_USE_EXISTING\x10\x022\x8b\x0f\n" +
 	"\x0fWorkflowService\x12V\n" +
 	"\rStartWorkflow\x12!.workflow.v1.StartWorkflowRequest\x1a\".workflow.v1.StartWorkflowResponse\x12G\n" +
 	"\bPollTask\x12\x1c.workflow.v1.PollTaskRequest\x1a\x1d.workflow.v1.PollTaskResponse\x12S\n" +
@@ -4339,7 +4525,8 @@ const file_service_proto_rawDesc = "" +
 	"\vGetWorkflow\x12\x1f.workflow.v1.GetWorkflowRequest\x1a .workflow.v1.GetWorkflowResponse\x12b\n" +
 	"\x11TerminateWorkflow\x12%.workflow.v1.TerminateWorkflowRequest\x1a&.workflow.v1.TerminateWorkflowResponse\x12Y\n" +
 	"\x0eCancelWorkflow\x12\".workflow.v1.CancelWorkflowRequest\x1a#.workflow.v1.CancelWorkflowResponse\x12_\n" +
-	"\x10ListWorkflowRuns\x12$.workflow.v1.ListWorkflowRunsRequest\x1a%.workflow.v1.ListWorkflowRunsResponse\x12k\n" +
+	"\x10ListWorkflowRuns\x12$.workflow.v1.ListWorkflowRunsRequest\x1a%.workflow.v1.ListWorkflowRunsResponse\x12V\n" +
+	"\rResetWorkflow\x12!.workflow.v1.ResetWorkflowRequest\x1a\".workflow.v1.ResetWorkflowResponse\x12k\n" +
 	"\x14RegisterWorkflowType\x12(.workflow.v1.RegisterWorkflowTypeRequest\x1a).workflow.v1.RegisterWorkflowTypeResponse\x12_\n" +
 	"\x10PollWorkflowTask\x12$.workflow.v1.PollWorkflowTaskRequest\x1a%.workflow.v1.PollWorkflowTaskResponse\x12k\n" +
 	"\x14CompleteWorkflowTask\x12(.workflow.v1.CompleteWorkflowTaskRequest\x1a).workflow.v1.CompleteWorkflowTaskResponse\x12Y\n" +
@@ -4364,7 +4551,7 @@ func file_service_proto_rawDescGZIP() []byte {
 }
 
 var file_service_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_service_proto_msgTypes = make([]protoimpl.MessageInfo, 57)
+var file_service_proto_msgTypes = make([]protoimpl.MessageInfo, 59)
 var file_service_proto_goTypes = []any{
 	(OverlapPolicy)(0),                   // 0: workflow.v1.OverlapPolicy
 	(WorkflowStatus)(0),                  // 1: workflow.v1.WorkflowStatus
@@ -4427,8 +4614,10 @@ var file_service_proto_goTypes = []any{
 	(*TerminateWorkflowResponse)(nil),    // 58: workflow.v1.TerminateWorkflowResponse
 	(*CancelWorkflowRequest)(nil),        // 59: workflow.v1.CancelWorkflowRequest
 	(*CancelWorkflowResponse)(nil),       // 60: workflow.v1.CancelWorkflowResponse
-	(*history.HistoryEvent)(nil),         // 61: history.v1.HistoryEvent
-	(*history.RetryPolicy)(nil),          // 62: history.v1.RetryPolicy
+	(*ResetWorkflowRequest)(nil),         // 61: workflow.v1.ResetWorkflowRequest
+	(*ResetWorkflowResponse)(nil),        // 62: workflow.v1.ResetWorkflowResponse
+	(*history.HistoryEvent)(nil),         // 63: history.v1.HistoryEvent
+	(*history.RetryPolicy)(nil),          // 64: history.v1.RetryPolicy
 }
 var file_service_proto_depIdxs = []int32{
 	0,  // 0: workflow.v1.Schedule.overlap_policy:type_name -> workflow.v1.OverlapPolicy
@@ -4437,9 +4626,9 @@ var file_service_proto_depIdxs = []int32{
 	4,  // 3: workflow.v1.PreviewScheduleRequest.schedule:type_name -> workflow.v1.Schedule
 	4,  // 4: workflow.v1.CreateScheduleRequest.schedule:type_name -> workflow.v1.Schedule
 	5,  // 5: workflow.v1.ListSchedulesResponse.schedules:type_name -> workflow.v1.ScheduleInfo
-	61, // 6: workflow.v1.WorkflowTask.history:type_name -> history.v1.HistoryEvent
+	63, // 6: workflow.v1.WorkflowTask.history:type_name -> history.v1.HistoryEvent
 	23, // 7: workflow.v1.PollWorkflowTaskResponse.task:type_name -> workflow.v1.WorkflowTask
-	62, // 8: workflow.v1.ScheduleActivityCommand.retry_policy:type_name -> history.v1.RetryPolicy
+	64, // 8: workflow.v1.ScheduleActivityCommand.retry_policy:type_name -> history.v1.RetryPolicy
 	25, // 9: workflow.v1.WorkflowCommand.schedule_activity:type_name -> workflow.v1.ScheduleActivityCommand
 	26, // 10: workflow.v1.WorkflowCommand.start_timer:type_name -> workflow.v1.StartTimerCommand
 	27, // 11: workflow.v1.WorkflowCommand.await_signal:type_name -> workflow.v1.AwaitSignalCommand
@@ -4470,38 +4659,40 @@ var file_service_proto_depIdxs = []int32{
 	57, // 36: workflow.v1.WorkflowService.TerminateWorkflow:input_type -> workflow.v1.TerminateWorkflowRequest
 	59, // 37: workflow.v1.WorkflowService.CancelWorkflow:input_type -> workflow.v1.CancelWorkflowRequest
 	54, // 38: workflow.v1.WorkflowService.ListWorkflowRuns:input_type -> workflow.v1.ListWorkflowRunsRequest
-	20, // 39: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
-	22, // 40: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
-	34, // 41: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
-	14, // 42: workflow.v1.WorkflowService.CreateSchedule:input_type -> workflow.v1.CreateScheduleRequest
-	16, // 43: workflow.v1.WorkflowService.DeleteSchedule:input_type -> workflow.v1.DeleteScheduleRequest
-	18, // 44: workflow.v1.WorkflowService.ListSchedules:input_type -> workflow.v1.ListSchedulesRequest
-	6,  // 45: workflow.v1.WorkflowService.PauseSchedule:input_type -> workflow.v1.PauseScheduleRequest
-	8,  // 46: workflow.v1.WorkflowService.ResumeSchedule:input_type -> workflow.v1.ResumeScheduleRequest
-	10, // 47: workflow.v1.WorkflowService.BackfillSchedule:input_type -> workflow.v1.BackfillScheduleRequest
-	12, // 48: workflow.v1.WorkflowService.PreviewSchedule:input_type -> workflow.v1.PreviewScheduleRequest
-	37, // 49: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
-	40, // 50: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
-	42, // 51: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
-	47, // 52: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
-	44, // 53: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
-	50, // 54: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
-	53, // 55: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
-	58, // 56: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
-	60, // 57: workflow.v1.WorkflowService.CancelWorkflow:output_type -> workflow.v1.CancelWorkflowResponse
-	56, // 58: workflow.v1.WorkflowService.ListWorkflowRuns:output_type -> workflow.v1.ListWorkflowRunsResponse
-	21, // 59: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
-	24, // 60: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
-	35, // 61: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
-	15, // 62: workflow.v1.WorkflowService.CreateSchedule:output_type -> workflow.v1.CreateScheduleResponse
-	17, // 63: workflow.v1.WorkflowService.DeleteSchedule:output_type -> workflow.v1.DeleteScheduleResponse
-	19, // 64: workflow.v1.WorkflowService.ListSchedules:output_type -> workflow.v1.ListSchedulesResponse
-	7,  // 65: workflow.v1.WorkflowService.PauseSchedule:output_type -> workflow.v1.PauseScheduleResponse
-	9,  // 66: workflow.v1.WorkflowService.ResumeSchedule:output_type -> workflow.v1.ResumeScheduleResponse
-	11, // 67: workflow.v1.WorkflowService.BackfillSchedule:output_type -> workflow.v1.BackfillScheduleResponse
-	13, // 68: workflow.v1.WorkflowService.PreviewSchedule:output_type -> workflow.v1.PreviewScheduleResponse
-	49, // [49:69] is the sub-list for method output_type
-	29, // [29:49] is the sub-list for method input_type
+	61, // 39: workflow.v1.WorkflowService.ResetWorkflow:input_type -> workflow.v1.ResetWorkflowRequest
+	20, // 40: workflow.v1.WorkflowService.RegisterWorkflowType:input_type -> workflow.v1.RegisterWorkflowTypeRequest
+	22, // 41: workflow.v1.WorkflowService.PollWorkflowTask:input_type -> workflow.v1.PollWorkflowTaskRequest
+	34, // 42: workflow.v1.WorkflowService.CompleteWorkflowTask:input_type -> workflow.v1.CompleteWorkflowTaskRequest
+	14, // 43: workflow.v1.WorkflowService.CreateSchedule:input_type -> workflow.v1.CreateScheduleRequest
+	16, // 44: workflow.v1.WorkflowService.DeleteSchedule:input_type -> workflow.v1.DeleteScheduleRequest
+	18, // 45: workflow.v1.WorkflowService.ListSchedules:input_type -> workflow.v1.ListSchedulesRequest
+	6,  // 46: workflow.v1.WorkflowService.PauseSchedule:input_type -> workflow.v1.PauseScheduleRequest
+	8,  // 47: workflow.v1.WorkflowService.ResumeSchedule:input_type -> workflow.v1.ResumeScheduleRequest
+	10, // 48: workflow.v1.WorkflowService.BackfillSchedule:input_type -> workflow.v1.BackfillScheduleRequest
+	12, // 49: workflow.v1.WorkflowService.PreviewSchedule:input_type -> workflow.v1.PreviewScheduleRequest
+	37, // 50: workflow.v1.WorkflowService.StartWorkflow:output_type -> workflow.v1.StartWorkflowResponse
+	40, // 51: workflow.v1.WorkflowService.PollTask:output_type -> workflow.v1.PollTaskResponse
+	42, // 52: workflow.v1.WorkflowService.CompleteTask:output_type -> workflow.v1.CompleteTaskResponse
+	47, // 53: workflow.v1.WorkflowService.SignalWorkflow:output_type -> workflow.v1.SignalWorkflowResponse
+	44, // 54: workflow.v1.WorkflowService.Heartbeat:output_type -> workflow.v1.HeartbeatResponse
+	50, // 55: workflow.v1.WorkflowService.ListWorkflows:output_type -> workflow.v1.ListWorkflowsResponse
+	53, // 56: workflow.v1.WorkflowService.GetWorkflow:output_type -> workflow.v1.GetWorkflowResponse
+	58, // 57: workflow.v1.WorkflowService.TerminateWorkflow:output_type -> workflow.v1.TerminateWorkflowResponse
+	60, // 58: workflow.v1.WorkflowService.CancelWorkflow:output_type -> workflow.v1.CancelWorkflowResponse
+	56, // 59: workflow.v1.WorkflowService.ListWorkflowRuns:output_type -> workflow.v1.ListWorkflowRunsResponse
+	62, // 60: workflow.v1.WorkflowService.ResetWorkflow:output_type -> workflow.v1.ResetWorkflowResponse
+	21, // 61: workflow.v1.WorkflowService.RegisterWorkflowType:output_type -> workflow.v1.RegisterWorkflowTypeResponse
+	24, // 62: workflow.v1.WorkflowService.PollWorkflowTask:output_type -> workflow.v1.PollWorkflowTaskResponse
+	35, // 63: workflow.v1.WorkflowService.CompleteWorkflowTask:output_type -> workflow.v1.CompleteWorkflowTaskResponse
+	15, // 64: workflow.v1.WorkflowService.CreateSchedule:output_type -> workflow.v1.CreateScheduleResponse
+	17, // 65: workflow.v1.WorkflowService.DeleteSchedule:output_type -> workflow.v1.DeleteScheduleResponse
+	19, // 66: workflow.v1.WorkflowService.ListSchedules:output_type -> workflow.v1.ListSchedulesResponse
+	7,  // 67: workflow.v1.WorkflowService.PauseSchedule:output_type -> workflow.v1.PauseScheduleResponse
+	9,  // 68: workflow.v1.WorkflowService.ResumeSchedule:output_type -> workflow.v1.ResumeScheduleResponse
+	11, // 69: workflow.v1.WorkflowService.BackfillSchedule:output_type -> workflow.v1.BackfillScheduleResponse
+	13, // 70: workflow.v1.WorkflowService.PreviewSchedule:output_type -> workflow.v1.PreviewScheduleResponse
+	50, // [50:71] is the sub-list for method output_type
+	29, // [29:50] is the sub-list for method input_type
 	29, // [29:29] is the sub-list for extension type_name
 	29, // [29:29] is the sub-list for extension extendee
 	0,  // [0:29] is the sub-list for field type_name
@@ -4532,7 +4723,7 @@ func file_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_service_proto_rawDesc), len(file_service_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   57,
+			NumMessages:   59,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

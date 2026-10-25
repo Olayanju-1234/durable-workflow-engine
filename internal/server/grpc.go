@@ -287,6 +287,30 @@ func (s *GRPCServer) CancelWorkflow(ctx context.Context, req *CancelWorkflowRequ
 	return &CancelWorkflowResponse{}, nil
 }
 
+func (s *GRPCServer) ResetWorkflow(ctx context.Context, req *ResetWorkflowRequest) (*ResetWorkflowResponse, error) {
+	e, err := s.engine(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, err := e.ResetWorkflow(req.GetWorkflowId(), ResetOptions{EventID: req.GetEventId(), Reason: req.GetReason()})
+	switch {
+	case err == nil, res.RunID != "":
+		// A run that reset but could not resume yet is still reset.
+		return &ResetWorkflowResponse{RunId: res.RunID, ResetEventId: res.ResetEventID,
+			PreviousRunId: res.PreviousRunID, ReappliedSignals: int32(res.ReappliedSignals)}, nil
+	case errors.Is(err, ErrNotLeader):
+		return nil, s.notLeader(ctx, err)
+	case errors.Is(err, ErrNotFound):
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	case errors.Is(err, ErrNotFinished):
+		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+	case errors.Is(err, ErrInvalidArgument):
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	default:
+		return nil, status.Errorf(codes.Internal, "%v", err)
+	}
+}
+
 func (s *GRPCServer) endWorkflow(ctx context.Context, id, reason string, end func(*Scope, string, string) error) error {
 	e, err := s.engine(ctx)
 	if err != nil {

@@ -89,7 +89,7 @@ func (e *Engine) newRunLocked(w *wfState, first *history.HistoryEvent) error {
 		e.indexLocked(w)
 		return fmt.Errorf("server: new run of %s: %w", w.id, err)
 	}
-	w.reset(first, e.limits)
+	w.reset(e.limits, first)
 	e.indexLocked(w)
 	return nil
 }

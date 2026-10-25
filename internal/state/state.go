@@ -151,6 +151,8 @@ type State struct {
 	RunID string
 	// ContinuedFromRunID is the run this one continued from, if any.
 	ContinuedFromRunID string
+	// ResetFromRunID is the run an operator reset this one from, if any.
+	ResetFromRunID string
 	// ContinuedAsNew describes the next run, once Status is StatusContinuedAsNew.
 	ContinuedAsNew *history.ContinuedAsNew
 	// CancelRequestedEventID is the event that asked to cancel the workflow
@@ -356,7 +358,7 @@ func (f *Folder) apply(ev *history.HistoryEvent) error {
 		st.Input = ws.GetInput()
 		st.StartedAt = ev.GetTimestamp()
 		st.ExecutionTimeout = time.Duration(ws.GetExecutionTimeoutMs()) * time.Millisecond
-		st.RunID, st.ContinuedFromRunID = ws.GetRunId(), ws.GetContinuedFromRunId()
+		st.RunID, st.ContinuedFromRunID, st.ResetFromRunID = ws.GetRunId(), ws.GetContinuedFromRunId(), ws.GetResetFromRunId()
 		st.TaskQueue = ws.GetTaskQueue()
 		if st.RunID == "" {
 			st.RunID = LegacyRunID(ev.GetTimestamp())

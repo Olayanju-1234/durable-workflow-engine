@@ -184,6 +184,24 @@ worker.activity('ts-release', async () => {
   return 'released';
 });
 
+// Reset: a run that failed on a broken activity is started again from that
+// step once it is fixed. The step before it is not run again, and the replayed
+// code sees the same clock and random numbers as the first run did.
+let onceCalls = 0;
+let fixableBroken = true;
+const fixableSeen = [];
+worker.workflow('TsReset', async (ctx) => {
+  const before = await ctx.activity('ts-once', '', { as: 'json' });
+  const seen = { started: ctx.now().getTime(), roll: ctx.random(), before };
+  return ctx.activity('ts-fixable', seen, { as: 'json', retry: { maxAttempts: 1 } });
+});
+worker.activity('ts-once', async () => ++onceCalls, { as: 'json' });
+worker.activity('ts-fixable', async (seen) => {
+  fixableSeen.push(seen);
+  if (fixableBroken) throw new NonRetryableError('downstream is down');
+  return seen;
+}, { as: 'json' });
+
 // The same activity name as the task-queue worker below: each queue's worker
 // must get only its own queue's tasks.
 worker.activity('ts-shared', async () => 'default worker');
@@ -316,6 +334,26 @@ const gracefulSteps = graceful.steps.map((s) => `${s.step_name}=${s.status}`).jo
 if (gracefulSteps !== 'ts-tick=COMPLETED settle=CANCELLED cancellation=COMPLETED ts-release=COMPLETED' || released !== 1 ||
     !graceful.cancel_requested || graceful.cancel_reason !== 'customer left' || !/being cancelled \(customer left\)/.test(graceful.error)) {
   fail(`graceful: steps ${gracefulSteps}, released ${released}, ${JSON.stringify(graceful)}`);
+}
+
+const resetId = await worker.startWorkflow('TsReset');
+for (let i = 0; ; i++) {
+  const wf = await worker.describe(resetId);
+  if (wf.status === 'FAILED') break;
+  if (i > 100 || (wf.status !== 'RUNNING' && wf.status !== 'WAITING')) fail(`reset: first run is ${wf.status}`);
+  await new Promise((r) => setTimeout(r, 50));
+}
+fixableBroken = false;
+const resetRes = await fetch(`${leader}/api/workflows/${resetId}/reset`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"reason":"fixed"}',
+});
+const resetBody = await resetRes.json();
+if (resetRes.status !== 200 || !resetBody.run_id) fail(`reset: HTTP ${resetRes.status} ${JSON.stringify(resetBody)}`);
+const reset = await waitDone(resetId);
+const [firstSeen, againSeen] = fixableSeen;
+if (onceCalls !== 1 || fixableSeen.length !== 2 || JSON.stringify(firstSeen) !== JSON.stringify(againSeen) ||
+    JSON.stringify(JSON.parse(reset.output)) !== JSON.stringify(firstSeen) || reset.reset_from_run_id !== resetBody.previous_run_id) {
+  fail(`reset: once ran ${onceCalls}x, fixable saw ${JSON.stringify(fixableSeen)}, output ${reset.output}`);
 }
 
 const foreverId = await worker.startWorkflow('TsForever', '', '', { executionTimeoutMs: 300 });

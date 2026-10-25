@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+import urllib.request
 from datetime import timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -266,6 +267,34 @@ def wait_done(wid):
     fail(f"workflow {wid} did not complete")
 
 
+# Reset: a run that failed on a broken activity is started again from that
+# step once it is fixed. The step before it is not run again, and the replayed
+# code sees the same clock and random numbers as the first run did.
+once_calls = [0]
+fixable = {"broken": True, "seen": []}
+
+
+@worker.workflow("PyReset")
+def py_reset(ctx):
+    before = ctx.activity("py-once", decode="json")
+    seen = {"started": ctx.now().isoformat(), "roll": ctx.random(), "before": before}
+    return ctx.activity("py-fixable", seen, retry=RetryPolicy(max_attempts=1), decode="json")
+
+
+@worker.activity("py-once", decode="json")
+def py_once(_payload):
+    once_calls[0] += 1
+    return once_calls[0]
+
+
+@worker.activity("py-fixable", decode="json")
+def py_fixable(seen):
+    fixable["seen"].append(seen)
+    if fixable["broken"]:
+        raise NonRetryableError("downstream is down")
+    return seen
+
+
 @worker.activity("py-shared")
 def py_shared_default(_payload):
     # The same name as the task-queue worker's: each queue's worker gets only its own.
@@ -411,6 +440,34 @@ if (
     or "being cancelled (customer left)" not in graceful.get("error", "")
 ):
     fail(f"graceful: steps {graceful_steps}, released {released[0]}, {graceful}")
+
+reset_id = worker.start_workflow("PyReset")
+for _ in range(100):
+    wf = worker.describe(reset_id)
+    if wf["status"] == "FAILED":
+        break
+    if wf["status"] not in ("RUNNING", "WAITING"):
+        fail(f"reset: first run is {wf['status']}")
+    time.sleep(0.05)
+else:
+    fail("reset: the first run never failed")
+fixable["broken"] = False
+req = urllib.request.Request(
+    f"{leader}/api/workflows/{reset_id}/reset", data=b'{"reason":"fixed"}', method="POST",
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req) as res:
+    reset_body = json.loads(res.read())
+reset = wait_done(reset_id)
+seen = fixable["seen"]
+if (
+    once_calls[0] != 1
+    or len(seen) != 2
+    or seen[0] != seen[1]
+    or json.loads(reset["output"]) != seen[0]
+    or reset.get("reset_from_run_id") != reset_body["previous_run_id"]
+):
+    fail(f"reset: once ran {once_calls[0]}x, fixable saw {seen}, output {reset['output']}")
 
 forever_id = worker.start_workflow("PyForever", execution_timeout=0.3)
 for _ in range(100):

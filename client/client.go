@@ -31,9 +31,11 @@ import (
 
 // Errors a call can be matched against with errors.Is.
 var (
-	ErrNotFound        = errors.New("client: workflow not found")
-	ErrAlreadyExists   = errors.New("client: workflow id already in use")
-	ErrNotRunning      = errors.New("client: workflow is not running")
+	ErrNotFound      = errors.New("client: workflow not found")
+	ErrAlreadyExists = errors.New("client: workflow id already in use")
+	ErrNotRunning    = errors.New("client: workflow is not running")
+	// ErrStillRunning: ResetWorkflow needs a finished run.
+	ErrStillRunning    = errors.New("client: workflow is still running")
 	ErrInvalid         = errors.New("client: invalid request")
 	ErrUnavailable     = errors.New("client: no workflowd node is serving")
 	ErrUnauthenticated = errors.New("client: missing or invalid auth token")
@@ -292,6 +294,53 @@ func (c *Client) TerminateWorkflow(ctx context.Context, workflowID, reason strin
 		return err
 	})
 	return wrap("terminate workflow", err)
+}
+
+// Reset is what ResetWorkflow did.
+type Reset struct {
+	// RunID is the new run; PreviousRunID the finished one it was reset
+	// from, kept as an earlier run.
+	RunID, PreviousRunID string
+	// EventID is the first event of the finished run the new one left out.
+	EventID int64
+	// ReappliedSignals counts signals recorded after that event, recorded
+	// again on the new run.
+	ReappliedSignals int
+}
+
+// ResetOption customises ResetWorkflow.
+type ResetOption func(*server.ResetWorkflowRequest)
+
+// ResetToEvent resets to just before event id: the new run keeps events 1 to
+// id - 1 (see DescribeWorkflow's history, or `workflowd ctl history`).
+func ResetToEvent(id int64) ResetOption {
+	return func(r *server.ResetWorkflowRequest) { r.EventId = id }
+}
+
+// ResetWorkflow starts a finished run again: a new run under the same id
+// replays the old run's events up to a point and carries on from there. By
+// default the point is the step whose failure ended the run, so that step runs
+// again (after you fixed what made it fail); ResetToEvent picks another. It
+// fails with ErrStillRunning for a live run: cancel or terminate it first.
+func (c *Client) ResetWorkflow(ctx context.Context, workflowID, reason string, opts ...ResetOption) (Reset, error) {
+	req := &server.ResetWorkflowRequest{WorkflowId: workflowID, Reason: reason}
+	for _, o := range opts {
+		o(req)
+	}
+	var resp *server.ResetWorkflowResponse
+	_, err := c.conn.Call(ctx, func(ctx context.Context, s server.WorkflowServiceClient, opt grpc.CallOption) error {
+		var err error
+		resp, err = s.ResetWorkflow(ctx, req, opt)
+		return err
+	})
+	if st, ok := status.FromError(err); ok && st.Code() == codes.FailedPrecondition {
+		return Reset{}, fmt.Errorf("client: reset workflow: %w: %s", ErrStillRunning, st.Message())
+	}
+	if err != nil {
+		return Reset{}, wrap("reset workflow", err)
+	}
+	return Reset{RunID: resp.GetRunId(), PreviousRunID: resp.GetPreviousRunId(), EventID: resp.GetResetEventId(),
+		ReappliedSignals: int(resp.GetReappliedSignals())}, nil
 }
 
 // CancelOption customises CancelWorkflow.

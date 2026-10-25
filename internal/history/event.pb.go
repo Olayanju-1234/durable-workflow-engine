@@ -295,9 +295,16 @@ type WorkflowStartedEvent struct {
 	// The task queue the run's workflow tasks go to, and its activities unless
 	// they name another. Empty is the default queue. A non-default queue needs
 	// history format 6: older binaries would hand its tasks to default pollers.
-	TaskQueue     string `protobuf:"bytes,7,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TaskQueue string `protobuf:"bytes,7,opt,name=task_queue,json=taskQueue,proto3" json:"task_queue,omitempty"`
+	// Set on a run an operator reset: the run it was reset from, the id of the
+	// first event of that run it left out, and why. The run starts with the
+	// events before that one, copied unchanged, so its code replays them as
+	// before. Older binaries ignore these and read an ordinary run.
+	ResetFromRunId string `protobuf:"bytes,8,opt,name=reset_from_run_id,json=resetFromRunId,proto3" json:"reset_from_run_id,omitempty"`
+	ResetEventId   int64  `protobuf:"varint,9,opt,name=reset_event_id,json=resetEventId,proto3" json:"reset_event_id,omitempty"`
+	ResetReason    string `protobuf:"bytes,10,opt,name=reset_reason,json=resetReason,proto3" json:"reset_reason,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *WorkflowStartedEvent) Reset() {
@@ -375,6 +382,27 @@ func (x *WorkflowStartedEvent) GetContinuedFromRunId() string {
 func (x *WorkflowStartedEvent) GetTaskQueue() string {
 	if x != nil {
 		return x.TaskQueue
+	}
+	return ""
+}
+
+func (x *WorkflowStartedEvent) GetResetFromRunId() string {
+	if x != nil {
+		return x.ResetFromRunId
+	}
+	return ""
+}
+
+func (x *WorkflowStartedEvent) GetResetEventId() int64 {
+	if x != nil {
+		return x.ResetEventId
+	}
+	return 0
+}
+
+func (x *WorkflowStartedEvent) GetResetReason() string {
+	if x != nil {
+		return x.ResetReason
 	}
 	return ""
 }
@@ -1260,7 +1288,7 @@ const file_event_proto_rawDesc = "" +
 	"\x0fsignal_received\x18\x12 \x01(\v2\x1f.history.v1.SignalReceivedEventH\x00R\x0esignalReceived\x12J\n" +
 	"\x0fmarker_recorded\x18\x13 \x01(\v2\x1f.history.v1.MarkerRecordedEventH\x00R\x0emarkerRecordedB\f\n" +
 	"\n" +
-	"attributes\"\x8d\x02\n" +
+	"attributes\"\x81\x03\n" +
 	"\x14WorkflowStartedEvent\x12\x1f\n" +
 	"\vworkflow_id\x18\x01 \x01(\tR\n" +
 	"workflowId\x12#\n" +
@@ -1270,7 +1298,11 @@ const file_event_proto_rawDesc = "" +
 	"\x06run_id\x18\x05 \x01(\tR\x05runId\x121\n" +
 	"\x15continued_from_run_id\x18\x06 \x01(\tR\x12continuedFromRunId\x12\x1d\n" +
 	"\n" +
-	"task_queue\x18\a \x01(\tR\ttaskQueue\"\xfe\x02\n" +
+	"task_queue\x18\a \x01(\tR\ttaskQueue\x12)\n" +
+	"\x11reset_from_run_id\x18\b \x01(\tR\x0eresetFromRunId\x12$\n" +
+	"\x0ereset_event_id\x18\t \x01(\x03R\fresetEventId\x12!\n" +
+	"\freset_reason\x18\n" +
+	" \x01(\tR\vresetReason\"\xfe\x02\n" +
 	"\x12StepScheduledEvent\x12\x1b\n" +
 	"\tstep_name\x18\x01 \x01(\tR\bstepName\x12\x14\n" +
 	"\x05input\x18\x02 \x01(\fR\x05input\x12\x1a\n" +

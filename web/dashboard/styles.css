@@ -684,3 +684,40 @@ pre.bin { color: var(--ink-soft); }
   .stat-value { font-size: 27px; }
   .drawer { width: 100%; }
 }
+
+/* ---------- selection + bulk actions ---------- */
+
+.wf-table th.sel, .wf-table td.sel { width: 34px; padding-right: 0; }
+.wf-table td.sel input, .wf-table th.sel input { accent-color: var(--indigo); width: 14px; height: 14px; cursor: pointer; }
+.bulk-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 18px; border-bottom: 1px solid var(--edge);
+  background: var(--indigo-wash);
+}
+.bulk-count { font-weight: 650; font-size: 12.5px; color: var(--indigo); margin-right: 6px; }
+.bulk-bar .linkish { margin-left: auto; }
+.modal-text { margin: 12px 0 6px; font-size: 13.5px; }
+.confirm-list { margin: 0 0 4px; padding-left: 18px; font-size: 12px; max-height: 150px; overflow: auto; }
+.confirm-list code { font-family: var(--mono); }
+.modal-actions .btn + .btn { margin-left: 8px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; box-shadow: none; }
+
+/* ---------- reset + signal ---------- */
+
+.action-note { margin: 0 0 9px; font-size: 12.5px; }
+.signal-form { margin-bottom: 9px; }
+.signal-form textarea {
+  width: 100%; font: inherit; font-family: var(--mono); font-size: 12.5px;
+  padding: 7px 11px; border-radius: 9px; resize: vertical; margin-bottom: 8px;
+  border: 1px solid var(--edge); background: var(--linen); color: var(--ink);
+}
+.signal-form textarea:focus { outline: none; border-color: var(--indigo); }
+.signal-form textarea[aria-invalid="true"] { border-color: var(--madder); }
+.signal-form select, .action-row select {
+  font: inherit; font-size: 13px; color: var(--ink); background: var(--linen);
+  border: 1px solid var(--edge); border-radius: 9px; padding: 6px 9px;
+}
+.sig-check { flex: 1; align-self: center; font-size: 12px; font-family: var(--serif); font-style: italic; color: var(--madder); }
+.sig-check[data-ok="1"] { color: var(--ink-soft); }
+.ev-reset { display: none; font-size: 11px; }
+.chain.can-reset .ev-reset { display: inline; }

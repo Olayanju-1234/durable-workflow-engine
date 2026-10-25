@@ -67,7 +67,7 @@ func (m *stateMachine) Apply(e *raft.LogEntry) (any, error) {
 	case *Command_Delete:
 		return m.deleteWorkflow(e.GetIndex(), c.Delete.GetWorkflowId())
 	case *Command_NewRun:
-		return m.newRun(e.GetIndex(), c.NewRun.GetWorkflowId(), c.NewRun.GetArchiveId(), c.NewRun.GetEvent())
+		return m.newRun(e.GetIndex(), c.NewRun.GetWorkflowId(), c.NewRun.GetArchiveId(), c.NewRun.GetEvent(), c.NewRun.GetMoreEvents())
 	default:
 		return fmt.Errorf("cluster: empty command at index %d", e.GetIndex()), nil
 	}
@@ -136,7 +136,7 @@ func (m *stateMachine) deleteWorkflow(index uint64, id string) (any, error) {
 	return nil, nil
 }
 
-func (m *stateMachine) newRun(index uint64, id, archiveID string, ev *history.HistoryEvent) (any, error) {
+func (m *stateMachine) newRun(index uint64, id, archiveID string, ev *history.HistoryEvent, more []*history.HistoryEvent) (any, error) {
 	p, err := m.position(id)
 	if err != nil {
 		return nil, err
@@ -151,13 +151,23 @@ func (m *stateMachine) newRun(index uint64, id, archiveID string, ev *history.Hi
 	if n := len(events); n == 0 || !isTerminal(events[n-1]) || ev.GetEventId() != 1 {
 		return fmt.Errorf("%w: %s can start a new run only after its current one finished", ErrConflict, id), nil
 	}
-	stamped := proto.Clone(ev).(*history.HistoryEvent)
-	stamped.RaftIndex = index
-	if err := m.store.NewRun(id, archiveID, stamped); err != nil {
+	stamp := func(ev *history.HistoryEvent) *history.HistoryEvent {
+		c := proto.Clone(ev).(*history.HistoryEvent)
+		c.RaftIndex = index
+		return c
+	}
+	rest := make([]*history.HistoryEvent, 0, len(more))
+	for i, e := range more {
+		if e.GetEventId() != int64(i+2) {
+			return fmt.Errorf("%w: %s's new run has event %d at position %d", ErrConflict, id, e.GetEventId(), i+2), nil
+		}
+		rest = append(rest, stamp(e))
+	}
+	if err := m.store.NewRun(id, archiveID, stamp(ev), rest...); err != nil {
 		delete(m.pos, id)
 		return nil, fmt.Errorf("cluster: new run of %s: %w", id, err)
 	}
-	m.pos[id] = position{events: 1, lastIndex: index}
+	m.pos[id] = position{events: int64(1 + len(rest)), lastIndex: index}
 	delete(m.pos, archiveID)
 	return nil, nil
 }
