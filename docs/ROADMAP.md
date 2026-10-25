@@ -133,7 +133,7 @@ for a pre-alpha project, and the wire protocol is cheaper to settle *before* rep
 - ✅ Adopt `buf` for proto lint + breaking-change detection (ADR-0002; Session 23, PR #17)
 - ✅ Storage upgrade path to LSM/BadgerDB — **decided: not needed** (Session 24, ADR-0006, with measurements); per-workflow locks + state cache (PR #22) removed the O(n²) ceiling
 - ✅ Correctness release from liftoff's integration (Session 26, PRs #35–#39, SDKs 0.2.0): timeouts (ADR-0008), cancellation (ADR-0009), non-retryable failures (ADR-0010), TypeScript CJS + deterministic clock/random
-- ⬜ Graceful workflow cancellation (deliver the cancel to workflow code so it can compensate; ADR-0009 alternative)
-- ⬜ `ctx.now()` / `ctx.random()` / signal-wait timeouts in the Python and Java SDKs; step cancel and parallel steps in Java
+- ✅ Graceful workflow cancellation: the cancel is delivered to workflow code, which may compensate before it ends CANCELLED (ADR-0014; Session 27, PR #46, 0.3.0)
+- ✅ `ctx.now()` / `ctx.random()` / signal-wait timeouts in the Python and Java SDKs; step cancel and parallel steps in Java (Session 27, PR #43, 0.3.0)
 - ⬜ Brand name + final module path before public release
 - ⬜ Managed-product (commercial) layer: dashboard, multi-tenancy, RBAC, audit
