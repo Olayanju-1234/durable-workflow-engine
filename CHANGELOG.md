@@ -7,6 +7,16 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-25
+
+Running the engine day to day: a dashboard that follows the engine live and can act on what it
+shows, a way to retry a failed workflow from the step that broke, metrics without Prometheus,
+history encrypted at rest, secrets rotated without a restart, an audit log of who did what, and
+distributed tracing from the request that started a workflow into its activities. The SDKs gain
+`traceparent` on starts, workflow contexts and activity tasks. Nothing changes for engines that
+do not turn the new options on: encryption raises the data directory to history format 7 only
+when it is used (see `docs/UPGRADING.md`).
+
 ### Added
 - **A live dashboard.** It follows the engine over a new server-sent event stream,
   `GET /api/events`, instead of re-polling every 2 seconds, and updates only the rows that
@@ -58,6 +68,14 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 - **Bulk actions**: `workflowd ctl cancel`, `terminate` and `reset` take several ids or every
   match of `--status` / `--type` / `--query`, asking first (`--yes`); the dashboard selects rows
   and confirms before acting. The dashboard's signal form checks a JSON payload before sending it.
+
+### Changed
+- `SIGHUP` reloads the engine's token, namespaces and key files instead of stopping it.
+- Operator actions are recorded in `<data-dir>/audit/audit.log` by default (`--audit-log off`
+  turns it off).
+- The dashboard loads its assets from absolute paths (`/app.js`), so it can be served under
+  `/workflows/<id>`; it no longer re-polls every 2 seconds.
+- New `workflowd_namespace_*` metric families; the existing families are unchanged.
 
 ## [0.4.0] - 2026-10-24
 
