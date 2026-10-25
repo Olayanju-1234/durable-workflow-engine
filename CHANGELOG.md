@@ -7,6 +7,17 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
 
 ## [Unreleased]
 
+### Added
+- **A live dashboard.** It follows the engine over a new server-sent event stream,
+  `GET /api/events`, instead of re-polling every 2 seconds, and updates only the rows that
+  changed, so selection and scroll stay put; without a stream it polls every 5 seconds. Every
+  workflow has a URL (`/workflows/<id>`, with `?namespace=`, `?run=`, `?tab=`), filters (status,
+  type, start time, search) live in the URL, and the detail view gains the *card chain*: every
+  recorded event, payloads pretty-printed, growing in place while the workflow runs, plus a runs
+  tab.
+- `GET /api/workflows` takes `started_after` / `started_before` and `sort` (`started`, `updated`,
+  `-` for newest first), and answers `counts` per status and the namespace's `types`.
+
 ## [0.4.0] - 2026-10-24
 
 Running several apps on one engine: namespaces with their own tokens, named task queues, an

@@ -51,10 +51,15 @@ JSON API it talks to (`internal/server/httpapi.go`). The assets are baked into
 the binary with `go:embed`, so there is still exactly one file to deploy.
 
 - Stat tiles (total / active / completed / failed) with per-status thread rails
-- Workflow list: status filter chips with live counts, client-side search over
-  id + type, auto-refresh every 2s
+- Workflow list ("the floor"): follows the engine live over `GET /api/events`
+  (server-sent events read with `fetch`, so a bearer token works) and updates only
+  the rows that changed; status chips with counts, type and start-time filters,
+  search, all in the URL; polls every 5 s when no stream is available
+- A URL per workflow: `/workflows/<id>` (`?namespace=`, `?run=`, `?tab=`). Asset
+  paths are absolute (`/app.js`) so they load under it
 - Detail drawer ("inspection bench"): ledger, input/output cards, steps as weft
-  picks with kind glyphs, attempt counts, per-step errors and outputs
+  picks with kind glyphs, attempt counts, per-step errors and outputs; the card
+  chain (every recorded event, payloads pretty-printed, growing in place); runs
 - Actions: start a workflow (mount a warp), send a signal (pass a shuttle),
   terminate (cut the warp)
 

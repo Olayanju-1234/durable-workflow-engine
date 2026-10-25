@@ -74,20 +74,22 @@ func (e *Engine) indexLocked(w *wfState) {
 		sum = summaryFrom(w.id, w.events, w.fold.State(), w.bytes)
 	}
 	e.idx.mu.Lock()
-	defer e.idx.mu.Unlock()
 	if e.idx.entries != nil {
 		e.idx.put(w.id, sum)
 		delete(e.idx.stale, w.id)
 	}
+	e.idx.mu.Unlock()
+	e.feed.publish(nsOf(w.id), Change{Key: w.id, Summary: sum})
 }
 
 func (e *Engine) indexDelete(id string) {
 	e.idx.mu.Lock()
-	defer e.idx.mu.Unlock()
 	if e.idx.entries != nil {
 		e.idx.remove(id)
 		delete(e.idx.stale, id)
 	}
+	e.idx.mu.Unlock()
+	e.feed.publish(nsOf(id), Change{Key: id, Deleted: true})
 }
 
 // startIndex makes the index live (empty) and reports whether it was not

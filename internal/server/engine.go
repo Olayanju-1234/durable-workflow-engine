@@ -96,6 +96,7 @@ type Engine struct {
 
 	idx   visibilityIndex
 	sched scheduler
+	feed  feed
 
 	closeOnce sync.Once
 	done      chan struct{} // closed by Close; ends long polls
