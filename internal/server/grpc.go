@@ -64,10 +64,20 @@ func (s *GRPCServer) StartWorkflow(ctx context.Context, req *StartWorkflowReques
 	if err != nil {
 		return nil, err
 	}
+	traceparent, tracestate := req.GetTraceparent(), req.GetTracestate()
+	if md, ok := metadata.FromIncomingContext(ctx); ok && traceparent == "" {
+		// OpenTelemetry's gRPC instrumentation carries the context in metadata.
+		if v := md.Get("traceparent"); len(v) > 0 {
+			traceparent = v[0]
+		}
+		if v := md.Get("tracestate"); len(v) > 0 {
+			tracestate = v[0]
+		}
+	}
 	started, err := e.Start(req.GetWorkflowType(), req.GetInput(), req.GetWorkflowId(),
 		WithExecutionTimeout(time.Duration(req.GetExecutionTimeoutMs())*time.Millisecond),
 		WithIDReusePolicy(req.GetIdReusePolicy()), WithIDConflictPolicy(req.GetIdConflictPolicy()),
-		WithTaskQueue(req.GetTaskQueue()))
+		WithTaskQueue(req.GetTaskQueue()), WithTraceParent(traceparent, tracestate))
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):

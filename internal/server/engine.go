@@ -15,6 +15,7 @@ import (
 	"github.com/olayanju-1234/durable-workflow-engine/internal/metrics"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/timer"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/tracing"
 )
 
 // Planner produces the next Decision for a workflow from its history. It is the
@@ -105,7 +106,8 @@ type Engine struct {
 	namespaces *NamespaceSet // immutable after NewEngine; nil: only default
 	guardrails Policy        // immutable after NewEngine: default quotas
 	quota      quotas
-	archive    archive.Store // immutable after NewEngine; nil: retention deletes outright
+	archive    archive.Store     // immutable after NewEngine; nil: retention deletes outright
+	tracer     *tracing.Exporter // immutable after NewEngine; nil: no spans exported
 
 	mu               sync.Mutex
 	planners         map[nsName]Planner       // workflow type -> planner
@@ -187,6 +189,9 @@ func NewEngine(store *history.HistoryStore, logger *slog.Logger, opts ...Option)
 		func() float64 { return float64(e.queue.depth()) },
 		func() float64 { return float64(e.workflowQueue.depth()) })
 	e.registerNamespaceGauges()
+	if e.tracer != nil {
+		e.registerTraceCounters()
+	}
 	go e.runPulse()
 	e.timers = timer.New(e.onTimerFired)
 	e.timers.Start()
@@ -254,6 +259,8 @@ type startOptions struct {
 	executionTimeout time.Duration
 	reuse            IdReusePolicy
 	conflict         IdConflictPolicy
+	traceparent      string
+	tracestate       string
 }
 
 // WithIDReusePolicy decides whether a workflow id whose run has finished may
@@ -358,7 +365,7 @@ func (e *Engine) Start(workflowType string, input []byte, workflowID string, opt
 		WorkflowStarted: &history.WorkflowStartedEvent{
 			WorkflowId: localWorkflowID, WorkflowType: workflowType, Input: input,
 			ExecutionTimeoutMs: so.executionTimeout.Milliseconds(), RunId: runID,
-			TaskQueue: recordedQueue(so.taskQueue),
+			TaskQueue: recordedQueue(so.taskQueue), Trace: e.runTrace(so.traceparent, so.tracestate),
 		},
 	}}
 	if len(existing) == 0 {
@@ -532,7 +539,7 @@ func (e *Engine) resumeRunLocked(w *wfState, c *recoveryCounts) error {
 			e.log.Info("recovery: re-armed timer", "workflow_id", id,
 				"step", step.Name, "sequence", step.Sequence, "fire_at", time.Unix(0, step.FireAt))
 		case step.Kind == state.KindActivity:
-			e.queue.enqueue(activityTask(id, step))
+			e.queue.enqueue(activityTask(id, step, st.Trace))
 			c.requeued++
 			e.log.Info("recovery: re-enqueued in-flight step", "workflow_id", id,
 				"step", step.Name, "sequence", step.Sequence)
@@ -665,7 +672,7 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 			return err
 		}
 		// The attempt is over; its lease is spent (a retry gets a fresh one).
-		e.dropLease(workflowID, sequence)
+		e.dropLease(workflowID, sequence, attemptEnd{status: tracing.StatusError, message: stepErr, errorType: failure.Type, outcome: "failed"})
 		e.metrics.stepResult(nsOf(workflowID), "failed", time.Since(claimedAt))
 		e.log.Warn("step failed", "workflow_id", workflowID, "step", stepName, "sequence", sequence,
 			"error", stepErr, "error_type", failure.Type, "non_retryable", failure.NonRetryable,
@@ -683,7 +690,7 @@ func (e *Engine) completeTask(workflowID, stepName string, sequence int64, lease
 	if err := e.appendLocked(w, completed, int64(len(events)+1)); err != nil {
 		return err
 	}
-	e.dropLease(workflowID, sequence)
+	e.dropLease(workflowID, sequence, attemptEnd{status: tracing.StatusOK, outcome: "completed"})
 	e.metrics.stepResult(nsOf(workflowID), "completed", time.Since(claimedAt))
 	e.log.Info("step completed", "workflow_id", workflowID, "step", stepName, "sequence", sequence)
 	return e.advanceIfRegisteredLocked(w, workflowType)
@@ -998,7 +1005,7 @@ func (e *Engine) applyDecisionsLocked(w *wfState, decisions []state.Decision) er
 			e.armStepDeadline(workflowID, w.runID(), step)
 			// Record-then-enqueue: the step is durable before any worker can see it,
 			// so a crash can never dispatch a task the history doesn't know about.
-			e.queue.enqueue(activityTask(workflowID, step))
+			e.queue.enqueue(activityTask(workflowID, step, w.fold.State().Trace))
 			e.log.Info("step scheduled", "workflow_id", workflowID, "step", decision.StepName, "sequence", decision.Sequence)
 
 		case state.DecideStartTimer:
@@ -1162,6 +1169,9 @@ func (e *Engine) appendLocked(w *wfState, ev *history.HistoryEvent, eventID int6
 			"events", len(w.events), "bytes", w.bytes, "max_events", e.limits.MaxHistoryEvents, "max_bytes", e.limits.MaxHistoryBytes)
 	}
 	if isTerminalEvent(ev) {
+		if w.loaded && w.fold.Err() == nil {
+			e.exportRunSpan(workflowID, w.events, w.fold.State())
+		}
 		// The event is already durable; a failed close only costs a descriptor.
 		if err := e.store.Release(workflowID); err != nil {
 			e.log.Warn("release history handle", "workflow_id", workflowID, "err", err)

@@ -69,6 +69,20 @@ message WorkflowStartedEvent {
   string reset_from_run_id = 8;
   int64 reset_event_id = 9;
   string reset_reason = 10;
+  // The run's place in a distributed trace (ADR-0024): set when the start
+  // carried a W3C traceparent, or the engine exports traces. Recorded so the
+  // run's span, and every task's parent, survive restarts. Older binaries
+  // ignore it.
+  TraceContext trace = 11;
+}
+
+// TraceContext is a span in a W3C Trace Context / OpenTelemetry trace.
+message TraceContext {
+  bytes trace_id = 1;       // 16 bytes
+  bytes span_id = 2;        // 8 bytes: this run's span
+  bytes parent_span_id = 3; // 8 bytes: the span that started it; empty for a root
+  bool sampled = 4;         // the traceparent's sampled flag
+  string trace_state = 5;   // the caller's tracestate, passed on unchanged
 }
 
 message StepScheduledEvent {
@@ -152,6 +166,8 @@ message ContinuedAsNew {
   int64 execution_timeout_ms = 4;
   // The next run's task queue (empty: the default queue).
   string task_queue = 5;
+  // The next run's span: the same trace, a child of this run's span.
+  TraceContext trace = 6;
 }
 
 message WorkflowFailedEvent {

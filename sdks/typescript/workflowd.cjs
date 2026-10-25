@@ -284,6 +284,9 @@ class Context {
     this._random = null;
     /** This run's id: a workflow that continues as new gets a new one. */
     this.runId = task.run_id ?? '';
+    /** The run's span as a W3C traceparent ('' when the run is not traced); the same on every replay. */
+    this.traceparent = task.traceparent ?? '';
+    this.tracestate = task.tracestate ?? '';
     this._suggestAt = task.suggest_continue_as_new_at ?? 0;
     this._observedEventId = 0; // the newest result the code has received
     this._continueAsNew = null;
@@ -803,7 +806,7 @@ class Connection {
   }
 
   /** One request, retried on another node while the cluster turns it away. */
-  async request(path, { method = 'GET', body, attempts = 12 } = {}) {
+  async request(path, { method = 'GET', body, attempts = 12, headers = {} } = {}) {
     let backoff = 50;
     for (let attempt = 1; ; attempt++) {
       const from = this.base;
@@ -815,6 +818,7 @@ class Connection {
             'Content-Type': 'application/json',
             ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
             ...(this.namespace ? { 'X-Workflowd-Namespace': this.namespace } : {}),
+            ...headers,
           },
           body: body === undefined ? undefined : JSON.stringify(body),
         });
@@ -940,6 +944,8 @@ class Worker {
    * may start a new run. opts.idConflictPolicy 'USE_EXISTING' returns the run
    * that holds a taken id (started: false) instead of failing with a 409.
    * opts.taskQueue runs it on another task queue than this worker's.
+   * opts.traceparent (and opts.tracestate), a W3C Trace Context, makes the run a
+   * child span of the caller's: an activity's task.traceparent passes it on.
    */
   async start(type, input = '', opts = {}) {
     // Chosen here so a retry after a lost reply cannot start a second execution.
@@ -952,8 +958,12 @@ class Worker {
     // Only a named queue is sent: an engine before 0.4.0 refuses the field.
     const queue = opts.taskQueue ?? this.taskQueue;
     if (queue && queue !== 'default') body.task_queue = queue;
+    // Sent as the standard headers, which an engine before 0.5.0 ignores.
+    const headers = {};
+    if (opts.traceparent) headers.traceparent = opts.traceparent;
+    if (opts.tracestate) headers.tracestate = opts.tracestate;
     try {
-      const res = await this.conn.request('/api/workflows', { method: 'POST', body });
+      const res = await this.conn.request('/api/workflows', { method: 'POST', body, headers });
       return { workflowId: id, runId: res?.run_id ?? '', started: res?.started !== false };
     } catch (err) {
       // Only an earlier attempt of this call can hold a fresh generated id.

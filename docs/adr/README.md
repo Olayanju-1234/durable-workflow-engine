@@ -29,6 +29,7 @@ that supersedes the old one.
 | [0021](0021-reset.md) | Resetting a finished run | Accepted |
 | [0022](0022-encryption-at-rest.md) | Encrypting history at rest | Accepted |
 | [0023](0023-reload-and-audit.md) | Reloading secrets and auditing operator actions | Accepted |
+| [0024](0024-tracing.md) | Distributed tracing with W3C Trace Context and OTLP | Accepted |
 
 ## Template
 

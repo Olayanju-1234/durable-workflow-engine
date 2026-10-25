@@ -123,7 +123,7 @@ func (e *Engine) onRetryDue(tm timer.Timer) {
 		return
 	}
 	step.Attempts++
-	e.queue.enqueue(activityTask(tm.WorkflowID, &step))
+	e.queue.enqueue(activityTask(tm.WorkflowID, &step, st.Trace))
 	e.log.Info("retry dispatched", "workflow_id", tm.WorkflowID, "step", step.Name,
 		"sequence", step.Sequence, "attempt", step.Attempts+1)
 }

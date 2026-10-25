@@ -187,6 +187,12 @@ public final class Workflowd {
         public String stepName() { return str(task.get("step_name")); }
         /** {@code <workflowId>/<sequence>}: the same for every attempt, an idempotency key. */
         public String activityId() { return str(task.get("activity_id")); }
+        /**
+         * This attempt's span as a W3C traceparent ("" when the workflow is not traced), a
+         * child of the run's span: set it on the requests the activity makes.
+         */
+        public String traceparent() { return str(task.get("traceparent")); }
+        public String tracestate() { return str(task.get("tracestate")); }
         /** Which attempt this is, from 1. */
         public int attempt() {
             Object a = task.get("attempt");
@@ -318,22 +324,34 @@ public final class Workflowd {
         final IdReusePolicy reuse;
         final IdConflictPolicy conflict;
         final String taskQueue;
+        final String traceparent;
+        final String tracestate;
 
-        public StartOptions() { this(null, null, null, null); }
+        public StartOptions() { this(null, null, null, null, null, null); }
 
-        private StartOptions(Duration executionTimeout, IdReusePolicy reuse, IdConflictPolicy conflict, String taskQueue) {
+        private StartOptions(Duration executionTimeout, IdReusePolicy reuse, IdConflictPolicy conflict, String taskQueue,
+                String traceparent, String tracestate) {
             this.executionTimeout = executionTimeout;
             this.reuse = reuse;
             this.conflict = conflict;
             this.taskQueue = taskQueue;
+            this.traceparent = traceparent;
+            this.tracestate = tracestate;
         }
 
         /** End the workflow as TIMED_OUT if it has not finished this long after it starts. */
-        public StartOptions withExecutionTimeout(Duration d) { return new StartOptions(d, reuse, conflict, taskQueue); }
-        public StartOptions withIdReusePolicy(IdReusePolicy p) { return new StartOptions(executionTimeout, p, conflict, taskQueue); }
-        public StartOptions withIdConflictPolicy(IdConflictPolicy p) { return new StartOptions(executionTimeout, reuse, p, taskQueue); }
+        public StartOptions withExecutionTimeout(Duration d) { return new StartOptions(d, reuse, conflict, taskQueue, traceparent, tracestate); }
+        public StartOptions withIdReusePolicy(IdReusePolicy p) { return new StartOptions(executionTimeout, p, conflict, taskQueue, traceparent, tracestate); }
+        public StartOptions withIdConflictPolicy(IdConflictPolicy p) { return new StartOptions(executionTimeout, reuse, p, taskQueue, traceparent, tracestate); }
         /** Run the workflow on this task queue instead of the worker's own. */
-        public StartOptions withTaskQueue(String q) { return new StartOptions(executionTimeout, reuse, conflict, q); }
+        public StartOptions withTaskQueue(String q) { return new StartOptions(executionTimeout, reuse, conflict, q, traceparent, tracestate); }
+        /**
+         * Make the run a child span of the caller's (a W3C traceparent, and tracestate or null):
+         * its activities then carry the trace ({@link ActivityContext#traceparent}).
+         */
+        public StartOptions withTraceParent(String traceparent, String tracestate) {
+            return new StartOptions(executionTimeout, reuse, conflict, taskQueue, traceparent, tracestate);
+        }
     }
 
     /** What {@link Worker#start} did: the run it began, or with USE_EXISTING the run that held the id. */
@@ -426,6 +444,10 @@ public final class Workflowd {
 
         /** This run's id: a workflow that continues as new gets a new one. */
         public String runId() { return str(task.get("run_id")); }
+
+        /** The run's span as a W3C traceparent ("" when the run is not traced): the same on every replay. */
+        public String traceparent() { return str(task.get("traceparent")); }
+        public String tracestate() { return str(task.get("tracestate")); }
 
         /**
          * True once the history has grown past the engine's warning share of its limits, as of
@@ -1101,6 +1123,11 @@ public final class Workflowd {
 
         private Object request(String method, String path, Map<String, Object> body, int attempts)
                 throws IOException, InterruptedException {
+            return request(method, path, body, attempts, Map.of());
+        }
+
+        private Object request(String method, String path, Map<String, Object> body, int attempts, Map<String, String> headers)
+                throws IOException, InterruptedException {
             long backoff = 50;
             for (int attempt = 1; ; attempt++) {
                 String from = base();
@@ -1114,6 +1141,7 @@ public final class Workflowd {
                 if (authToken != null && !authToken.isEmpty()) req.header("Authorization", "Bearer " + authToken);
                 String ns = namespace;
                 if (ns != null && !ns.isEmpty()) req.header("X-Workflowd-Namespace", ns);
+                headers.forEach(req::header);
                 HttpResponse<String> res;
                 try {
                     res = http.send(req.build(), HttpResponse.BodyHandlers.ofString());
@@ -1209,8 +1237,12 @@ public final class Workflowd {
             // Only a named queue is sent: an engine before 0.4.0 refuses the field.
             String queue = opts != null && opts.taskQueue != null ? opts.taskQueue : taskQueue;
             if (!queue.isEmpty() && !queue.equals("default")) body.put("task_queue", queue);
+            // Sent as the standard headers, which an engine before 0.5.0 ignores.
+            Map<String, String> trace = new LinkedHashMap<>();
+            if (opts != null && opts.traceparent != null && !opts.traceparent.isEmpty()) trace.put("traceparent", opts.traceparent);
+            if (opts != null && opts.tracestate != null && !opts.tracestate.isEmpty()) trace.put("tracestate", opts.tracestate);
             try {
-                Object res = request("POST", "/api/workflows", body);
+                Object res = request("POST", "/api/workflows", body, 12, trace);
                 Map<String, Object> m = res instanceof Map ? (Map<String, Object>) res : Map.of();
                 return new Started(id, str(m.get("run_id")), !Boolean.FALSE.equals(m.get("started")));
             } catch (HttpError e) {

@@ -112,6 +112,11 @@ type ActivityInfo struct {
 	ActivityID string
 	// Attempt counts from 1; more means the engine is retrying the step.
 	Attempt int
+	// TraceParent is this attempt's span as a W3C traceparent ("" when the
+	// workflow is not traced), a child of the workflow run's span: set it on
+	// the requests the activity makes and they join the workflow's trace.
+	TraceParent string
+	TraceState  string
 }
 
 // GetActivityInfo returns the step an activity's ctx belongs to.
@@ -423,6 +428,7 @@ func (w *Worker) execute(ctx context.Context, task *server.Task) {
 	actx = context.WithValue(actx, sdkctx.ActivityInfoKey{}, ActivityInfo{
 		WorkflowID: task.GetWorkflowId(), StepName: task.GetStepName(), Sequence: task.GetSequence(),
 		ActivityID: task.GetActivityId(), Attempt: int(task.GetAttempt()),
+		TraceParent: task.GetTraceparent(), TraceState: task.GetTracestate(),
 	})
 	stopBeats := w.heartbeat(actx, cancel, task, log)
 	output, actErr := runActivity(actx, fn, task.GetInput())

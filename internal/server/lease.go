@@ -8,6 +8,7 @@ import (
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/timer"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/tracing"
 )
 
 // A lease is a worker's time-boxed claim on a dispatched task. PollTask grants
@@ -31,6 +32,12 @@ type lease struct {
 	// stopBy is the attempt's start-to-close deadline (zero: none). Heartbeats
 	// do not move it: it bounds the work, not the worker's liveness.
 	stopBy time.Time
+	// The attempt\'s span (invalid: untraced), its parent (the run\'s span), and
+	// what it exports with.
+	span    tracing.Context
+	parent  tracing.SpanID
+	attempt int32
+	queue   string
 }
 
 // due is when the lease timer must next look at the lease.
@@ -76,6 +83,7 @@ func (e *Engine) claim(t *Task, workerID string) *lease {
 	if d := time.Duration(t.GetStartToCloseTimeoutMs()) * time.Millisecond; d > 0 {
 		le.stopBy = now.Add(d)
 	}
+	startAttemptSpan(t, le)
 	e.mu.Lock()
 	key := leaseKey{le.workflowID, le.sequence}
 	if old, ok := e.leases[key]; ok {
@@ -108,12 +116,13 @@ func (e *Engine) checkLeaseLocked(workflowID string, sequence int64, token strin
 }
 
 // dropLease forgets a step's lease once its attempt is over.
-func (e *Engine) dropLease(workflowID string, sequence int64) {
+func (e *Engine) dropLease(workflowID string, sequence int64, how attemptEnd) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if le, ok := e.leases[leaseKey{workflowID, sequence}]; ok {
 		delete(e.leaseTokens, le.token)
 		delete(e.leases, leaseKey{workflowID, sequence})
+		e.exportAttempt(le, how)
 	}
 }
 
@@ -127,6 +136,7 @@ func (e *Engine) dropLeases(workflowID, reason string) {
 			delete(e.leaseTokens, le.token)
 			delete(e.leases, key)
 			e.tombstoneLocked(le.token, reason)
+			e.exportAttempt(le, attemptEnd{outcome: "abandoned: " + reason})
 		}
 	}
 }
@@ -272,6 +282,13 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 	delete(e.leaseTokens, le.token)
 	delete(e.leases, key)
 	e.mu.Unlock()
+	if timedOut {
+		e.exportAttempt(&le, attemptEnd{status: tracing.StatusError, errorType: ErrorTypeStartToCloseTimeout,
+			message: "start-to-close timeout", outcome: "timed out"})
+	} else {
+		e.exportAttempt(&le, attemptEnd{status: tracing.StatusError, errorType: ErrorTypeLeaseExpired,
+			message: "lease expired: worker " + le.workerID + " went dark", outcome: "lease expired"})
+	}
 
 	// Belt and braces: only reclaim if history still shows this exact step in
 	// flight. Anything else means the workflow moved on without the lease map
@@ -302,7 +319,7 @@ func (e *Engine) onLeaseExpired(tm timer.Timer) {
 		// as scheduled with no lease and no queue entry. Re-enqueue it: a worker
 		// gets a fresh lease and the attempt proceeds as if nothing happened.
 		e.log.Error("lease expired: append failed; re-enqueueing task", "workflow_id", tm.WorkflowID, "err", err)
-		e.queue.enqueue(activityTask(le.workflowID, &attempt))
+		e.queue.enqueue(activityTask(le.workflowID, &attempt, st.Trace))
 		return
 	}
 	if timedOut {

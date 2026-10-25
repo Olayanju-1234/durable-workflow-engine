@@ -184,6 +184,9 @@ func (e *Engine) dispatchWorkflowTaskLocked(w *wfState, workflowType string, eve
 		HistorySizeBytes:       w.bytes,
 		TaskQueue:              state.QueueName(w.taskQueue()),
 	}
+	if w.fold != nil {
+		task.Traceparent, task.Tracestate = runTraceparent(w.fold.State().Trace)
+	}
 	e.pendingDecisions[workflowID] = &decisionTask{
 		token:         task.TaskToken,
 		historyLength: historyLength,
@@ -337,6 +340,7 @@ func (e *Engine) CompleteWorkflowTask(workflowID, taskToken string, cmds []*Work
 
 	e.dropDecision(workflowID)
 	dropWorkflow(e.workflowQueue, workflowID)
+	e.exportDecision(workflowID, st, pending, len(decisions))
 	if len(decisions) == 0 || (len(decisions) == 1 && decisions[0].Type == state.DecideNoop) {
 		return nil // SDK says the workflow is blocked; nothing to record
 	}

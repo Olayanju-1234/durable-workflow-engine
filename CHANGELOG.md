@@ -46,6 +46,15 @@ follow [SemVer](https://semver.org/): before 1.0, a minor version may change the
   schedule changes, backups and reloads, with when, who (a hash of the token, never the token),
   namespace, target, outcome, address and settings, never a payload. JSON lines at `--audit-log`
   (default `<data-dir>/audit/audit.log`, rotated), `GET /api/audit`, `workflowd ctl audit`.
+- **Tracing** (ADR-0024): a start's W3C `traceparent` (the HTTP header, the gRPC field or
+  metadata) makes the run a child span of the caller's, recorded with the run. Workflow tasks
+  carry the run's span (`ctx.traceparent`, Go `Info().TraceParent`), activity tasks a span per
+  attempt (`task.traceparent`, `info["traceparent"]`, `actx.traceparent()`,
+  `worker.ActivityInfo.TraceParent`), so activities can pass it on. SDK start options
+  `traceparent`/`tracestate` (Go `client.WithTraceParent`). Optional OTLP/HTTP export of run,
+  attempt and workflow-task spans with `--otlp-endpoint` (`--otlp-headers-file`,
+  `--trace-service-name`), encoded by hand with no OpenTelemetry dependency; export counters on
+  `/metrics`.
 - **Bulk actions**: `workflowd ctl cancel`, `terminate` and `reset` take several ids or every
   match of `--status` / `--type` / `--query`, asking first (`--yes`); the dashboard selects rows
   and confirms before acting. The dashboard's signal form checks a JSON payload before sending it.

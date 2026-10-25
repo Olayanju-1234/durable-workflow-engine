@@ -283,6 +283,13 @@ if it is rejected, the task was reassigned and your result must be discarded. Th
 carries `attempt` (from 1) and `activity_id` (`<workflow_id>/<sequence>`, the same on every
 attempt: an idempotency key for the activity's side effect).
 
+**Tracing (0.5.0).** A traced run's tasks carry W3C Trace Context: a workflow task has the
+run's span as `traceparent` (and `tracestate`), the same on every task so replay can expose
+it to the code; an activity task has a new span per attempt, a child of the run's, to pass on
+to the calls the activity makes. A start carries the caller's context as the standard
+`traceparent` and `tracestate` HTTP headers (older engines ignore them). All absent when the
+run is not traced.
+
 A failure is `{"error": "..."}`, optionally with `"error_type"` (the kind of failure;
 the SDKs send the exception's class name, which a retry policy can list in
 `non_retryable_error_types`) and `"non_retryable": true` (fail the step now, whatever

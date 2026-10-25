@@ -295,6 +295,20 @@ def py_fixable(seen):
     return seen
 
 
+# Tracing: a start's traceparent reaches the workflow (its run's span, the
+# same on every replay) and the activity (a span of its own, in the same trace).
+@worker.workflow("PyTraced")
+def py_traced(ctx):
+    first = ctx.side_effect("first-traceparent", lambda: ctx.traceparent)
+    seen = ctx.activity("py-traced")
+    return {"first": first, "now": ctx.traceparent, "state": ctx.tracestate, "seen": seen}
+
+
+@worker.activity("py-traced")
+def py_traced_activity(_payload, info):
+    return f"{info.get('traceparent', '')}|{info.get('tracestate', '')}"
+
+
 @worker.activity("py-shared")
 def py_shared_default(_payload):
     # The same name as the task-queue worker's: each queue's worker gets only its own.
@@ -468,6 +482,23 @@ if (
     or reset.get("reset_from_run_id") != reset_body["previous_run_id"]
 ):
     fail(f"reset: once ran {once_calls[0]}x, fixable saw {seen}, output {reset['output']}")
+
+caller_tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+traced = wait_done(worker.start("PyTraced", traceparent=caller_tp, tracestate="py=e2e")["workflow_id"])
+tout = json.loads(traced["output"])
+_, run_trace, run_span, _ = tout["now"].split("-")
+act_tp, act_state = tout["seen"].split("|")
+_, act_trace, act_span, _ = act_tp.split("-")
+if (
+    tout["first"] != tout["now"]
+    or run_trace != "0af7651916cd43dd8448eb211c80319c"
+    or run_span == "b7ad6b7169203331"
+    or act_trace != run_trace
+    or act_span in (run_span, "b7ad6b7169203331")
+    or tout["state"] != "py=e2e"
+    or act_state != "py=e2e"
+):
+    fail(f"tracing: {tout}")
 
 forever_id = worker.start_workflow("PyForever", execution_timeout=0.3)
 for _ in range(100):

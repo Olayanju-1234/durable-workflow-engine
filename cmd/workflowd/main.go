@@ -28,6 +28,7 @@ import (
 	"github.com/olayanju-1234/durable-workflow-engine/internal/replay"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/tracing"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
 	"github.com/olayanju-1234/durable-workflow-engine/web"
 	"github.com/olayanju-1234/durable-workflow-engine/workflow"
@@ -57,6 +58,9 @@ func main() {
 		keysFile    = flag.String("encryption-keys", "", "encrypt history at rest with the keys in this JSON file ({\"active\": id, \"keys\": [{\"id\", \"key\"}]}); new events are sealed with the active key, and every key listed opens events sealed with it. Keep it out of the data directory and its backups: a lost key loses its events (docs: Encryption)")
 		encryptAll  = flag.Bool("encrypt-all", false, "with --encryption-keys: rewrite every history in --data-dir sealed with the active key (so older keys can be retired), then exit; run with the engine stopped")
 		auditLog    = flag.String("audit-log", "", "where to record operator actions (starts, signals, cancels, terminations, resets, schedule changes, backups, reloads) as JSON lines; default <data-dir>/audit/audit.log, \"off\" records none")
+		otlpURL     = flag.String("otlp-endpoint", "", "export the engine's spans (runs, activity attempts, workflow tasks) to this OTLP/HTTP collector, e.g. http://localhost:4318/v1/traces (empty: no export; trace context is still carried)")
+		otlpHeaders = flag.String("otlp-headers-file", "", "headers for every OTLP request, one \"Name: value\" per line (an API key, say)")
+		traceName   = flag.String("trace-service-name", "workflowd", "the service.name of the spans --otlp-endpoint exports")
 		reloadEvery = flag.Duration("reload-interval", 10*time.Second, "how often to check the token, namespaces and key files for changes and apply them (0: only on SIGHUP)")
 		decryptAll  = flag.Bool("decrypt-all", false, "with --encryption-keys: rewrite every history in --data-dir as plaintext (so a binary before 0.5.0 can read it again), then exit; run with the engine stopped")
 		rescanFmt   = flag.Bool("rescan-format", false, "like --check-format, then record the format the histories need now (lowers it once newer histories are gone)")
@@ -143,6 +147,16 @@ func main() {
 			reload: reloadConfig{authTokenFile: secFlags.authTokenFile, metricsTokenFile: secFlags.metricsTokenFile,
 				namespacesFile: secFlags.namespacesFile, keysFile: *keysFile, interval: *reloadEvery},
 		}
+		if *otlpURL != "" {
+			x, err := newTraceExporter(*otlpURL, *otlpHeaders, *traceName, logger)
+			if err != nil {
+				logger.Error("invalid OTLP flags", "err", err)
+				os.Exit(2)
+			}
+			defer x.Close()
+			cfg.tracer = x
+			logger.Info("exporting traces", "endpoint", *otlpURL, "service", *traceName)
+		}
 		if *auditLog != "off" {
 			path := *auditLog
 			if path == "" {
@@ -200,6 +214,7 @@ type serveConfig struct {
 	addr, metricsAddr, httpAddr string
 	sec                         security
 	reload                      reloadConfig
+	tracer                      *tracing.Exporter // nil: no spans exported
 	demoWorker                  bool
 	retention                   time.Duration
 	archive                     archive.Store // nil: retention deletes outright
@@ -243,7 +258,7 @@ func runServe(logger *slog.Logger, store *history.HistoryStore, cfg serveConfig)
 		return fmt.Errorf("--retention must not be negative, got %s", cfg.retention)
 	}
 	engine := server.NewEngine(store, logger, server.WithLimits(cfg.limits), server.WithNamespaces(cfg.sec.namespaces),
-		server.WithGuardrails(cfg.sec.guardrails), server.WithArchive(cfg.archive))
+		server.WithGuardrails(cfg.sec.guardrails), server.WithArchive(cfg.archive), server.WithTracer(cfg.tracer))
 	defer engine.Close()
 	cfg.sec.guard = server.NewGuard(cfg.sec.namespaces, cfg.sec.guardrails, cfg.sec.trusted, engine.Metrics())
 	registerDemoTypes(engine)

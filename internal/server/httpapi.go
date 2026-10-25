@@ -770,7 +770,8 @@ func (a *HTTPAPI) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	started, err := e.Start(body.Type, input, body.WorkflowID,
 		WithExecutionTimeout(time.Duration(body.ExecutionTimeoutMs)*time.Millisecond),
-		WithIDReusePolicy(reuse), WithIDConflictPolicy(conflict), WithTaskQueue(body.TaskQueue))
+		WithIDReusePolicy(reuse), WithIDConflictPolicy(conflict), WithTaskQueue(body.TaskQueue),
+		WithTraceParent(r.Header.Get("traceparent"), r.Header.Get("tracestate")))
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrNotLeader):

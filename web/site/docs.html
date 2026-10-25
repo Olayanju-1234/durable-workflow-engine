@@ -78,6 +78,7 @@
     <a href="#api">gRPC API</a>
     <a href="#http-api">HTTP / JSON API</a>
     <a href="#metrics">Metrics</a>
+    <a href="#tracing">Tracing</a>
     <a href="#dashboard">Dashboard</a>
 
     <h4>Operating</h4>
@@ -1050,6 +1051,8 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated, timed out, cancelled) and earlier runs of a workflow that <a href="#continue-as-new">continued as new</a> this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
         <tr><td><code>--archive</code></td><td>empty</td><td>Before retention deletes a finished history, export it to a directory or <code>s3://bucket/prefix?endpoint=…</code> (<a href="#archiving">Archiving</a>). A history that cannot be exported is kept.</td></tr>
         <tr><td><code>--archive-credentials-file</code></td><td><code>$WORKFLOWD_ARCHIVE_*</code></td><td>S3 credentials: lines <code>access_key_id=</code> and <code>secret_access_key=</code>.</td></tr>
+        <tr><td><code>--otlp-endpoint</code></td><td>empty</td><td>Export the engine's spans to this OTLP/HTTP collector, e.g. <code>http://localhost:4318/v1/traces</code> (<a href="#tracing">Tracing</a>). Empty: none are exported; trace context is still carried.</td></tr>
+        <tr><td><code>--otlp-headers-file</code>, <code>--trace-service-name</code></td><td>empty, <code>workflowd</code></td><td>Headers for every OTLP request (<code>Name: value</code> lines), and the spans' <code>service.name</code>.</td></tr>
         <tr><td><code>--audit-log</code></td><td><code>&lt;data-dir&gt;/audit/audit.log</code></td><td>Where operator actions are recorded (<a href="#audit">Audit log</a>); <code>off</code> records none.</td></tr>
         <tr><td><code>--reload-interval</code></td><td><code>10s</code></td><td>How often the token, namespaces and key files are checked for changes (<a href="#reload">Reloading</a>); <code>0</code>: only on <code>SIGHUP</code>.</td></tr>
         <tr><td><code>--encryption-keys</code></td><td>empty</td><td>Encrypt history at rest with the keys in this file (<a href="#encryption">Encryption</a>). Unset: plaintext, as before.</td></tr>
@@ -1588,6 +1591,29 @@ sum(rate(workflowd_namespace_workflows_finished_total{namespace="liftoff",status
       families: each point is what happened in its interval (at most 60 points), <code>failed</code> counts failures and
       timeouts, <code>other</code> cancellations and terminations, and the failure rate is failed over completed plus
       failed. The dashboard's <em>pulse</em> panel draws it.</p>
+
+    <h2 id="tracing">Tracing</h2>
+    <p>workflowd carries <a href="https://www.w3.org/TR/trace-context/">W3C Trace Context</a> through a workflow, and can
+      send its own spans to an OpenTelemetry collector. Start a workflow with the caller's <code>traceparent</code> (the
+      standard header on <code>POST /api/workflows</code>, which OpenTelemetry's HTTP instrumentation adds by itself, or
+      the SDKs' start option) and the run becomes a child span of it:</p>
+    <pre data-lang="js"><code>await worker.start('OrderSaga', order, { traceparent: req.headers.traceparent });   // TypeScript
+worker.start("OrderSaga", order, traceparent=headers["traceparent"])                  # Python
+client.Start(ctx, "OrderSaga", in, client.WithTraceParent(tp, ts))                    // Go</code></pre>
+    <p>Workflow code sees the run's span as <code>ctx.traceparent</code> (Go: <code>ctx.Info().TraceParent</code>), the
+      same on every replay. Each activity attempt gets a span of its own in the same trace, a child of the run's:
+      <code>task.traceparent</code> (TypeScript), <code>info["traceparent"]</code> (Python),
+      <code>actx.traceparent()</code> (Java), <code>worker.GetActivityInfo(ctx)</code> (Go). Put it on the requests the
+      activity makes (as a <code>traceparent</code> header) and they join the trace. The context is recorded with the
+      run, so it survives restarts; continue-as-new and reset start a new span in the same trace.</p>
+    <p>With <code>--otlp-endpoint http://collector:4318/v1/traces</code> the engine exports spans over OTLP/HTTP
+      (protobuf): one per run (<code>workflow &lt;type&gt;</code>, start to end), one per activity attempt
+      (<code>activity &lt;step&gt;</code>, dispatch to result, with its outcome) and one per SDK workflow task. Runs
+      started without a traceparent then get a trace of their own. <code>--otlp-headers-file</code> adds headers (an API
+      key: one <code>Name: value</code> per line) and <code>--trace-service-name</code> sets <code>service.name</code>.
+      Exporting never slows the engine: spans go out in batches from a bounded queue, and a collector that is down only
+      costs spans (<code>workflowd_trace_spans_dropped_total</code>). There is no OpenTelemetry library in the binary: the
+      request is encoded by hand (ADR-0024).</p>
 
     <h2 id="dashboard">Dashboard</h2>
     <p>

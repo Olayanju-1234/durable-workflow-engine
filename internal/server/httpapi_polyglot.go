@@ -77,6 +77,10 @@ type workflowTaskDTO struct {
 	InputBase64            string       `json:"input_base64,omitempty"`
 	Steps                  []*stepDTO   `json:"steps"`
 	Signals                []*signalDTO `json:"signals"`
+	// The run's span as a W3C traceparent (and tracestate), absent when the
+	// run is not traced. The same on every task of the run.
+	Traceparent string `json:"traceparent,omitempty"`
+	Tracestate  string `json:"tracestate,omitempty"`
 }
 
 type signalDTO struct {
@@ -101,6 +105,10 @@ type activityTaskDTO struct {
 	Attempt    int32  `json:"attempt"`
 	ActivityID string `json:"activity_id"`
 	TaskQueue  string `json:"task_queue,omitempty"`
+	// This attempt's span as a W3C traceparent (and tracestate), a child of the
+	// run's; absent when the run is not traced.
+	Traceparent string `json:"traceparent,omitempty"`
+	Tracestate  string `json:"tracestate,omitempty"`
 }
 
 func (a *HTTPAPI) registerWorkflowTypes(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +189,8 @@ func (a *HTTPAPI) pollWorkflowTask(w http.ResponseWriter, r *http.Request) {
 		InputBase64:            base64Twin(st.Input),
 		Steps:                  make([]*stepDTO, 0, len(st.Steps)),
 		Signals:                make([]*signalDTO, 0, len(st.Signals)),
+		Traceparent:            task.GetTraceparent(),
+		Tracestate:             task.GetTracestate(),
 	}
 	for _, s := range st.Steps {
 		status := s.Status.String()
@@ -411,6 +421,8 @@ func (a *HTTPAPI) pollActivityTask(w http.ResponseWriter, r *http.Request) {
 		Attempt:               task.GetAttempt(),
 		ActivityID:            task.GetActivityId(),
 		TaskQueue:             task.GetTaskQueue(),
+		Traceparent:           task.GetTraceparent(),
+		Tracestate:            task.GetTracestate(),
 	})
 }
 

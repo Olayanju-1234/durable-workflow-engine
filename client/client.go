@@ -138,6 +138,15 @@ type startOptions struct {
 	executionTimeout time.Duration
 	reuse            server.IdReusePolicy
 	conflict         server.IdConflictPolicy
+	traceparent      string
+	tracestate       string
+}
+
+// WithTraceParent makes the workflow run a child span of the caller's (a W3C
+// traceparent, and tracestate if any): its activities then carry the trace,
+// and an engine with --otlp-endpoint exports the run's spans into it.
+func WithTraceParent(traceparent, tracestate string) StartOption {
+	return func(o *startOptions) { o.traceparent, o.tracestate = traceparent, tracestate }
 }
 
 // IDReusePolicy decides whether a workflow id whose run has finished may start
@@ -231,7 +240,7 @@ func (c *Client) Start(ctx context.Context, workflowType string, input []byte, o
 		WorkflowType: workflowType, Input: input, WorkflowId: so.id,
 		ExecutionTimeoutMs: so.executionTimeout.Milliseconds(),
 		IdReusePolicy:      so.reuse, IdConflictPolicy: so.conflict,
-		TaskQueue: so.taskQueue,
+		TaskQueue: so.taskQueue, Traceparent: so.traceparent, Tracestate: so.tracestate,
 	}
 	generated := req.WorkflowId == ""
 	if generated {

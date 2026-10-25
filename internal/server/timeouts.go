@@ -7,6 +7,7 @@ import (
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/state"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/timer"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/tracing"
 )
 
 // Timeouts. Every limit is recorded in history as a duration next to the
@@ -49,14 +50,17 @@ func scheduleToCloseDeadline(s *state.Step) (time.Time, bool) {
 	return time.Unix(0, s.ScheduledAt).Add(s.ScheduleToClose), true
 }
 
-// activityTask is the task a worker receives for an open activity step.
-func activityTask(workflowID string, s *state.Step) *Task {
+// activityTask is the task for an activity step's next attempt. Until it is
+// dispatched it carries the run's span; dispatch gives it its own.
+func activityTask(workflowID string, s *state.Step, trace *history.TraceContext) *Task {
+	traceparent, tracestate := runTraceparent(trace)
 	return &Task{
 		WorkflowId: workflowID, StepName: s.Name, Sequence: s.Sequence, Input: s.Input,
 		StartToCloseTimeoutMs: s.StartToClose.Milliseconds(),
 		Attempt:               int32(max(s.Attempts, 1)),
 		ActivityId:            fmt.Sprintf("%s/%d", localID(workflowID), s.Sequence),
 		TaskQueue:             state.QueueName(s.TaskQueue),
+		Traceparent:           traceparent, Tracestate: tracestate,
 	}
 }
 
@@ -154,7 +158,8 @@ func (e *Engine) timeOutStepLocked(w *wfState, step *state.Step) {
 			FireAt: time.Now().Add(callbackRetryDelay)})
 		return
 	}
-	e.dropLease(w.id, step.Sequence)
+	e.dropLease(w.id, step.Sequence, attemptEnd{status: tracing.StatusError, errorType: ErrorTypeScheduleToCloseTimeout,
+		message: "schedule-to-close timeout", outcome: "timed out"})
 	e.queue.dropWhere(func(t *Task) bool { return t.GetWorkflowId() == w.id && t.GetSequence() == step.Sequence })
 	e.metrics.activityTimeouts.With("schedule_to_close").Inc()
 	e.log.Warn("activity timed out", "workflow_id", w.id, "step", step.Name, "sequence", step.Sequence,

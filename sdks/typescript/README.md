@@ -94,3 +94,8 @@ Workflow code must be deterministic: no clocks, randomness or I/O except through
 How replay works, and the protocol, are in the
 [SDK guide](https://github.com/Olayanju-1234/durable-workflow-engine/tree/main/sdks#readme).
 Pre-alpha: the API may change. Apache-2.0.
+
+Tracing (engine 0.5.0+): `worker.start('Order', order, { traceparent: req.headers.traceparent })`
+makes the run a child span of the caller's (W3C Trace Context). The code reads the run's span as
+`ctx.traceparent`; an activity's `task.traceparent` is its attempt's span, to put on the requests
+it makes so they join the trace.
