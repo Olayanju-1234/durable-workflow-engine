@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
+	"github.com/olayanju-1234/durable-workflow-engine/internal/audit"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/history"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/version"
 )
@@ -43,6 +44,7 @@ import (
 //	GET  /api/namespaces
 //	GET  /api/events                         the namespace's changes, as server-sent events
 //	GET  /api/metrics[?window=15m]           the namespace's throughput, failures, step latency, queue depth
+//	GET  /api/audit[?action=&target=&limit=] operator actions, newest first (a token is required)
 //	GET  /api/admin/backup                   a tar.gz of every history (engine token only)
 //
 // Every route but health works in one namespace: the one the caller's token
@@ -66,6 +68,10 @@ type HTTPAPI struct {
 	startedAt     time.Time
 	// maxBody is the largest request body accepted (Limits.RequestBytes).
 	maxBody int
+	// audit records operator actions (nil: not recorded).
+	audit *audit.Log
+	// sharedAuthz, when set, is the Authorizer the gRPC server uses too.
+	sharedAuthz *Authorizer
 }
 
 func NewHTTPAPI(engine *Engine, logger *slog.Logger, opts ...HTTPOption) *HTTPAPI {
@@ -77,7 +83,10 @@ func NewHTTPAPI(engine *Engine, logger *slog.Logger, opts ...HTTPOption) *HTTPAP
 	for _, opt := range opts {
 		opt(a)
 	}
-	a.authz = NewAuthorizer(a.authToken, a.publicReads, a.namespaces)
+	a.authz = a.sharedAuthz
+	if a.authz == nil {
+		a.authz = NewAuthorizer(a.authToken, a.publicReads, a.namespaces)
+	}
 	return a
 }
 
@@ -187,6 +196,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/namespaces", a.listNamespaces)
 	mux.HandleFunc("GET /api/events", a.events)
 	mux.HandleFunc("GET /api/metrics", a.metricsSummary)
+	mux.HandleFunc("GET /api/audit", a.listAudit)
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
 	a.registerScheduleRoutes(mux)
@@ -218,7 +228,7 @@ func grantOf(r *http.Request) Grant {
 	if g, ok := r.Context().Value(grantKey{}).(Grant); ok {
 		return g
 	}
-	return Grant{Namespace: DefaultNamespace, Anonymous: true}
+	return Grant{Namespace: DefaultNamespace, Anonymous: true, Actor: "anonymous"}
 }
 
 // authorize resolves every API request's namespace and token into a Grant
@@ -248,11 +258,12 @@ func (a *HTTPAPI) authorize(next http.Handler) http.Handler {
 			writeAuthError(w, err)
 			return
 		}
-		if err := a.guard.admit(g, httpOp(r), a.guard.clientIP(r.RemoteAddr, r.Header.Values("X-Forwarded-For"))); err != nil {
+		remote := a.guard.clientIP(r.RemoteAddr, r.Header.Values("X-Forwarded-For"))
+		if err := a.guard.admit(g, httpOp(r), remote); err != nil {
 			writeAuthError(w, err)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), grantKey{}, g)))
+		a.audited(g, remote, w, r.WithContext(context.WithValue(r.Context(), grantKey{}, g)), next)
 	})
 }
 

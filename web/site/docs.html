@@ -70,6 +70,7 @@
     <a href="#cli">CLI flags</a>
     <a href="#ctl">workflowd ctl</a>
     <a href="#security">Auth &amp; TLS</a>
+    <a href="#audit">Audit log</a>
     <a href="#namespaces">Namespaces</a>
     <a href="#guardrails">Guardrails</a>
     <a href="#archiving">Archiving</a>
@@ -1049,6 +1050,8 @@ POST /api/activity-tasks/complete   {"workflow_id":...,"step_name":...,"sequence
         <tr><td><code>--retention</code></td><td><code>0</code></td><td>Delete finished workflows (completed, failed, terminated, timed out, cancelled) and earlier runs of a workflow that <a href="#continue-as-new">continued as new</a> this long after their last event, e.g. <code>168h</code>. Checked at startup and then periodically. Running and waiting workflows are never deleted. <code>0</code> keeps every history forever.</td></tr>
         <tr><td><code>--archive</code></td><td>empty</td><td>Before retention deletes a finished history, export it to a directory or <code>s3://bucket/prefix?endpoint=…</code> (<a href="#archiving">Archiving</a>). A history that cannot be exported is kept.</td></tr>
         <tr><td><code>--archive-credentials-file</code></td><td><code>$WORKFLOWD_ARCHIVE_*</code></td><td>S3 credentials: lines <code>access_key_id=</code> and <code>secret_access_key=</code>.</td></tr>
+        <tr><td><code>--audit-log</code></td><td><code>&lt;data-dir&gt;/audit/audit.log</code></td><td>Where operator actions are recorded (<a href="#audit">Audit log</a>); <code>off</code> records none.</td></tr>
+        <tr><td><code>--reload-interval</code></td><td><code>10s</code></td><td>How often the token, namespaces and key files are checked for changes (<a href="#reload">Reloading</a>); <code>0</code>: only on <code>SIGHUP</code>.</td></tr>
         <tr><td><code>--encryption-keys</code></td><td>empty</td><td>Encrypt history at rest with the keys in this file (<a href="#encryption">Encryption</a>). Unset: plaintext, as before.</td></tr>
         <tr><td><code>--encrypt-all</code>, <code>--decrypt-all</code></td><td></td><td>With <code>--encryption-keys</code> and the engine stopped: rewrite every history sealed with the active key, or in plaintext, then exit.</td></tr>
         <tr><td><code>--max-history-events</code>, <code>--max-history-bytes</code>, <code>--max-payload-bytes</code></td><td>51200, 50 MiB, 2 MiB</td><td>The <a href="#limits">limits</a> on a run's history and on each payload. <code>0</code> turns one off.</td></tr>
@@ -1110,8 +1113,8 @@ workflowd --serve --data-dir /var/lib/workflowd --encryption-keys /etc/workflowd
       written in plaintext before stay readable. Each sealed event names its key and is bound to its position, so a
       changed or moved event fails to open instead of being misread. The first sealed event raises the data directory to
       <a href="#upgrading">history format 7</a>, which binaries before 0.5.0 refuse.</p>
-    <p><strong>Rotating a key:</strong> add a new key to the file and make it <code>active</code>, then restart or send
-      <code>SIGHUP</code>. New events use the new key; old ones keep theirs. To retire the old key, rewrite everything under
+    <p><strong>Rotating a key:</strong> add a new key to the file and make it <code>active</code>; the engine
+      <a href="#reload">picks it up</a> without a restart. New events use the new key; old ones keep theirs. To retire the old key, rewrite everything under
       the new one (engine stopped), and let <code>--check-format</code> confirm nothing uses the old key:</p>
     <pre data-lang="sh"><code>workflowd --encrypt-all --data-dir /var/lib/workflowd --encryption-keys /etc/workflowd/keys.json
 workflowd --check-format --data-dir /var/lib/workflowd --encryption-keys /etc/workflowd/keys.json
@@ -1153,6 +1156,7 @@ workflowd ctl cancel order-43 --graceful --reason "customer left"
 workflowd ctl terminate order-43 --reason stuck
 workflowd ctl terminate --status waiting --type OrderSaga --yes   # bulk: every match
 workflowd ctl reset order-42                 # a finished run, again from the step that failed
+workflowd ctl audit --target order-42         # who did what to it, and when
 workflowd ctl schedule create nightly --cron "0 3 * * *" --timezone Europe/London --type Report
 workflowd ctl schedule list
 workflowd ctl health
@@ -1205,6 +1209,37 @@ new Worker({ address: 'https://workflowd.internal:8233', token: process.env.WORK
     <p>What this does not give you yet: tokens are per namespace (below), not per user, so there are no roles; client
       certificates are only checked on the Raft port; and any certificate the cluster CA signed can speak for any member,
       so give the Raft CA to cluster nodes only.</p>
+
+    <h3 id="reload">Rotating tokens and keys without a restart</h3>
+    <p>The engine re-reads <code>--auth-token-file</code>, <code>--metrics-auth-token-file</code>, <code>--namespaces</code>
+      and <code>--encryption-keys</code> on <code>SIGHUP</code> (<code>systemctl reload</code> with
+      <code>ExecReload=/bin/kill -HUP $MAINPID</code>), and by itself when one of them changes (checked every
+      <code>--reload-interval</code>, 10 seconds by default; <code>0</code> leaves only the signal). Workers stay connected.
+      A reload is all or nothing: if any file does not parse, nothing changes and the log says why. The old token stops
+      working on the next call. Write files whole (a temp file renamed over the old one) so a check never reads half of
+      one. Tokens given as flags or environment variables are fixed until a restart.</p>
+    <pre data-lang="sh"><code># rotate a namespace's token with no gap: add the new hash beside the old one...
+NEW=$(openssl rand -hex 32); printf %s "$NEW" | sha256sum
+#   "token_sha256": ["&lt;old hash&gt;", "&lt;new hash&gt;"]  -> saved; the engine picks it up
+# ...switch the app to $NEW, then remove the old hash: picked up again.</code></pre>
+
+    <h3 id="audit">The audit log</h3>
+    <p>Every operator action is recorded: starting, signalling, cancelling (and requesting a cancel), terminating and
+      resetting workflows; creating, deleting, pausing, resuming and backfilling schedules; backups; and reloads, with what
+      they changed. An entry says when, who (<code>engine:&lt;hash&gt;</code> for the engine token,
+      <code>token:&lt;hash&gt;</code> for a namespace token, <code>anonymous</code>; the hash is the first 16 hex digits of
+      the token's SHA-256, never the token), the namespace, the action and its target, the outcome, the caller's address,
+      and settings such as a reason or a signal's name. Never an input or a payload. Failed attempts are recorded too.</p>
+    <pre data-lang="sh"><code>workflowd ctl audit --action workflow.terminate
+# WHEN     ACTOR                    NAMESPACE  ACTION              TARGET    OUTCOME  DETAILS
+# 3m ago   engine:9f86d081884c7d65  liftoff    workflow.terminate  hook-42   ok       reason=stuck
+
+tr -d '\n' &lt; /etc/workflowd/admin.token | sha256sum | cut -c1-16   # which token is engine:9f86…?
+curl -H "Authorization: Bearer $TOKEN" 'localhost:8233/api/audit?action=workflow.&amp;limit=20'</code></pre>
+    <p>It is JSON lines at <code>--audit-log</code> (default <code>&lt;data-dir&gt;/audit/audit.log</code>; <code>off</code>
+      disables it), each entry fsync'd before the answer, rotated at 16 MiB with four earlier files kept.
+      <code>GET /api/audit</code> needs a token: the engine token sees every namespace and the reloads, a namespace token
+      its own namespace. In a cluster each node records the calls it served.</p>
 
     <h2 id="namespaces">Namespaces</h2>
     <p>A namespace is a tenant inside one engine: its own workflows, schedules, workflow types, workers and retention,
@@ -1456,6 +1491,13 @@ POST /api/schedules/preview  {a schedule, "count":5}            (a spec not yet 
     <p>A live run returns <code>409</code>, an event id outside 2..(the run's last event) <code>400</code>. Describing a
       finished run shows where a reset would start over: <code>"reset_point": {"event_id":6,"step_name":"charge","sequence":3}</code>;
       a reset run carries <code>reset_from_run_id</code>. See <a href="#reset">Reset</a>.</p>
+
+    <h3>Audit log</h3>
+    <pre data-lang="sh"><code>GET /api/audit[?action=workflow.&amp;target=order-42&amp;limit=100]
+→ {"enabled":true,"entries":[{"time":"…","actor":"token:28daa606f54b3682","namespace":"liftoff",
+   "action":"workflow.terminate","target":"order-42","outcome":"ok","status":200,"remote":"10.0.0.7",
+   "via":"http","details":{"reason":"stuck"}},…]}</code></pre>
+    <p>Newest first; a token is required (<a href="#audit">Audit log</a>).</p>
 
     <h3>Namespaces</h3>
     <pre data-lang="sh"><code>curl -H "Authorization: Bearer $TOKEN" localhost:8233/api/namespaces

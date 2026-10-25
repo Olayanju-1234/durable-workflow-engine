@@ -10,11 +10,13 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	"github.com/olayanju-1234/durable-workflow-engine/internal/archive"
+	"github.com/olayanju-1234/durable-workflow-engine/internal/audit"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/server"
 	"github.com/olayanju-1234/durable-workflow-engine/internal/tlsconfig"
 )
@@ -63,13 +65,18 @@ func registerSecurityFlags(fs *flag.FlagSet) *securityFlags {
 // security is the resolved form of securityFlags.
 type security struct {
 	authToken, metricsToken string
-	publicReads             bool
-	namespaces              *server.NamespaceSet // nil: only default
-	guardrails              server.Policy        // defaults for every namespace
-	trusted                 []netip.Prefix
-	guard                   *server.Guard // built with the engine's metrics; nil admits all
-	tls                     *tls.Config   // client-facing listeners; nil = plaintext
-	peerTLS                 *tls.Config   // Raft peers; nil = plaintext
+	// authz is the one Authorizer both transports use, and metrics the token
+	// /metrics wants: the reloader replaces what they hold.
+	authz       *server.Authorizer
+	metrics     *atomic.Pointer[string]
+	audit       *audit.Log // operator actions (nil: not recorded)
+	publicReads bool
+	namespaces  *server.NamespaceSet // nil: only default
+	guardrails  server.Policy        // defaults for every namespace
+	trusted     []netip.Prefix
+	guard       *server.Guard // built with the engine's metrics; nil admits all
+	tls         *tls.Config   // client-facing listeners; nil = plaintext
+	peerTLS     *tls.Config   // Raft peers; nil = plaintext
 }
 
 func (f *securityFlags) resolve(logger *slog.Logger) (security, error) {
@@ -100,6 +107,9 @@ func (f *securityFlags) resolve(logger *slog.Logger) (security, error) {
 	if s.trusted, err = server.ParseTrustedProxies(f.trustedProxies); err != nil {
 		return s, err
 	}
+	s.authz = server.NewAuthorizer(s.authToken, s.publicReads, s.namespaces)
+	s.metrics = &atomic.Pointer[string]{}
+	s.metrics.Store(&s.metricsToken)
 
 	if f.tlsCert != "" || f.tlsKey != "" {
 		if s.tls, err = tlsconfig.Server(f.tlsCert, f.tlsKey); err != nil {
@@ -150,6 +160,9 @@ func readSecretFile(fileFlag, path string, logger *slog.Logger) (string, error) 
 
 // authorizer decides every call's namespace and token, on both transports.
 func (s security) authorizer() *server.Authorizer {
+	if s.authz != nil {
+		return s.authz
+	}
 	return server.NewAuthorizer(s.authToken, s.publicReads, s.namespaces)
 }
 
@@ -189,6 +202,9 @@ func archiveCredentials(file string, getenv func(string) string) (archive.Creden
 // grpcServerOptions are the TLS and auth options for the client-facing gRPC server.
 func (s security) grpcServerOptions() []grpc.ServerOption {
 	opts := server.GRPCAuthorize(s.authorizer(), s.guard)
+	opts = append(opts, server.GRPCAudit(s.audit, func(err error) {
+		fmt.Fprintln(os.Stderr, "workflowd: audit log write failed:", err)
+	})...)
 	if s.tls != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(s.tls)))
 	}
@@ -197,16 +213,21 @@ func (s security) grpcServerOptions() []grpc.ServerOption {
 
 // httpOptions are the auth options for the JSON API.
 func (s security) httpOptions() []server.HTTPOption {
-	opts := []server.HTTPOption{server.WithAuthToken(s.authToken), server.WithNamespaceSet(s.namespaces), server.WithGuard(s.guard)}
+	opts := []server.HTTPOption{server.WithAuthToken(s.authToken), server.WithNamespaceSet(s.namespaces), server.WithGuard(s.guard),
+		server.WithAuthorizer(s.authorizer()), server.WithAudit(s.audit)}
 	if s.publicReads {
 		opts = append(opts, server.WithPublicReads())
 	}
 	return opts
 }
 
-// metricsHandler guards /metrics with its own token, if one is set.
+// metricsHandler guards /metrics with its own token, if one is set; a reload
+// can change it.
 func (s security) metricsHandler(h http.Handler) http.Handler {
-	return server.BearerAuth(s.metricsToken, h)
+	if s.metrics == nil {
+		return server.BearerAuth(s.metricsToken, h)
+	}
+	return server.BearerAuthFunc(func() string { return *s.metrics.Load() }, h)
 }
 
 // logPosture says once at startup what is and isn't protected.

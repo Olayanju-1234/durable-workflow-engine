@@ -45,6 +45,19 @@ func BearerAuth(token string, next http.Handler) http.Handler {
 	})
 }
 
+// BearerAuthFunc is BearerAuth with a token that can change (a reload): it
+// reads token() on every request, and "" lets requests through.
+func BearerAuthFunc(token func() string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if t := token(); t != "" && !validBearer(r.Header.Get("Authorization"), t) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="workflowd"`)
+			http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // isPublicRead reports whether r only reads workflows (list, describe, the
 // live stream of list rows, or the metrics panel's summary of them).
 func isPublicRead(r *http.Request) bool {
@@ -135,7 +148,7 @@ func grantFrom(ctx context.Context) Grant {
 	if g, ok := ctx.Value(grantKey{}).(Grant); ok {
 		return g
 	}
-	return Grant{Namespace: DefaultNamespace, Anonymous: true}
+	return Grant{Namespace: DefaultNamespace, Anonymous: true, Actor: "anonymous"}
 }
 
 var errMissingToken = errors.New("missing or invalid bearer token")

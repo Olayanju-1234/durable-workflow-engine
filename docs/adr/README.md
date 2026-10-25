@@ -28,6 +28,7 @@ that supersedes the old one.
 | [0020](0020-schedule-controls.md) | Schedule controls | Accepted |
 | [0021](0021-reset.md) | Resetting a finished run | Accepted |
 | [0022](0022-encryption-at-rest.md) | Encrypting history at rest | Accepted |
+| [0023](0023-reload-and-audit.md) | Reloading secrets and auditing operator actions | Accepted |
 
 ## Template
 
