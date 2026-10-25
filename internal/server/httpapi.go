@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,7 +31,7 @@ import (
 // Routes (all under the mux returned by Handler):
 //
 //	GET  /api/health
-//	GET  /api/workflows[?status=RUNNING&q=&limit=&offset=]
+//	GET  /api/workflows[?status=RUNNING&type=&q=&started_after=&started_before=&sort=-started&limit=&offset=]
 //	POST /api/workflows                      {"type","input","workflow_id","execution_timeout_ms","id_reuse_policy","id_conflict_policy"}
 //	GET  /api/workflows/{id}[?run_id=]
 //	GET  /api/workflows/{id}/runs
@@ -38,6 +40,7 @@ import (
 //	POST /api/workflows/{id}/signal          {"name","payload"}
 //	GET  /api/workflows/{id}/history[?run_id=]   the run's events, as protobuf JSON
 //	GET  /api/namespaces
+//	GET  /api/events                         the namespace's changes, as server-sent events
 //	GET  /api/admin/backup                   a tar.gz of every history (engine token only)
 //
 // Every route but health works in one namespace: the one the caller's token
@@ -179,6 +182,7 @@ func (a *HTTPAPI) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", a.cancelWorkflow)
 	mux.HandleFunc("POST /api/workflows/{id}/signal", a.signalWorkflow)
 	mux.HandleFunc("GET /api/namespaces", a.listNamespaces)
+	mux.HandleFunc("GET /api/events", a.events)
 	// Polyglot SDK transport (see httpapi_polyglot.go).
 	a.registerPolyglotRoutes(mux)
 	a.registerScheduleRoutes(mux)
@@ -288,6 +292,9 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap lets http.ResponseController reach the connection's Flush (events).
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // logRequests emits one structured line per request: Info for mutations,
 // Debug for reads, so a quiet GET-heavy dashboard doesn't flood the log.
 func (a *HTTPAPI) logRequests(next http.Handler) http.Handler {
@@ -390,11 +397,14 @@ func (a *HTTPAPI) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// listWorkflows supports status filtering (engine-side), a case-insensitive
-// substring query over workflow id and type, and offset/limit pagination.
-// The response carries "total" so clients can render page counts.
+// listWorkflows supports filtering by status, type, start time and a
+// case-insensitive substring of the id or type, sorting, and offset/limit
+// pagination. The response carries "total" (after every filter), "counts"
+// (per status, after every filter but status) and the namespace's "types", so
+// a UI can draw its filters without fetching every workflow.
 func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
-	filter, err := parseStatusFilter(r.URL.Query().Get("status"))
+	query := r.URL.Query()
+	filter, err := parseStatusFilter(query.Get("status"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -404,41 +414,71 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		maxLimit     = 1000
 	)
 	limit := defaultLimit
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := query.Get("limit"); v != "" {
 		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > maxLimit {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("limit must be an integer in [1,%d]", maxLimit))
 			return
 		}
 	}
 	offset := 0
-	if v := r.URL.Query().Get("offset"); v != "" {
+	if v := query.Get("offset"); v != "" {
 		if offset, err = strconv.Atoi(v); err != nil || offset < 0 {
 			writeError(w, http.StatusBadRequest, errors.New("offset must be a non-negative integer"))
 			return
 		}
 	}
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	wantType := r.URL.Query().Get("type")
+	after, err := parseTimeParam(query, "started_after")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	before, err := parseTimeParam(query, "started_before")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	less, err := summaryOrder(query.Get("sort"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	wantType := query.Get("type")
 
 	e := a.scope(w, r)
 	if e == nil {
 		return
 	}
-	summaries, err := e.ListWorkflows(filter)
+	summaries, err := e.ListWorkflows(WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	matched := make([]*summaryDTO, 0, len(summaries))
+	matched := make([]*WorkflowSummary, 0, len(summaries))
+	counts := map[string]int{}
+	types := map[string]bool{}
 	for _, s := range summaries {
+		if t := s.GetWorkflowType(); t != "" {
+			types[t] = true
+		}
 		if q != "" && !strings.Contains(strings.ToLower(s.GetWorkflowId()+" "+s.GetWorkflowType()), q) {
 			continue
 		}
 		if wantType != "" && s.GetWorkflowType() != wantType {
 			continue
 		}
-		matched = append(matched, toSummaryDTO(s))
+		if (after != 0 && s.GetStartedAt() < after) || (before != 0 && s.GetStartedAt() >= before) {
+			continue
+		}
+		counts[statusName(s.GetStatus())]++
+		if filter != WorkflowStatus_WORKFLOW_STATUS_UNSPECIFIED && s.GetStatus() != filter {
+			continue
+		}
+		matched = append(matched, s)
+	}
+	if less != nil {
+		sort.SliceStable(matched, func(i, j int) bool { return less(matched[i], matched[j]) })
 	}
 	total := len(matched)
 	if offset > total {
@@ -448,12 +488,56 @@ func (a *HTTPAPI) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	if len(page) > limit {
 		page = page[:limit]
 	}
+	rows := make([]*summaryDTO, 0, len(page))
+	for _, s := range page {
+		rows = append(rows, toSummaryDTO(s))
+	}
+	typeList := make([]string, 0, len(types))
+	for t := range types {
+		typeList = append(typeList, t)
+	}
+	sort.Strings(typeList)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"workflows": page,
+		"workflows": rows,
 		"total":     total,
 		"offset":    offset,
 		"limit":     limit,
+		"counts":    counts,
+		"types":     typeList,
 	})
+}
+
+// parseTimeParam reads an RFC 3339 time from the query as unix nanoseconds
+// (0 when absent).
+func parseTimeParam(query url.Values, name string) (int64, error) {
+	v := query.Get(name)
+	if v == "" {
+		return 0, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %s must be an RFC 3339 time, e.g. 2026-10-25T09:00:00Z", ErrInvalidArgument, name)
+	}
+	return t.UnixNano(), nil
+}
+
+// summaryOrder is the list order a ?sort= names: id (the default, nil since
+// the index already sorts by id), started or updated, newest first with "-".
+func summaryOrder(v string) (func(a, b *WorkflowSummary) bool, error) {
+	key := func(s *WorkflowSummary) int64 { return s.GetStartedAt() }
+	switch strings.TrimPrefix(v, "-") {
+	case "", "id":
+		return nil, nil
+	case "started":
+	case "updated":
+		key = func(s *WorkflowSummary) int64 { return s.GetUpdatedAt() }
+	default:
+		return nil, fmt.Errorf("%w: sort must be id, started, -started, updated or -updated", ErrInvalidArgument)
+	}
+	if strings.HasPrefix(v, "-") {
+		return func(a, b *WorkflowSummary) bool { return key(a) > key(b) }, nil
+	}
+	return func(a, b *WorkflowSummary) bool { return key(a) < key(b) }, nil
 }
 
 func (a *HTTPAPI) getWorkflow(w http.ResponseWriter, r *http.Request) {

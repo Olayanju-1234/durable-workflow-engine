@@ -6,7 +6,7 @@
 <title>workflowd — the weaving room</title>
 <meta name="description" content="Operational dashboard for workflowd, the durable workflow engine. Every workflow is a weave; every history, a card chain.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='7' fill='%23F3ECDF'/%3E%3Crect x='4' y='4' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='13' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='22' width='24' height='6' rx='2' fill='%233F5089'/%3E%3Crect x='4' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='13' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='22' y='4' width='6' height='24' rx='2' fill='%232C2318'/%3E%3Crect x='4' y='4' width='6' height='6' fill='%233F5089'/%3E%3Crect x='22' y='4' width='6' height='6' fill='%233F5089'/%3E%3Crect x='13' y='13' width='6' height='6' fill='%233F5089'/%3E%3Crect x='4' y='22' width='6' height='6' fill='%233F5089'/%3E%3Crect x='22' y='22' width='6' height='6' fill='%233F5089'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 
@@ -52,9 +52,9 @@
       <input id="q" type="search" placeholder="Filter by id or type" aria-label="Filter workflows by id or type" autocomplete="off" spellcheck="false">
     </label>
 
-    <label class="toggle" title="Refresh automatically every 2s">
-      <input type="checkbox" id="autorefresh" checked>
-      <span>auto</span>
+    <label class="toggle" title="Follow the engine live: rows update as workflows move">
+      <input type="checkbox" id="live" checked>
+      <span>live</span>
     </label>
 
     <button id="refresh" class="btn btn-icon" title="Refresh now" aria-label="Refresh now">↻</button>
@@ -98,7 +98,24 @@
         <button class="chip" data-status="FAILED"><span>Failed</span><span class="chip-count" data-count=""></span></button>
         <button class="chip" data-status="TERMINATED"><span>Terminated</span><span class="chip-count" data-count=""></span></button>
         <button class="chip" data-status="CANCELLED"><span>Cancelled</span><span class="chip-count" data-count=""></span></button>
+        <button class="chip" data-status="TIMED_OUT"><span>Timed out</span><span class="chip-count" data-count=""></span></button>
       </div>
+    </div>
+    <div class="subfilters" role="group" aria-label="More filters">
+      <label class="pick-filter"><span>type</span>
+        <select id="f-type" aria-label="Filter by workflow type"><option value="">every type</option></select>
+      </label>
+      <label class="pick-filter"><span>mounted</span>
+        <select id="f-since" aria-label="Filter by start time">
+          <option value="">any time</option>
+          <option value="15m">in the last 15 minutes</option>
+          <option value="1h">in the last hour</option>
+          <option value="24h">in the last 24 hours</option>
+          <option value="7d">in the last 7 days</option>
+        </select>
+      </label>
+      <button class="linkish" id="f-clear" type="button" hidden>clear filters</button>
+      <span class="floor-note muted" id="floor-note"></span>
     </div>
 
     <div class="table-scroll">
@@ -117,6 +134,9 @@
           <tr class="empty"><td colspan="6">Reading the card chain…</td></tr>
         </tbody>
       </table>
+    </div>
+    <div class="floor-foot" id="floor-foot" hidden>
+      <button class="btn" id="more" type="button">Show more</button>
     </div>
   </section>
 
@@ -183,14 +203,17 @@
       <span class="drawer-mark" id="drawer-mark"></span>
       <div>
         <h2 id="d-id">—</h2>
-        <p class="muted"><span id="d-type">—</span></p>
+        <p class="muted"><span id="d-type">—</span><span id="d-run-note"></span></p>
       </div>
     </div>
-    <span id="d-status"></span>
-    <button class="btn btn-icon" id="d-close" title="Close (Esc)" aria-label="Close detail panel">✕</button>
+    <div class="drawer-head-actions">
+      <span id="d-status"></span>
+      <button class="btn btn-icon" id="d-link" title="Copy a link to this workflow" aria-label="Copy a link to this workflow">⧉</button>
+      <button class="btn btn-icon" id="d-close" title="Close (Esc)" aria-label="Close detail panel">✕</button>
+    </div>
   </div>
 
-  <div class="drawer-body">
+  <div class="drawer-body" id="drawer-body">
     <h3 class="sec"><span class="sec-no">01</span>Ledger</h3>
     <div class="kv">
       <div><span class="k">Mounted</span><span class="v" id="d-started">—</span></div>
@@ -206,15 +229,29 @@
     </div>
 
     <h3 class="sec"><span class="sec-no">02</span>Input card</h3>
-    <pre id="d-input" class="io">—</pre>
+    <div id="d-input" class="payload">—</div>
 
     <div id="d-output-wrap" hidden>
       <h3 class="sec"><span class="sec-no">03</span>Output card</h3>
-      <pre id="d-output" class="io"></pre>
+      <div id="d-output" class="payload"></div>
     </div>
 
-    <h3 class="sec"><span class="sec-no">04</span>The weave</h3>
-    <ol class="steps" id="d-steps"></ol>
+    <div class="tabs" role="tablist" aria-label="Workflow views">
+      <button class="tab is-active" role="tab" data-tab="weave" aria-selected="true">The weave <span class="tab-sub">steps</span></button>
+      <button class="tab" role="tab" data-tab="chain" aria-selected="false">Card chain <span class="tab-sub">history</span></button>
+      <button class="tab" role="tab" data-tab="runs" aria-selected="false">Runs</button>
+    </div>
+
+    <div class="tab-panel" data-panel="weave">
+      <ol class="steps" id="d-steps"></ol>
+    </div>
+    <div class="tab-panel" data-panel="chain" hidden>
+      <p class="chain-note muted" id="chain-note"></p>
+      <ol class="chain" id="d-chain"></ol>
+    </div>
+    <div class="tab-panel" data-panel="runs" hidden>
+      <ol class="runs" id="d-runs"></ol>
+    </div>
 
     <div class="drawer-actions" id="d-actions" hidden>
       <h3 class="sec"><span class="sec-no">05</span>Hands on</h3>
@@ -267,6 +304,6 @@
 
 <div id="toast" class="toast" hidden></div>
 
-<script src="app.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>

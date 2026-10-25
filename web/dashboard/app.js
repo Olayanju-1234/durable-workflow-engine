@@ -1,16 +1,27 @@
 /* workflowd dashboard — vanilla JS, no framework, no build step.
-   Talks to the JSON API in internal/server/httpapi.go on the same origin. */
+   Talks to the JSON API in internal/server/httpapi.go on the same origin, and
+   follows the engine live over GET /api/events (server-sent events). */
 
 'use strict';
 
-const REFRESH_MS = 2000;
+const LIST_LIMIT = 200;        // rows per page of the floor
+const POLL_MS = 5000;          // when the engine (or a proxy) cannot stream
+const TIME_TICK_MS = 15000;    // how often "12s ago" cells are redrawn
 
 const state = {
-  filter: '',
-  q: '',
-  selected: null,   // workflow id shown in the drawer
-  autoRefresh: true,
-  timer: null,
+  filters: { status: '', type: '', since: '', q: '' },
+  rows: new Map(),   // workflow id -> its row, for the rows on show
+  limit: LIST_LIMIT,
+  total: 0,
+  counts: {},
+  types: [],
+  live: true,
+  selected: null,    // workflow id open in the drawer
+  run: '',           // the run on show ('' = the current one)
+  tab: 'weave',
+  detail: null,      // the last describe of the selected run
+  chain: [],         // its events, as shown in the card chain
+  chainFor: '',      // `${id}|${run}` the chain belongs to
 };
 
 /* ---------- tiny helpers ---------- */
@@ -25,12 +36,18 @@ function esc(v) {
   ));
 }
 
+const enc = encodeURIComponent;
+
+function debounce(fn, ms) {
+  let t = null;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
 function fmtTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d)) return '—';
-  const now = Date.now();
-  const diff = (now - d.getTime()) / 1000;
+  const diff = (Date.now() - d.getTime()) / 1000;
   // A timer's deadline is usually ahead of us.
   const ahead = diff < 0;
   const abs = Math.abs(diff);
@@ -40,6 +57,84 @@ function fmtTime(iso) {
   if (abs < 86400) return say(Math.floor(abs / 3600), 'h');
   return d.toLocaleString();
 }
+
+function fmtAbs(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString();
+}
+
+// A duration in milliseconds, as a person reads it.
+function fmtDur(ms) {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(Math.floor(s % 60)).padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+// Protobuf JSON carries 64-bit nanoseconds as strings.
+function nanosToMs(v) {
+  return v ? Number(v) / 1e6 : 0;
+}
+
+function sinceTime(since) {
+  const m = /^(\d+)([mhd])$/.exec(since || '');
+  if (!m) return '';
+  const unit = { m: 60e3, h: 3600e3, d: 86400e3 }[m[2]];
+  return new Date(Date.now() - Number(m[1]) * unit).toISOString();
+}
+
+/* ---------- payloads: shown readably ---------- */
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// Colours a pretty-printed JSON text; every piece is escaped on the way.
+function highlightJSON(src) {
+  const re = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(src))) {
+    out += esc(src.slice(last, m.index));
+    if (m[1]) out += m[2] ? `<span class="j-key">${esc(m[1])}</span>${esc(m[2])}` : `<span class="j-str">${esc(m[1])}</span>`;
+    else if (m[3]) out += `<span class="j-lit">${m[3]}</span>`;
+    else out += `<span class="j-num">${m[4]}</span>`;
+    last = re.lastIndex;
+  }
+  return out + esc(src.slice(last));
+}
+
+// payloadHTML renders a payload given as text, or as base64 bytes (b64): JSON
+// pretty-printed, other text as is, and bytes that are not UTF-8 as hex.
+function payloadHTML(text, b64) {
+  if (b64 != null && b64 !== '') {
+    const bytes = b64ToBytes(b64);
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      const hex = Array.from(bytes.slice(0, 256), (b) => b.toString(16).padStart(2, '0')).join(' ');
+      return `<pre class="io bin">${esc(hex)}${bytes.length > 256 ? ' …' : ''}</pre><p class="payload-note">${bytes.length} bytes, not text</p>`;
+    }
+  }
+  if (text == null || text === '') return '<p class="payload-note">empty</p>';
+  const t = text.trim();
+  if (t.startsWith('{') || t.startsWith('[')) {
+    try {
+      return `<pre class="io json">${highlightJSON(JSON.stringify(JSON.parse(t), null, 2))}</pre>`;
+    } catch { /* not JSON after all */ }
+  }
+  return `<pre class="io">${esc(text)}</pre>`;
+}
+
+/* ---------- the API ---------- */
 
 // An engine started with --auth-token-file wants a bearer token. Ask once per
 // page load; keep it in sessionStorage so it goes away with the tab.
@@ -64,15 +159,16 @@ if (!namespace) {
   try { namespace = sessionStorage.getItem(NS_KEY) || ''; } catch { /* storage blocked */ }
 }
 
+function headers(path, token) {
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(namespace && path !== '/api/health' ? { 'X-Workflowd-Namespace': namespace } : {}),
+  };
+}
+
 async function api(path, options) {
-  const send = (token) => fetch(path, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(namespace && path !== '/api/health' ? { 'X-Workflowd-Namespace': namespace } : {}),
-    },
-  });
+  const send = (token) => fetch(path, { ...options, headers: headers(path, token) });
   const sent = apiToken;
   let res = await send(sent);
   if (res.status === 401) {
@@ -89,8 +185,13 @@ async function api(path, options) {
     }
   }
   const text = await res.text();
-  const body = text ? JSON.parse(text) : {};
-  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  let body = {};
+  try { body = text ? JSON.parse(text) : {}; } catch { body = { error: text.slice(0, 200) }; }
+  if (!res.ok) {
+    const err = new Error(body.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return body;
 }
 
@@ -145,121 +246,495 @@ const EMPTY_LOOM = `
   </g>
 </svg>`;
 
-/* ---------- list + stats ---------- */
+/* ---------- routing: a URL per view ---------- */
 
-async function refresh() {
+// The floor is "/", a workflow "/workflows/<id>"; filters, the run and the
+// tab ride in the query, so any view can be linked to or reloaded.
+function routeFromLocation() {
+  const m = /^\/workflows\/(.+)$/.exec(location.pathname);
+  const p = new URLSearchParams(location.search);
+  let id = null;
+  if (m) {
+    try { id = decodeURIComponent(m[1]); } catch { id = m[1]; }
+  }
+  return {
+    id,
+    run: p.get('run') || '',
+    tab: p.get('tab') || 'weave',
+    filters: { status: p.get('status') || '', type: p.get('type') || '', since: p.get('since') || '', q: p.get('q') || '' },
+  };
+}
+
+function urlFor(id, run, tab) {
+  const p = new URLSearchParams();
+  if (namespace) p.set('namespace', namespace);
+  for (const [k, v] of Object.entries(state.filters)) if (v) p.set(k, v);
+  if (id && run) p.set('run', run);
+  if (id && tab && tab !== 'weave') p.set('tab', tab);
+  const qs = p.toString();
+  return (id ? `/workflows/${enc(id)}` : '/') + (qs ? `?${qs}` : '');
+}
+
+function go(replace) {
+  const url = urlFor(state.selected, state.run, state.tab);
+  if (url === location.pathname + location.search) return;
+  if (replace) history.replaceState(null, '', url);
+  else history.pushState(null, '', url);
+}
+
+function applyRoute(r, initial) {
+  const changed = JSON.stringify(r.filters) !== JSON.stringify(state.filters);
+  state.filters = r.filters;
+  syncFilterControls();
+  if (changed || initial) loadFloor();
+  if (r.id) {
+    if (r.id !== state.selected || r.run !== state.run) openWorkflow(r.id, { run: r.run, tab: r.tab, push: false });
+    else if (r.tab !== state.tab) selectTab(r.tab, false);
+  } else if (state.selected) {
+    closeWorkflow(false);
+  }
+}
+
+/* ---------- the floor: list, counts, filters ---------- */
+
+let floorSeq = 0;
+
+function listQuery(limit) {
+  const p = new URLSearchParams({ sort: '-started', limit: String(limit) });
+  const f = state.filters;
+  if (f.status) p.set('status', f.status);
+  if (f.type) p.set('type', f.type);
+  if (f.q) p.set('q', f.q);
+  const after = sinceTime(f.since);
+  if (after) p.set('started_after', after);
+  return p.toString();
+}
+
+async function loadFloor() {
+  const seq = ++floorSeq;
   try {
-    const qs = state.filter ? `?status=${encodeURIComponent(state.filter)}` : '';
-    // Stats always describe the whole set, so fetch unfiltered too when filtering.
-    const [filtered, all] = await Promise.all([
-      api(`/api/workflows${qs}`),
-      state.filter ? api('/api/workflows') : null,
-    ]);
-    const everything = (all || filtered).workflows || [];
-    renderStats(everything);
-    renderChipCounts(everything);
-    renderRows(filtered.workflows || []);
-    loadSchedules();
-    setConn('ok', 'connected');
-    if (state.selected) await loadDetail(state.selected, true);
+    const res = await api(`/api/workflows?${listQuery(state.limit)}`);
+    if (seq !== floorSeq) return; // a newer load has the floor
+    state.rows = new Map((res.workflows || []).map((w) => [w.workflow_id, w]));
+    takeCounts(res);
+    renderFloor();
+    if (stream.mode === 'polling') setConn('ok', 'polling');
   } catch (err) {
+    if (seq !== floorSeq) return;
     setConn('error', 'disconnected');
     renderEmpty(`Cannot reach the engine — ${esc(err.message)}`);
   }
 }
 
-function renderStats(list) {
-  const count = (...s) => list.filter((w) => s.includes(w.status)).length;
-  $('stat-total').textContent = list.length;
-  $('stat-active').textContent = count('RUNNING', 'WAITING');
-  $('stat-completed').textContent = count('COMPLETED');
-  $('stat-failed').textContent = count('FAILED', 'TERMINATED', 'TIMED_OUT', 'UNKNOWN');
+function takeCounts(res) {
+  state.total = res.total ?? state.rows.size;
+  state.counts = res.counts || {};
+  state.types = res.types || [];
+  renderCounts();
+  renderTypes();
+  renderFloorNote();
 }
 
-function renderChipCounts(list) {
-  const counts = {
-    '': list.length,
-    RUNNING: list.filter((w) => w.status === 'RUNNING').length,
-    WAITING: list.filter((w) => w.status === 'WAITING').length,
-    COMPLETED: list.filter((w) => w.status === 'COMPLETED').length,
-    FAILED: list.filter((w) => w.status === 'FAILED').length,
-    TERMINATED: list.filter((w) => w.status === 'TERMINATED').length,
-    CANCELLED: list.filter((w) => w.status === 'CANCELLED').length,
-  };
+// Counts move with every change, but cheaply: one small request, at most
+// once a second.
+const refreshCounts = debounce(async () => {
+  try {
+    takeCounts(await api(`/api/workflows?${listQuery(1)}`));
+  } catch { /* the stream or the next load will tell */ }
+}, 1000);
+
+function renderCounts() {
+  const c = state.counts;
+  const n = (...s) => s.reduce((sum, k) => sum + (c[k] || 0), 0);
+  const all = Object.values(c).reduce((a, b) => a + b, 0);
+  $('stat-total').textContent = all;
+  $('stat-active').textContent = n('RUNNING', 'WAITING');
+  $('stat-completed').textContent = n('COMPLETED');
+  $('stat-failed').textContent = n('FAILED', 'TERMINATED', 'TIMED_OUT', 'UNKNOWN');
   for (const el of document.querySelectorAll('.chip-count')) {
-    el.textContent = counts[el.dataset.count] ?? '';
+    el.textContent = el.dataset.count === '' ? all : (c[el.dataset.count] || '');
   }
 }
 
-function matchesSearch(w) {
-  if (!state.q) return true;
-  const hay = `${w.workflow_id} ${w.workflow_type || ''}`.toLowerCase();
-  return hay.includes(state.q);
+function renderTypes() {
+  const sel = $('f-type');
+  const want = state.filters.type;
+  const types = state.types.includes(want) || !want ? state.types : [...state.types, want];
+  const html = `<option value="">every type</option>${types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('')}`;
+  if (sel.dataset.html !== html) {
+    sel.innerHTML = html;
+    sel.dataset.html = html;
+  }
+  sel.value = want;
+}
+
+function renderFloorNote() {
+  const shown = state.rows.size;
+  $('floor-note').textContent = state.total > shown ? `showing ${shown} of ${state.total}` : '';
+  $('floor-foot').hidden = !(state.total > shown);
+}
+
+function syncFilterControls() {
+  const f = state.filters;
+  for (const chip of $('filters').querySelectorAll('.chip')) {
+    chip.classList.toggle('is-active', chip.dataset.status === f.status);
+  }
+  $('f-type').value = f.type;
+  $('f-since').value = f.since;
+  if ($('q').value.trim().toLowerCase() !== f.q) $('q').value = f.q;
+  $('f-clear').hidden = !(f.status || f.type || f.since || f.q);
+}
+
+function setFilter(patch) {
+  Object.assign(state.filters, patch);
+  state.limit = LIST_LIMIT;
+  syncFilterControls();
+  go(true);
+  loadFloor();
+}
+
+// matches says whether a row belongs on the floor under the current filters.
+function matches(w) {
+  const f = state.filters;
+  if (f.status && w.status !== f.status) return false;
+  if (f.type && w.workflow_type !== f.type) return false;
+  if (f.q && !`${w.workflow_id} ${w.workflow_type || ''}`.toLowerCase().includes(f.q)) return false;
+  const after = sinceTime(f.since);
+  if (after && (!w.started_at || w.started_at < after)) return false;
+  return true;
 }
 
 function renderEmpty(msg) {
   $('rows').innerHTML = `<tr class="empty"><td colspan="6">${msg}</td></tr>`;
 }
 
-function renderRows(list) {
-  const visible = list.filter(matchesSearch);
-  if (!visible.length) {
-    renderEmpty(state.q
-      ? `Nothing on the floor matches “${esc(state.q)}”.`
-      : state.filter
-        ? `No workflows with status ${esc(state.filter)}.`
-        : `${EMPTY_LOOM}Nothing on the loom yet. Mount a warp to begin.`);
-    return;
-  }
-  $('rows').innerHTML = visible.map((w) => `
-    <tr data-id="${esc(w.workflow_id)}" data-s="${esc(w.status)}" tabindex="0" role="button"
-        aria-label="Inspect ${esc(w.workflow_id)}">
-      <td class="wf-id">${esc(w.workflow_id)}</td>
+function emptyMessage() {
+  const f = state.filters;
+  if (f.q) return `Nothing on the floor matches “${esc(f.q)}”.`;
+  if (f.status || f.type || f.since) return 'No workflows match these filters.';
+  return `${EMPTY_LOOM}Nothing on the loom yet. Mount a warp to begin.`;
+}
+
+function rowCells(w) {
+  const href = urlFor(w.workflow_id, '', 'weave');
+  return `
+      <td class="wf-id"><a href="${esc(href)}" tabindex="-1">${esc(w.workflow_id)}</a></td>
       <td class="wf-type">${esc(w.workflow_type) || '<span class="muted">—</span>'}</td>
       <td><span class="badge" data-s="${esc(w.status)}">${esc(w.status)}</span></td>
       <td class="num">${esc(w.history_length)}</td>
-      <td class="muted">${esc(fmtTime(w.started_at))}</td>
-      <td class="muted">${esc(fmtTime(w.updated_at))}</td>
-    </tr>`).join('');
+      <td class="muted" data-t="${esc(w.started_at || '')}" title="${esc(fmtAbs(w.started_at))}">${esc(fmtTime(w.started_at))}</td>
+      <td class="muted" data-t="${esc(w.updated_at || '')}" title="${esc(fmtAbs(w.updated_at))}">${esc(fmtTime(w.updated_at))}</td>`;
+}
 
-  for (const tr of $('rows').querySelectorAll('tr[data-id]')) {
-    tr.addEventListener('click', () => openDrawer(tr.dataset.id));
-    tr.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDrawer(tr.dataset.id); }
-    });
+function buildRow(w) {
+  const tr = document.createElement('tr');
+  tr.dataset.id = w.workflow_id;
+  tr.dataset.s = w.status;
+  tr.tabIndex = 0;
+  tr.setAttribute('aria-label', `Inspect ${w.workflow_id}`);
+  tr.innerHTML = rowCells(w);
+  tr.classList.toggle('is-selected', w.workflow_id === state.selected);
+  return tr;
+}
+
+function rowEl(id) {
+  return $('rows').querySelector(`tr[data-id="${CSS.escape(id)}"]`);
+}
+
+function renderFloor() {
+  const list = [...state.rows.values()];
+  if (!list.length) {
+    renderEmpty(emptyMessage());
+    renderFloorNote();
+    return;
   }
+  const body = $('rows');
+  body.replaceChildren(...list.map(buildRow));
+  renderFloorNote();
+}
+
+// keepAnchor runs fn without moving what the reader is looking at: rows
+// inserted or removed above the viewport shift the page back by as much.
+function keepAnchor(fn) {
+  if (window.scrollY <= 0) { fn(); return; }
+  const rows = [...$('rows').querySelectorAll('tr[data-id]')];
+  const ref = rows.find((tr) => tr.getBoundingClientRect().bottom > 80);
+  const before = ref?.getBoundingClientRect().top;
+  fn();
+  if (ref && ref.isConnected) window.scrollBy(0, ref.getBoundingClientRect().top - before);
+}
+
+function flash(tr, cls) {
+  tr.classList.remove(cls);
+  void tr.offsetWidth; // restart the animation
+  tr.classList.add(cls);
+}
+
+// applyChange folds one live change into the floor: the row is updated in
+// place, added where it sorts, or removed, and nothing else is redrawn.
+function applyChange(w) {
+  const id = w.workflow_id;
+  if (id === state.selected) refreshDetailSoon();
+  refreshCounts();
+  const had = state.rows.has(id);
+  const tr = rowEl(id);
+  if (w.deleted || !matches(w)) {
+    if (had) {
+      state.rows.delete(id);
+      keepAnchor(() => tr?.remove());
+      if (!state.rows.size) renderEmpty(emptyMessage());
+      renderFloorNote();
+    }
+    return;
+  }
+  if (had) {
+    const old = state.rows.get(id);
+    state.rows.set(id, w);
+    if (tr) {
+      tr.dataset.s = w.status;
+      tr.innerHTML = rowCells(w);
+      if (old.status !== w.status) flash(tr, 'is-changed');
+    }
+    return;
+  }
+  // A row this view has not shown: place it by start time, newest first.
+  const rows = [...state.rows.values()];
+  const at = rows.findIndex((r) => (r.started_at || '') < (w.started_at || ''));
+  if (at < 0 && rows.length >= state.limit) return; // beyond this page
+  const next = new Map();
+  rows.forEach((r, i) => {
+    if (i === at) next.set(id, w);
+    next.set(r.workflow_id, r);
+  });
+  if (at < 0) next.set(id, w);
+  state.rows = next;
+  const row = buildRow(w);
+  keepAnchor(() => {
+    const body = $('rows');
+    body.querySelector('tr.empty')?.remove();
+    const before = at < 0 ? null : rowEl(rows[at].workflow_id);
+    body.insertBefore(row, before);
+  });
+  flash(row, 'is-new');
+  renderFloorNote();
+}
+
+// "12s ago" goes stale; redraw just those cells now and then.
+function tickTimes() {
+  for (const td of document.querySelectorAll('td[data-t]')) {
+    if (td.dataset.t) td.textContent = fmtTime(td.dataset.t);
+  }
+}
+
+/* ---------- the live stream ---------- */
+
+// EventSource cannot send an Authorization header, so the stream is read with
+// fetch. If it cannot be had (an engine before 0.5.0, or a proxy that buffers
+// it), the floor falls back to polling.
+const stream = { ctrl: null, retry: 0, timer: null, poll: null, mode: 'off', resync: false };
+
+function stopStream() {
+  stream.ctrl?.abort();
+  stream.ctrl = null;
+  clearTimeout(stream.timer);
+  clearInterval(stream.poll);
+  stream.poll = null;
+}
+
+async function startStream() {
+  stopStream();
+  if (!state.live) {
+    stream.mode = 'paused';
+    setConn('paused', 'paused');
+    return;
+  }
+  const ctrl = new AbortController();
+  stream.ctrl = ctrl;
+  let res;
+  try {
+    res = await fetch('/api/events', { headers: headers('/api/events', apiToken), signal: ctrl.signal });
+  } catch {
+    if (!ctrl.signal.aborted) retryStream(ctrl);
+    return;
+  }
+  if (res.status === 404) { startPolling(false); return; } // no stream on this engine
+  if (res.status === 401 && !tokenPrompted) {
+    try { await api('/api/namespaces'); } catch { /* the prompt was declined */ }
+    if (stream.ctrl === ctrl) startStream();
+    return;
+  }
+  if (!res.ok || !res.body) { retryStream(ctrl); return; }
+  stream.retry = 0;
+  stream.mode = 'live';
+  setConn('ok', 'live');
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value.replace(/\r\n?/g, '\n');
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        handleEvent(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+      }
+    }
+  } catch { /* the connection dropped */ }
+  if (!ctrl.signal.aborted) retryStream(ctrl);
+}
+
+function retryStream(ctrl) {
+  if (stream.ctrl !== ctrl) return;
+  stream.retry++;
+  stream.resync = true; // whatever happened meanwhile was missed
+  if (stream.retry > 4) { startPolling(true); return; }
+  setConn('connecting', 'reconnecting…');
+  stream.timer = setTimeout(startStream, Math.min(1000 * 2 ** (stream.retry - 1), 10000));
+}
+
+function startPolling(retryLater) {
+  stopStream();
+  stream.mode = 'polling';
+  setConn('ok', 'polling');
+  stream.poll = setInterval(() => {
+    loadFloor();
+    loadSchedules();
+    if (state.selected) refreshDetail();
+  }, POLL_MS);
+  if (retryLater) stream.timer = setTimeout(() => { stream.retry = 0; startStream(); }, 60000);
+}
+
+const reloadSchedulesSoon = debounce(() => loadSchedules(), 300);
+
+function handleEvent(block) {
+  let name = 'message';
+  let data = '';
+  for (const line of block.split('\n')) {
+    if (!line || line.startsWith(':')) continue;
+    const c = line.indexOf(':');
+    const field = c < 0 ? line : line.slice(0, c);
+    let val = c < 0 ? '' : line.slice(c + 1);
+    if (val.startsWith(' ')) val = val.slice(1);
+    if (field === 'event') name = val;
+    else if (field === 'data') data += (data ? '\n' : '') + val;
+  }
+  let payload = {};
+  try { payload = data ? JSON.parse(data) : {}; } catch { return; }
+  switch (name) {
+    case 'hello':
+      if (stream.resync) { stream.resync = false; resyncAll(); }
+      break;
+    case 'workflow':
+      applyChange(payload);
+      break;
+    case 'schedules':
+      reloadSchedulesSoon();
+      break;
+    case 'resync':
+      resyncAll();
+      break;
+    default:
+  }
+}
+
+function resyncAll() {
+  loadFloor();
+  loadSchedules();
+  if (state.selected) refreshDetail();
 }
 
 /* ---------- detail drawer ---------- */
 
-async function openDrawer(id) {
+function markSelectedRow() {
+  for (const tr of $('rows').querySelectorAll('tr.is-selected')) tr.classList.remove('is-selected');
+  if (state.selected) rowEl(state.selected)?.classList.add('is-selected');
+}
+
+async function openWorkflow(id, { run = '', tab = 'weave', push = true } = {}) {
+  const same = id === state.selected && run === state.run;
   state.selected = id;
+  state.run = run;
+  if (!same) {
+    state.detail = null;
+    state.chain = [];
+    state.chainFor = '';
+    $('d-chain').innerHTML = '';
+    $('d-runs').innerHTML = '';
+    $('d-id').textContent = id;
+    $('d-type').textContent = '…';
+    $('drawer-body').scrollTop = 0;
+  }
+  selectTab(tab, false);
+  if (push) go(false);
   $('drawer').hidden = false;
   $('scrim').hidden = false;
-  await loadDetail(id, false);
+  markSelectedRow();
+  await refreshDetail(true);
 }
 
-function closeDrawer() {
+function closeWorkflow(push) {
   state.selected = null;
+  state.run = '';
+  state.tab = 'weave';
   $('drawer').hidden = true;
   $('scrim').hidden = true;
+  markSelectedRow();
+  if (push) go(false);
 }
 
-async function loadDetail(id, quiet) {
+function selectTab(tab, push) {
+  if (!['weave', 'chain', 'runs'].includes(tab)) tab = 'weave';
+  state.tab = tab;
+  for (const b of document.querySelectorAll('.tab')) {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle('is-active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+  for (const p of document.querySelectorAll('.tab-panel')) p.hidden = p.dataset.panel !== tab;
+  if (push) go(true);
+  if (state.selected && tab === 'chain') loadChain();
+  if (state.selected && tab === 'runs') loadRuns();
+}
+
+const viewingCurrent = () => !state.run || state.run === state.detail?.run_id;
+
+async function refreshDetail(loud) {
+  const id = state.selected;
+  const run = state.run;
+  if (!id) return;
   try {
-    const w = await api(`/api/workflows/${encodeURIComponent(id)}`);
+    const w = await api(`/api/workflows/${enc(id)}${run ? `?run_id=${enc(run)}` : ''}`);
+    if (state.selected !== id || state.run !== run) return;
+    state.detail = w;
     renderDetail(w);
+    if (state.tab === 'chain') loadChain();
+    if (state.tab === 'runs') loadRuns();
   } catch (err) {
-    if (!quiet) toast(err.message, 'error');
+    if (loud) {
+      toast(err.message, 'error');
+      if (err.status === 404) {
+        $('d-type').textContent = 'not found in this namespace';
+        $('d-status').innerHTML = '';
+        $('d-steps').innerHTML = '';
+        $('d-actions').hidden = true;
+      }
+    }
   }
 }
+
+// Live changes to the open workflow come in bursts; describe it once per burst.
+const refreshDetailSoon = debounce(() => { if (viewingCurrent()) refreshDetail(false); }, 250);
 
 function renderDetail(w) {
   $('d-id').textContent = w.workflow_id;
   $('d-type').textContent = w.workflow_type || 'unknown type';
+  $('d-run-note').textContent = state.run && state.run !== '' ? ' · an earlier run' : '';
   $('d-status').innerHTML = `<span class="badge" data-s="${esc(w.status)}">${esc(w.status)}</span>`;
   $('d-started').textContent = fmtTime(w.started_at);
+  $('d-started').title = fmtAbs(w.started_at);
   $('d-updated').textContent = fmtTime(w.updated_at);
+  $('d-updated').title = fmtAbs(w.updated_at);
   $('d-events').textContent = w.history_length;
   // A workflow that continues as new keeps its id; each run gets a new run id.
   const short = (id) => (id || '').slice(0, 8);
@@ -272,18 +747,31 @@ function renderDetail(w) {
   $('d-error-wrap').hidden = !w.error;
   if (w.error) $('d-error').textContent = w.error;
 
-  $('d-input').textContent = w.input || '—';
-  $('d-output-wrap').hidden = !w.output;
-  if (w.output) $('d-output').textContent = w.output;
+  setPayload($('d-input'), w.input, w.input_base64);
+  $('d-output-wrap').hidden = !(w.output || w.output_base64);
+  if (w.output || w.output_base64) setPayload($('d-output'), w.output, w.output_base64);
 
   const steps = w.steps || [];
-  $('d-steps').innerHTML = steps.length
+  const html = steps.length
     ? steps.map(renderStep).join('')
     : `<li class="pick"><div class="pick-rail"></div><div class="pick-body muted" style="font-style:italic;font-family:var(--serif)">The loom is threaded but no picks have been made yet.</div></li>`;
+  if ($('d-steps').dataset.html !== html) {
+    $('d-steps').innerHTML = html;
+    $('d-steps').dataset.html = html;
+  }
 
-  // Only a live workflow can be signalled, cancelled or terminated.
-  const live = w.status === 'RUNNING' || w.status === 'WAITING';
+  // Only the current run of a live workflow can be signalled, cancelled or terminated.
+  const live = (w.status === 'RUNNING' || w.status === 'WAITING') && viewingCurrent();
   $('d-actions').hidden = !live;
+}
+
+// setPayload redraws a payload only when it changed, so a live refresh keeps
+// the reader's selection and scroll inside it.
+function setPayload(el, text, b64) {
+  const html = (text || b64) ? payloadHTML(b64 ? null : text, b64 || null) : '<p class="payload-note">none</p>';
+  if (el.dataset.html === html) return;
+  el.innerHTML = html;
+  el.dataset.html = html;
 }
 
 function renderStep(s) {
@@ -297,8 +785,8 @@ function renderStep(s) {
   const fireAt = s.fire_at && s.status !== 'CANCELLED'
     ? `<span class="step-meta">pick fires ${esc(fmtTime(s.fire_at))}</span>` : '';
   const err = s.error ? `<div class="step-body"><pre class="err">${esc(s.error)}</pre></div>` : '';
-  const out = (!s.error && s.output)
-    ? `<div class="step-body"><pre class="io">${esc(s.output)}</pre></div>` : '';
+  const out = (!s.error && (s.output || s.output_base64))
+    ? `<div class="step-body">${payloadHTML(s.output_base64 ? null : s.output, s.output_base64 || null)}</div>` : '';
   const glyph = GLYPHS[s.kind] || '';
 
   return `
@@ -320,6 +808,207 @@ function renderStep(s) {
     </li>`;
 }
 
+/* ---------- the card chain: raw history, readably ---------- */
+
+const EVENT_KEYS = ['event_id', 'timestamp', 'raft_index', 'min_reader_format'];
+
+// eventKind finds an event's one attributes field (protobuf JSON names it).
+function eventKind(ev) {
+  const k = Object.keys(ev).find((key) => !EVENT_KEYS.includes(key));
+  return [k || 'unknown', (k && ev[k]) || {}];
+}
+
+function fieldRow(label, value) {
+  if (value === undefined || value === null || value === '' || value === false) return '';
+  return `<div><dt>${esc(label)}</dt><dd>${value === true ? 'yes' : esc(value)}</dd></div>`;
+}
+
+function stepLabel(a) {
+  return a.step_name ? `#${a.sequence || '?'} ${a.step_name}` : '';
+}
+
+function retryText(p) {
+  if (!p) return '';
+  const parts = [`${p.max_attempts} attempts`];
+  if (p.initial_backoff_ms) parts.push(`backoff ${fmtDur(Number(p.initial_backoff_ms))}`);
+  if (p.max_backoff_ms) parts.push(`max ${fmtDur(Number(p.max_backoff_ms))}`);
+  if (p.non_retryable_error_types?.length) parts.push(`never retry ${p.non_retryable_error_types.join(', ')}`);
+  return parts.join(' · ');
+}
+
+// describeEvent turns one event into what the card shows: a label, a tone
+// (its dye), its fields, its payloads and an error, if any.
+function describeEvent(kind, a, seen) {
+  const ms = (v) => (v ? fmtDur(Number(v)) : '');
+  switch (kind) {
+    case 'workflow_started':
+      return {
+        label: a.continued_from_run_id ? 'Warp re-mounted (continued as new)' : 'Warp mounted', tone: 'indigo',
+        fields: [['type', a.workflow_type], ['run', a.run_id], ['task queue', a.task_queue],
+          ['execution timeout', ms(a.execution_timeout_ms)], ['continued from', a.continued_from_run_id]],
+        payloads: [['input', a.input]],
+      };
+    case 'step_scheduled': {
+      const again = seen.has(a.sequence);
+      seen.add(a.sequence);
+      if (a.awaits_signal) {
+        return { label: 'Waiting for a signal', tone: 'ochre', fields: [['step', stepLabel(a)], ['signal', a.signal_name]], payloads: [['input', a.input]] };
+      }
+      return {
+        label: again ? 'Step scheduled again (retry)' : 'Step scheduled', tone: 'ochre',
+        fields: [['step', stepLabel(a)], ['task queue', a.task_queue], ['retry policy', retryText(a.retry_policy)],
+          ['start-to-close', ms(a.start_to_close_timeout_ms)], ['schedule-to-close', ms(a.schedule_to_close_timeout_ms)]],
+        payloads: [['input', a.input]],
+      };
+    }
+    case 'step_completed':
+      return { label: 'Step completed', tone: 'leaf', fields: [['step', stepLabel(a)]], payloads: [['output', a.output]] };
+    case 'step_failed': {
+      let label = 'Step failed';
+      if (a.cancelled) label = 'Step cancelled';
+      else if (a.will_retry) label = 'Attempt failed, will retry';
+      return {
+        label, tone: a.cancelled ? 'slate' : a.will_retry ? 'ochre' : 'madder',
+        fields: [['step', stepLabel(a)], ['error type', a.error_type], ['attempt', a.retry_count],
+          ['not retryable', a.non_retryable]],
+        error: a.error,
+      };
+    }
+    case 'timer_started':
+      return {
+        label: 'Timer started', tone: 'walnut',
+        fields: [['step', stepLabel(a)], ['fires', a.fire_at ? new Date(nanosToMs(a.fire_at)).toLocaleString() : '']],
+      };
+    case 'timer_fired':
+      return { label: 'Timer fired', tone: 'walnut', fields: [['step', stepLabel(a)]] };
+    case 'signal_received':
+      if (a.cancel_request) return { label: 'Cancel requested', tone: 'slate', fields: [], payloads: [['reason', a.payload]] };
+      return {
+        label: 'Signal received', tone: 'indigo', fields: [['signal', a.signal_name], ['request id', a.request_id]],
+        payloads: [['payload', a.payload]],
+      };
+    case 'marker_recorded':
+      return {
+        label: { version: 'Version marker', side_effect: 'Side effect recorded', cancel: 'Cancel delivered to the code' }[a.marker] || 'Marker recorded',
+        tone: 'slate', fields: [['step', stepLabel(a)], ['marker', a.marker]], payloads: [['data', a.data]],
+      };
+    case 'workflow_completed':
+      if (a.continued_as_new) {
+        const n = a.continued_as_new;
+        return {
+          label: 'Continued as new', tone: 'leaf', fields: [['next run', n.run_id], ['type', n.workflow_type], ['task queue', n.task_queue]],
+          payloads: [['next input', n.input]],
+        };
+      }
+      return { label: 'Workflow completed', tone: 'leaf', fields: [], payloads: [['output', a.output]] };
+    case 'workflow_failed': {
+      let label = 'Workflow failed';
+      let tone = 'madder';
+      if (a.terminated) { label = 'Warp cut (terminated)'; tone = 'walnut'; }
+      if (a.timed_out) { label = 'Timed out'; tone = 'slate'; }
+      if (a.cancelled) { label = 'Cancelled'; tone = 'slate'; }
+      return { label, tone, fields: [], error: a.error };
+    }
+    default:
+      return { label: kind, tone: 'slate', fields: [] };
+  }
+}
+
+function eventHTML(ev, t0, seen) {
+  const [kind, attrs] = eventKind(ev);
+  const d = describeEvent(kind, attrs, seen);
+  const at = nanosToMs(ev.timestamp);
+  const iso = at ? new Date(at).toISOString() : '';
+  const fields = (d.fields || []).map(([k, v]) => fieldRow(k, v)).join('');
+  const payloads = (d.payloads || [])
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `<div class="ev-payload"><span class="ev-plabel">${esc(k)}</span>${payloadHTML(null, v)}</div>`)
+    .join('');
+  const error = d.error ? `<pre class="err">${esc(d.error)}</pre>` : '';
+  const format = Number(ev.min_reader_format || 0) > 1
+    ? `<span class="tag" title="the oldest history format that reads this event">format ${esc(ev.min_reader_format)}</span>` : '';
+  return `
+    <li class="card-ev" data-tone="${esc(d.tone)}">
+      <div class="ev-rail"><span class="ev-no">${esc(ev.event_id)}</span></div>
+      <div class="ev-body">
+        <div class="ev-head">
+          <span class="ev-name">${esc(d.label)}</span>
+          <code class="ev-kind">${esc(kind)}</code>
+          ${format}
+          <span class="ev-time" title="${esc(fmtAbs(iso))}">${at && t0 ? `+${esc(fmtDur(at - t0))}` : ''}</span>
+        </div>
+        ${fields ? `<dl class="ev-fields">${fields}</dl>` : ''}
+        ${error}${payloads}
+        <details class="ev-raw"><summary>as recorded</summary><pre class="io">${esc(JSON.stringify(ev, null, 2))}</pre></details>
+      </div>
+    </li>`;
+}
+
+// loadChain appends the events the chain has not shown yet, so a live
+// workflow's history grows in place without losing the reader's place.
+async function loadChain() {
+  const id = state.selected;
+  const run = state.run;
+  if (!id) return;
+  let res;
+  try {
+    res = await api(`/api/workflows/${enc(id)}/history${run ? `?run_id=${enc(run)}` : ''}`);
+  } catch (err) {
+    $('chain-note').textContent = err.message;
+    return;
+  }
+  if (state.selected !== id || state.run !== run) return;
+  const events = res.events || [];
+  const key = `${id}|${run}`;
+  const list = $('d-chain');
+  const same = state.chainFor === key && state.chain.length <= events.length &&
+    (!state.chain.length || state.chain[0].timestamp === events[0]?.timestamp);
+  if (!same) {
+    // Another workflow, run, or a new run under the same id: start over.
+    state.chainFor = key;
+    state.chain = [];
+    list.innerHTML = '';
+  }
+  const t0 = nanosToMs(events[0]?.timestamp);
+  const seen = new Set();
+  state.chain.forEach((ev) => {
+    const [kind, a] = eventKind(ev);
+    if (kind === 'step_scheduled') seen.add(a.sequence);
+  });
+  const fresh = events.slice(state.chain.length);
+  if (fresh.length) list.insertAdjacentHTML('beforeend', fresh.map((ev) => eventHTML(ev, t0, seen)).join(''));
+  state.chain = events;
+  $('chain-note').textContent = events.length
+    ? `${events.length} card${events.length === 1 ? '' : 's'}, oldest first: every event exactly as the engine recorded it.`
+    : 'No cards.';
+}
+
+async function loadRuns() {
+  const id = state.selected;
+  if (!id) return;
+  let runs = [];
+  try {
+    runs = (await api(`/api/workflows/${enc(id)}/runs`)).runs || [];
+  } catch (err) {
+    $('d-runs').innerHTML = `<li class="muted">${esc(err.message)}</li>`;
+    return;
+  }
+  if (state.selected !== id) return;
+  const showing = state.run || state.detail?.run_id;
+  $('d-runs').innerHTML = runs.map((r) => `
+    <li class="run${r.run_id === showing ? ' is-on' : ''}" data-run="${esc(r.run_id)}" data-current="${r.current ? '1' : ''}" tabindex="0">
+      <code>${esc(r.run_id)}</code>
+      <span class="badge" data-s="${esc(r.status)}">${esc(r.status)}</span>
+      ${r.current ? '<span class="tag">current</span>' : ''}
+      <span class="muted">mounted ${esc(fmtTime(r.started_at))}${r.closed_at ? ` · closed ${esc(fmtTime(r.closed_at))}` : ''}</span>
+    </li>`).join('') || '<li class="muted">No runs.</li>';
+  for (const li of $('d-runs').querySelectorAll('li[data-run]')) {
+    const pick = () => openWorkflow(id, { run: li.dataset.current ? '' : li.dataset.run, tab: 'weave' });
+    li.addEventListener('click', pick);
+    li.addEventListener('keydown', (e) => { if (e.key === 'Enter') pick(); });
+  }
+}
+
 /* ---------- actions ---------- */
 
 async function terminate() {
@@ -327,13 +1016,13 @@ async function terminate() {
   if (!id) return;
   if (!confirm(`Cut the warp on ${id}? This durably fails the workflow and cannot be undone.`)) return;
   try {
-    await api(`/api/workflows/${encodeURIComponent(id)}/terminate`, {
+    await api(`/api/workflows/${enc(id)}/terminate`, {
       method: 'POST',
       body: JSON.stringify({ reason: $('term-reason').value }),
     });
     toast('Warp cut — workflow terminated');
     $('term-reason').value = '';
-    await refresh();
+    refreshDetail(false);
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -347,13 +1036,13 @@ async function cancelWorkflow(graceful) {
     : `Cancel ${id}? It ends as CANCELLED, and workers running its activities are told to stop.`;
   if (!confirm(ask)) return;
   try {
-    await api(`/api/workflows/${encodeURIComponent(id)}/cancel`, {
+    await api(`/api/workflows/${enc(id)}/cancel`, {
       method: 'POST',
       body: JSON.stringify({ reason: $('term-reason').value, graceful }),
     });
     toast(graceful ? 'Cancel requested — the workflow is winding down' : 'Workflow cancelled');
     $('term-reason').value = '';
-    await refresh();
+    refreshDetail(false);
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -364,13 +1053,13 @@ async function sendSignal() {
   const name = $('sig-name').value.trim();
   if (!id || !name) { toast('Signal name is required', 'error'); return; }
   try {
-    await api(`/api/workflows/${encodeURIComponent(id)}/signal`, {
+    await api(`/api/workflows/${enc(id)}/signal`, {
       method: 'POST',
       body: JSON.stringify({ name, payload: $('sig-payload').value }),
     });
     toast(`Shuttle passed — “${name}” delivered`);
     $('sig-name').value = ''; $('sig-payload').value = '';
-    await refresh();
+    refreshDetail(false);
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -394,7 +1083,8 @@ async function startWorkflow(e) {
     });
     toast(`Warp mounted — ${res.workflow_id}`, 'success');
     closeStartModal();
-    await refresh();
+    if (stream.mode !== 'live') loadFloor();
+    openWorkflow(res.workflow_id);
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -569,7 +1259,7 @@ async function backfillSchedule(id) {
       body: JSON.stringify({ start_time: from.toISOString(), end_time: to.toISOString(), overlap_policy: q('overlap') }),
     });
     toast(`Backfill: ${res.started} started, ${res.existing} already there, ${res.skipped} skipped`, 'success');
-    refresh();
+    loadFloor();
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -611,6 +1301,7 @@ async function createSchedule(e) {
   }
 }
 
+
 // The namespace picker shows only when the caller can use more than one.
 async function loadNamespaces() {
   let info;
@@ -638,15 +1329,18 @@ async function loadNamespaces() {
 function switchNamespace(next) {
   namespace = next;
   try { sessionStorage.setItem(NS_KEY, next); } catch { /* storage blocked */ }
-  const url = new URL(location.href);
-  url.searchParams.set('namespace', next);
-  history.replaceState(null, '', url);
-  closeDrawer();
+  closeWorkflow(false);
+  state.filters.type = ''; // types differ between namespaces
+  state.limit = LIST_LIMIT;
+  syncFilterControls();
+  go(true);
   sched.open = null;
   sched.detail = null;
   sched.last = '';
   loadNamespaces();
-  refresh();
+  loadFloor();
+  loadSchedules();
+  startStream();
 }
 
 // On a node running the demo worker, point visitors at a workflow that will
@@ -677,26 +1371,32 @@ function closeStartModal() {
 
 /* ---------- wiring ---------- */
 
-function scheduleRefresh() {
-  clearInterval(state.timer);
-  if (state.autoRefresh) state.timer = setInterval(refresh, REFRESH_MS);
-}
-
 const THEME_ORDER = ['auto', 'light', 'dark'];
 const THEME_LABEL = { auto: '◐ auto', light: '○ light', dark: '● dark' };
 
 function initTheme() {
-  const saved = localStorage.getItem('workflowd-theme') || 'auto';
+  let saved = 'auto';
+  try { saved = localStorage.getItem('workflowd-theme') || 'auto'; } catch { /* storage blocked */ }
   document.documentElement.dataset.theme = saved;
   $('theme').textContent = THEME_LABEL[saved] || THEME_LABEL.auto;
   $('theme').addEventListener('click', () => {
     const cur = document.documentElement.dataset.theme;
     const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
     document.documentElement.dataset.theme = next;
-    localStorage.setItem('workflowd-theme', next);
+    try { localStorage.setItem('workflowd-theme', next); } catch { /* storage blocked */ }
     $('theme').textContent = THEME_LABEL[next];
     toast(`Theme: ${next}`);
   });
+}
+
+function onRowActivate(e) {
+  const tr = e.target.closest('tr[data-id]');
+  if (!tr) return;
+  // Let the id's link open a new tab as links do.
+  if (e.type === 'click' && (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1)) return;
+  if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  openWorkflow(tr.dataset.id);
 }
 
 function init() {
@@ -706,31 +1406,35 @@ function init() {
 
   for (const chip of $('filters').querySelectorAll('.chip')) {
     chip.querySelector('.chip-count').dataset.count = chip.dataset.status;
-    chip.addEventListener('click', () => {
-      $('filters').querySelector('.is-active')?.classList.remove('is-active');
-      chip.classList.add('is-active');
-      state.filter = chip.dataset.status;
-      refresh();
-    });
+    chip.addEventListener('click', () => setFilter({ status: chip.dataset.status }));
   }
+  $('f-type').addEventListener('change', (e) => setFilter({ type: e.target.value }));
+  $('f-since').addEventListener('change', (e) => setFilter({ since: e.target.value }));
+  $('f-clear').addEventListener('click', () => setFilter({ status: '', type: '', since: '', q: '' }));
+  const search = debounce((v) => setFilter({ q: v }), 250);
+  $('q').addEventListener('input', (e) => search(e.target.value.trim().toLowerCase()));
+  $('more').addEventListener('click', () => { state.limit += LIST_LIMIT; loadFloor(); });
 
-  let searchTimer = null;
-  $('q').addEventListener('input', (e) => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => {
-      state.q = e.target.value.trim().toLowerCase();
-      refresh();
-    }, 160);
-  });
+  $('rows').addEventListener('click', onRowActivate);
+  $('rows').addEventListener('keydown', onRowActivate);
 
-  $('refresh').addEventListener('click', refresh);
+  $('refresh').addEventListener('click', resyncAll);
   $('new-wf').addEventListener('click', openStartModal);
   $('s-cancel').addEventListener('click', closeStartModal);
   $('modal-scrim').addEventListener('click', closeStartModal);
   $('start-form').addEventListener('submit', startWorkflow);
 
-  $('d-close').addEventListener('click', closeDrawer);
-  $('scrim').addEventListener('click', closeDrawer);
+  $('d-close').addEventListener('click', () => closeWorkflow(true));
+  $('scrim').addEventListener('click', () => closeWorkflow(true));
+  $('d-link').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(location.href);
+      toast('Link copied');
+    } catch {
+      toast(location.href);
+    }
+  });
+  for (const b of document.querySelectorAll('.tab')) b.addEventListener('click', () => selectTab(b.dataset.tab, true));
   $('signal-form').addEventListener('submit', (e) => { e.preventDefault(); sendSignal(); });
   $('terminate-form').addEventListener('submit', (e) => { e.preventDefault(); terminate(); });
   $('d-cancel').addEventListener('click', () => cancelWorkflow(false));
@@ -739,12 +1443,17 @@ function init() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!$('start-modal').hidden) { closeStartModal(); return; }
-    closeDrawer();
+    if (state.selected) closeWorkflow(true);
   });
+  window.addEventListener('popstate', () => applyRoute(routeFromLocation(), false));
 
-  $('autorefresh').addEventListener('change', (e) => {
-    state.autoRefresh = e.target.checked;
-    scheduleRefresh();
+  $('live').addEventListener('change', (e) => {
+    state.live = e.target.checked;
+    if (state.live) {
+      stream.retry = 0;
+      resyncAll(); // what happened while paused
+    }
+    startStream();
   });
   $('ns').addEventListener('change', (e) => switchNamespace(e.target.value));
   $('sched-new').addEventListener('click', () => { $('sched-form').hidden = !$('sched-form').hidden; });
@@ -752,10 +1461,12 @@ function init() {
   $('sc-try').addEventListener('click', previewScheduleForm);
   $('sched-form').addEventListener('submit', createSchedule);
 
-  refresh();
-  scheduleRefresh();
+  applyRoute(routeFromLocation(), true);
+  loadSchedules();
   loadNodeInfo();
   loadNamespaces();
+  startStream();
+  setInterval(tickTimes, TIME_TICK_MS);
 }
 
 document.addEventListener('DOMContentLoaded', init);

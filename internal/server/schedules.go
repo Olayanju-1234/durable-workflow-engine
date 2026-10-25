@@ -104,6 +104,7 @@ func (e *Engine) putScheduleLocked(ns string, spec *Schedule, what string) error
 	}
 	e.sched.entries[key] = ent
 	e.armScheduleLocked(ent, ent.cron.Next(time.Now()))
+	e.feed.publish(ns, Change{Schedules: true})
 	e.log.Info("schedule "+what, "namespace", ns, "schedule_id", ent.spec.GetScheduleId(), "cron", ent.spec.GetCron(),
 		"workflow_type", ent.spec.GetWorkflowType(), "paused", ent.spec.GetPaused(), "next_fire_at", ent.next)
 	return nil
@@ -129,6 +130,7 @@ func (e *Engine) deleteSchedule(ns, scheduleID string) error {
 		return err
 	}
 	delete(e.sched.entries, key)
+	e.feed.publish(ns, Change{Schedules: true})
 	e.log.Info("schedule deleted", "namespace", ns, "schedule_id", scheduleID)
 	return nil
 }
@@ -364,6 +366,7 @@ func (e *Engine) onScheduleDue(tm timer.Timer) {
 		next = ent.cron.Next(now)
 	}
 	e.armScheduleLocked(ent, next)
+	e.feed.publish(ent.ns, Change{Schedules: true})
 }
 
 // fireLocked starts the run for one fire time and reports whether it should be

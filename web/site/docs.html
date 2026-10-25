@@ -1240,17 +1240,23 @@ workflowd --serve --demo-worker --rate-limit 10 --rate-limit-burst 20 \
     <h3>List workflows</h3>
     <p>
       Supports a status filter, an exact workflow <code>type</code>, a case-insensitive substring
-      search over workflow id and type (<code>q</code>), and offset/limit pagination. The response carries
-      <code>total</code> (matches after status+q filtering, before pagination) so clients
-      can page through.
+      search over workflow id and type (<code>q</code>), a start-time range (<code>started_after</code>,
+      <code>started_before</code>, RFC 3339), a sort (<code>id</code>, the default, or <code>started</code> /
+      <code>updated</code>, newest first with a leading <code>-</code>) and offset/limit pagination. The response
+      carries <code>total</code> (matches after every filter, before pagination), <code>counts</code> (per
+      status, after every filter but the status one, for filter chips) and the namespace's workflow
+      <code>types</code>.
     </p>
     <pre data-lang="sh"><code>GET /api/workflows
 GET /api/workflows?status=RUNNING
+GET /api/workflows?type=OrderSaga&amp;started_after=2026-10-25T00:00:00Z&amp;sort=-started
 GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
     <pre data-lang="json"><code>{
   "total": 1,
   "offset": 0,
   "limit": 200,
+  "counts": {"WAITING": 1, "COMPLETED": 12},
+  "types": ["OrderSaga"],
   "workflows": [
     {
       "workflow_id": "OrderSaga-1752...-a1b2c3d4",
@@ -1294,6 +1300,22 @@ GET /api/workflows?q=order-42&amp;limit=50&amp;offset=100</code></pre>
 → {"workflow_id":"order-42","events":[{"event_id":"1","timestamp":"1729…","workflow_started":{"workflow_type":"OrderSaga",…}},…]}</code></pre>
     <p>The events exactly as recorded, in the protobuf JSON mapping: proto field names, 64-bit numbers and bytes
       (base64) as strings. <code>describe</code> is the replayed view; this is the raw one.</p>
+
+    <h3>Live changes</h3>
+    <pre data-lang="sh"><code>GET /api/events            (text/event-stream)
+event: hello      data: {"namespace":"default","time":"2026-10-25T09:00:00Z"}
+event: workflow   data: {"workflow_id":"order-42","status":"COMPLETED","history_length":9,…}
+event: workflow   data: {"workflow_id":"old-1","deleted":true}
+event: schedules  data: {}
+event: resync     data: {}</code></pre>
+    <p>Server-sent events for the request's namespace: a <code>workflow</code> event carries the workflow's new list row
+      (several changes to one workflow within 200 ms arrive as one), <code>schedules</code> says the schedules changed,
+      and <code>resync</code> says the stream fell behind and dropped changes, so reload the list. A comment line every
+      15 seconds keeps proxies from closing an idle stream, and the response sets <code>X-Accel-Buffering: no</code> so
+      nginx passes it through unbuffered. Browsers' <code>EventSource</code> cannot send an <code>Authorization</code>
+      header; read the stream with <code>fetch</code> when a token is needed (the dashboard does). It is a read, so
+      <code>--auth-public-reads</code> leaves it open. An engine serves at most 256 streams at once (<code>503</code>
+      beyond).</p>
 
     <h3>Backup</h3>
     <pre data-lang="sh"><code>curl -H "Authorization: Bearer $ENGINE_TOKEN" -o backup.tar.gz localhost:8233/api/admin/backup</code></pre>
@@ -1425,12 +1447,18 @@ rate(workflowd_leases_expired_total[5m]) > 0</code></pre>
     </p>
     <ul>
       <li>counts of total / active / completed / failed workflows,</li>
-      <li>a filterable workflow list that auto-refreshes every 2 seconds,</li>
-      <li>client-side search over workflow ids and types, plus per-status counts on the filter chips,</li>
+      <li>a live workflow list: it follows the engine over <code>GET /api/events</code> and updates only the rows
+        that changed, so your selection and scroll stay put (it falls back to polling every 5 seconds when the
+        stream is unavailable, and the <em>live</em> switch pauses it),</li>
+      <li>filters by status, workflow type, start time and namespace, and search over ids and types, all kept
+        in the URL,</li>
+      <li>a URL per workflow, <code>/workflows/&lt;id&gt;</code> (with <code>?namespace=</code>, <code>?run=</code>
+        and <code>?tab=</code>), so any view can be linked to and survives a reload,</li>
       <li>a dialog to start a workflow directly from the browser (type, optional id, input),</li>
-      <li>a detail view with the full step timeline rendered as woven weft picks — kinds, statuses,
-        attempt counts, per-step errors and outputs, and which signal a step is parked on,</li>
-      <li>actions to send a signal to, or terminate, a live workflow.</li>
+      <li>a detail view with the step timeline rendered as woven weft picks (kinds, statuses, attempts, errors,
+        outputs, the signal a step is parked on), the <em>card chain</em>: every recorded event in order, with
+        payloads shown readably (JSON pretty-printed, bytes that are not text as hex), and the workflow's runs,</li>
+      <li>actions to send a signal to, cancel or terminate a live workflow.</li>
     </ul>
     <p>It is plain HTML, CSS and vanilla JS — no build step, no npm, nothing to bundle.</p>
 
